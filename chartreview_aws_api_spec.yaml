@@ -1,0 +1,375 @@
+openapi: 3.0.3
+info:
+  title: ChartReview Pro - HIPAA Compliant PHI API
+  description: |
+    AWS backend API for storing and retrieving PHI data for ChartReview Pro.
+    All data stored here is subject to HIPAA compliance requirements.
+    Base44 frontend communicates with this API via authenticated requests.
+    A signed BAA with AWS must be in place before storing any PHI.
+  version: 1.0.0
+
+servers:
+  - url: https://api.chartreviewpro.com/v1
+    description: Production (AWS API Gateway)
+
+security:
+  - ApiKeyAuth: []
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+
+  schemas:
+    Patient:
+      type: object
+      properties:
+        aws_patient_id:
+          type: string
+          description: Internal UUID assigned by AWS — this is what Base44 stores
+        patient_name:
+          type: string
+        date_of_birth:
+          type: string
+          format: date
+        case_number:
+          type: string
+        notes:
+          type: string
+
+    Document:
+      type: object
+      properties:
+        aws_document_id:
+          type: string
+          description: Internal UUID assigned by AWS — this is what Base44 stores
+        aws_patient_id:
+          type: string
+        s3_key:
+          type: string
+          description: S3 object key (internal use only)
+        file_name:
+          type: string
+        provider_name:
+          type: string
+        document_date:
+          type: string
+          format: date
+        extracted_text:
+          type: string
+        case_number:
+          type: string
+        page_count:
+          type: integer
+        processing_status:
+          type: string
+          enum: [pending, processing, completed, failed]
+
+    MedicalSummary:
+      type: object
+      properties:
+        aws_summary_id:
+          type: string
+        aws_patient_id:
+          type: string
+        aws_document_ids:
+          type: array
+          items:
+            type: string
+        visits:
+          type: array
+          items:
+            type: object
+        summary_content:
+          type: string
+        header_note:
+          type: string
+        footer_note:
+          type: string
+        ime_note:
+          type: string
+        chart_review_note:
+          type: string
+        physical_examination_note:
+          type: string
+        discussion_note:
+          type: string
+        status:
+          type: string
+          enum: [draft, final]
+
+    PresignedUpload:
+      type: object
+      properties:
+        upload_url:
+          type: string
+          description: Pre-signed S3 URL for direct upload
+        aws_document_id:
+          type: string
+          description: The ID to store in Base44 after upload completes
+        expires_in:
+          type: integer
+          description: Seconds until the upload URL expires
+
+    PresignedDownload:
+      type: object
+      properties:
+        download_url:
+          type: string
+          description: Temporary pre-signed S3 URL for file access
+        expires_in:
+          type: integer
+
+paths:
+
+  # ─── PATIENTS ───────────────────────────────────────────────
+
+  /patients:
+    post:
+      summary: Create a new patient record
+      tags: [Patients]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Patient'
+      responses:
+        '201':
+          description: Patient created
+          content:
+            application/json:
+              schema:
+                properties:
+                  aws_patient_id:
+                    type: string
+
+  /patients/{aws_patient_id}:
+    get:
+      summary: Get patient record
+      tags: [Patients]
+      parameters:
+        - name: aws_patient_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Patient data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Patient'
+    put:
+      summary: Update patient record
+      tags: [Patients]
+      parameters:
+        - name: aws_patient_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Patient'
+      responses:
+        '200':
+          description: Updated
+    delete:
+      summary: Delete patient and all associated PHI
+      tags: [Patients]
+      parameters:
+        - name: aws_patient_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+
+  # ─── DOCUMENTS ──────────────────────────────────────────────
+
+  /documents/upload-url:
+    post:
+      summary: Get a pre-signed S3 upload URL
+      description: |
+        Base44 calls this first. Gets a presigned URL, uploads the file
+        directly to S3 from the browser, then stores aws_document_id in Base44.
+      tags: [Documents]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                aws_patient_id:
+                  type: string
+                file_name:
+                  type: string
+                file_type:
+                  type: string
+                file_size:
+                  type: integer
+      responses:
+        '200':
+          description: Pre-signed upload URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignedUpload'
+
+  /documents/{aws_document_id}:
+    get:
+      summary: Get document metadata and extracted text
+      tags: [Documents]
+      parameters:
+        - name: aws_document_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Document data including extracted text
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+    delete:
+      summary: Delete document from S3 and database
+      tags: [Documents]
+      parameters:
+        - name: aws_document_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+
+  /documents/{aws_document_id}/download-url:
+    get:
+      summary: Get a temporary pre-signed download URL
+      description: Returns a short-lived URL to view/download the file. Never store this URL.
+      tags: [Documents]
+      parameters:
+        - name: aws_document_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pre-signed download URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignedDownload'
+
+  /documents/{aws_document_id}/process:
+    post:
+      summary: Trigger OCR and text extraction
+      tags: [Documents]
+      parameters:
+        - name: aws_document_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Processing started
+
+  /patients/{aws_patient_id}/documents:
+    get:
+      summary: List all documents for a patient
+      tags: [Documents]
+      parameters:
+        - name: aws_patient_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Document'
+
+  # ─── MEDICAL SUMMARIES ──────────────────────────────────────
+
+  /summaries:
+    post:
+      summary: Create a medical summary
+      tags: [Summaries]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MedicalSummary'
+      responses:
+        '201':
+          description: Summary created
+          content:
+            application/json:
+              schema:
+                properties:
+                  aws_summary_id:
+                    type: string
+
+  /summaries/{aws_summary_id}:
+    get:
+      summary: Retrieve a medical summary
+      tags: [Summaries]
+      parameters:
+        - name: aws_summary_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Full summary with visits and notes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MedicalSummary'
+    put:
+      summary: Update a medical summary
+      tags: [Summaries]
+      parameters:
+        - name: aws_summary_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MedicalSummary'
+      responses:
+        '200':
+          description: Updated
+    delete:
+      summary: Delete a summary
+      tags: [Summaries]
+      parameters:
+        - name: aws_summary_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
