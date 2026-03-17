@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string"
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "Low",
+        "Medium",
+        "High"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "Pending",
+        "In Review",
+        "Approved",
+        "Rejected"
+      ]
+    },
+    "admin_notes": {
+      "type": "string"
+    }
+  },
+  "required": [],
+  "name": "Suggestion"
+}

@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "content": {
+      "type": "string"
+    },
+    "section": {
+      "type": "string"
+    }
+  },
+  "required": [],
+  "name": "NotesMacro"
+}
