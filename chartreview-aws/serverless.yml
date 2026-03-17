@@ -1,0 +1,267 @@
+service: chartreview-pro
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  stage: ${opt:stage, 'prod'}
+  environment:
+    PATIENTS_TABLE: ${self:service}-patients-${self:provider.stage}
+    DOCUMENTS_TABLE: ${self:service}-documents-${self:provider.stage}
+    SUMMARIES_TABLE: ${self:service}-summaries-${self:provider.stage}
+    S3_BUCKET: ${self:service}-files-${self:provider.stage}
+    API_KEY: ${ssm:/chartreview/api-key}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-patients-${self:provider.stage}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-documents-${self:provider.stage}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-summaries-${self:provider.stage}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-documents-${self:provider.stage}/index/*
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-summaries-${self:provider.stage}/index/*
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+          Resource: arn:aws:s3:::${self:service}-files-${self:provider.stage}/*
+        - Effect: Allow
+          Action:
+            - textract:StartDocumentTextDetection
+            - textract:GetDocumentTextDetection
+          Resource: "*"
+
+functions:
+  # ── AUTH MIDDLEWARE (applied to all functions via layer) ──
+  
+  # ── PATIENTS ──
+  createPatient:
+    handler: src/handlers/patients.create
+    events:
+      - http:
+          path: /patients
+          method: post
+          cors: true
+
+  getPatient:
+    handler: src/handlers/patients.get
+    events:
+      - http:
+          path: /patients/{aws_patient_id}
+          method: get
+          cors: true
+
+  updatePatient:
+    handler: src/handlers/patients.update
+    events:
+      - http:
+          path: /patients/{aws_patient_id}
+          method: put
+          cors: true
+
+  deletePatient:
+    handler: src/handlers/patients.remove
+    events:
+      - http:
+          path: /patients/{aws_patient_id}
+          method: delete
+          cors: true
+
+  # ── DOCUMENTS ──
+  getUploadUrl:
+    handler: src/handlers/documents.getUploadUrl
+    events:
+      - http:
+          path: /documents/upload-url
+          method: post
+          cors: true
+
+  getDocument:
+    handler: src/handlers/documents.get
+    events:
+      - http:
+          path: /documents/{aws_document_id}
+          method: get
+          cors: true
+
+  deleteDocument:
+    handler: src/handlers/documents.remove
+    events:
+      - http:
+          path: /documents/{aws_document_id}
+          method: delete
+          cors: true
+
+  getDownloadUrl:
+    handler: src/handlers/documents.getDownloadUrl
+    events:
+      - http:
+          path: /documents/{aws_document_id}/download-url
+          method: get
+          cors: true
+
+  processDocument:
+    handler: src/handlers/documents.process
+    events:
+      - http:
+          path: /documents/{aws_document_id}/process
+          method: post
+          cors: true
+
+  listPatientDocuments:
+    handler: src/handlers/documents.listByPatient
+    events:
+      - http:
+          path: /patients/{aws_patient_id}/documents
+          method: get
+          cors: true
+
+  # ── SUMMARIES ──
+  createSummary:
+    handler: src/handlers/summaries.create
+    events:
+      - http:
+          path: /summaries
+          method: post
+          cors: true
+
+  getSummary:
+    handler: src/handlers/summaries.get
+    events:
+      - http:
+          path: /summaries/{aws_summary_id}
+          method: get
+          cors: true
+
+  updateSummary:
+    handler: src/handlers/summaries.update
+    events:
+      - http:
+          path: /summaries/{aws_summary_id}
+          method: put
+          cors: true
+
+  deleteSummary:
+    handler: src/handlers/summaries.remove
+    events:
+      - http:
+          path: /summaries/{aws_summary_id}
+          method: delete
+          cors: true
+
+resources:
+  Resources:
+
+    # ── DYNAMODB TABLES ──
+    PatientsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-patients-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          SSEEnabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: aws_patient_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: aws_patient_id
+            KeyType: HASH
+
+    DocumentsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-documents-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          SSEEnabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: aws_document_id
+            AttributeType: S
+          - AttributeName: aws_patient_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: aws_document_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: patient-index
+            KeySchema:
+              - AttributeName: aws_patient_id
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    SummariesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-summaries-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          SSEEnabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: aws_summary_id
+            AttributeType: S
+          - AttributeName: aws_patient_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: aws_summary_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: patient-index
+            KeySchema:
+              - AttributeName: aws_patient_id
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    # ── S3 BUCKET ──
+    DocumentsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-files-${self:provider.stage}
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: aws:kms
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        VersioningConfiguration:
+          Status: Enabled
+        LifecycleConfiguration:
+          Rules:
+            - Id: DeleteIncompleteMultipartUploads
+              Status: Enabled
+              AbortIncompleteMultipartUpload:
+                DaysAfterInitiation: 1
+        LoggingConfiguration:
+          DestinationBucketName: !Ref AccessLogsBucket
+          LogFilePrefix: document-access-logs/
+
+    AccessLogsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-access-logs-${self:provider.stage}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true

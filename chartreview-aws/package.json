@@ -1,0 +1,22 @@
+{
+  "name": "chartreview-pro-api",
+  "version": "1.0.0",
+  "description": "HIPAA-compliant PHI backend for ChartReview Pro",
+  "main": "index.js",
+  "scripts": {
+    "deploy": "serverless deploy --stage prod",
+    "deploy:dev": "serverless deploy --stage dev",
+    "remove": "serverless remove --stage prod"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/s3-request-presigner": "^3.0.0",
+    "@aws-sdk/client-textract": "^3.0.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "serverless": "^3.0.0"
+  }
+}
