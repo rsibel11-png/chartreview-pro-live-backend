@@ -3,22 +3,22 @@ import { useState, useEffect, useCallback } from "react";
 import { callFunction } from "@/api/functions";
 
 async function awsGet(path) {
-  const data = await callFunction("awsProxy", { method: "GET", path });
+  const data = await callFunction({ function_name: "awsProxy", payload: { method: "GET", path } });
   return data;
 }
 
 async function awsPost(path, body) {
-  const data = await callFunction("awsProxy", { method: "POST", path, payload: body });
+  const data = await callFunction({ function_name: "awsProxy", payload: { method: "POST", path, payload: body } });
   return data;
 }
 
 async function awsPut(path, body) {
-  const data = await callFunction("awsProxy", { method: "PUT", path, payload: body });
+  const data = await callFunction({ function_name: "awsProxy", payload: { method: "PUT", path, payload: body } });
   return data;
 }
 
 async function awsDelete(path) {
-  const data = await callFunction("awsProxy", { method: "DELETE", path });
+  const data = await callFunction({ function_name: "awsProxy", payload: { method: "DELETE", path } });
   return data;
 }
 
