@@ -1,44 +1,25 @@
 
 import { useState, useEffect, useCallback } from "react";
-
-const API_URL = import.meta.env.VITE_AWS_API_URL || "https://1h4kpspbs6.execute-api.us-east-1.amazonaws.com/prod";
-const API_KEY = import.meta.env.VITE_AWS_API_KEY || "";
+import { callFunction } from "@/api/functions";
 
 async function awsGet(path) {
-  const res = await fetch(`${API_URL}${path}`, {
-    headers: { "x-api-key": API_KEY }
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  const data = await callFunction("awsProxy", { method: "GET", path });
+  return data;
 }
 
 async function awsPost(path, body) {
-  const res = await fetch(`${API_URL}${path}`, {
-    method: "POST",
-    headers: { "x-api-key": API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  const data = await callFunction("awsProxy", { method: "POST", path, payload: body });
+  return data;
 }
 
 async function awsPut(path, body) {
-  const res = await fetch(`${API_URL}${path}`, {
-    method: "PUT",
-    headers: { "x-api-key": API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  const data = await callFunction("awsProxy", { method: "PUT", path, payload: body });
+  return data;
 }
 
 async function awsDelete(path) {
-  const res = await fetch(`${API_URL}${path}`, {
-    method: "DELETE",
-    headers: { "x-api-key": API_KEY }
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  const data = await callFunction("awsProxy", { method: "DELETE", path });
+  return data;
 }
 
 // ─── Shared Components ────────────────────────────────────────────────────────
@@ -434,7 +415,7 @@ function Documents() {
   const [showUpload, setShowUpload] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [filterName, setFilterName] = useState("");
-  const [uploadForm, setUploadForm] = useState({ patient_name: "", title: "", category: "Medical Records", document_date: "" });
+  const [uploadForm, setUploadForm] = useState({ patient_name: "", title: "", category: "Medical Records" });
   const [file, setFile] = useState(null);
 
   const categories = ["Medical Records", "Imaging", "Lab Results", "Operative Notes", "Discharge Summary", "Consultation", "Physical Therapy", "Mental Health", "Legal", "Other"];
@@ -444,28 +425,38 @@ function Documents() {
     if (!uploadForm.patient_name.trim()) return alert("Please enter a patient name or file label.");
     setUploading(true);
     try {
-      const nameParts = uploadForm.patient_name.trim().split(" ");
-      const firstName = nameParts[0] || uploadForm.patient_name.trim();
-      const lastName = nameParts.slice(1).join(" ") || "";
+      // Create patient record in AWS
+      const pRes = await awsPost("/patients", { patient_name: uploadForm.patient_name.trim() }).catch(() => ({}));
+      const awsPatientId = pRes?.aws_patient_id || "unknown";
 
-      const pRes = await awsPost("/patients", { first_name: firstName, last_name: lastName }).catch(() => ({ id: "unknown" }));
-      const patientId = pRes?.id || pRes?.patient?.id || "unknown";
-
+      // Get presigned S3 upload URL
       const uploadData = await awsPost("/documents/upload-url", {
-        patient_id: patientId,
+        aws_patient_id: awsPatientId,
         patient_name: uploadForm.patient_name.trim(),
         file_name: file.name,
-        file_type: file.type,
+        file_type: file.type || "application/octet-stream",
+        file_size: file.size,
         title: uploadForm.title || file.name,
         category: uploadForm.category,
-        document_date: uploadForm.document_date,
       });
-      await fetch(uploadData.upload_url, { method: "PUT", body: file, headers: { "Content-Type": file.type } });
-      await awsPost(`/documents/${uploadData.document_id}/process`, {}).catch(() => {});
-      alert("Document uploaded and processing started!");
+
+      if (!uploadData.upload_url) throw new Error("Failed to get upload URL from server");
+
+      // Upload file directly to S3 via presigned URL
+      const s3Res = await fetch(uploadData.upload_url, {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type || "application/octet-stream" }
+      });
+      if (!s3Res.ok) throw new Error("S3 upload failed: " + s3Res.status);
+
+      // Trigger OCR processing
+      await awsPost(`/documents/${uploadData.aws_document_id}/process`, {}).catch(() => {});
+
+      alert("Document uploaded successfully! Processing started.");
       setShowUpload(false);
       setFile(null);
-      setUploadForm({ patient_name: "", title: "", category: "Medical Records", document_date: "" });
+      setUploadForm({ patient_name: "", title: "", category: "Medical Records" });
     } catch (e) { alert("Upload failed: " + e.message); }
     setUploading(false);
   };
@@ -530,7 +521,6 @@ function Documents() {
           <Input label="Document Title" value={uploadForm.title} onChange={v => setUploadForm(f => ({ ...f, title: v }))} placeholder="Leave blank to use filename" />
           <Select label="Category" value={uploadForm.category} onChange={v => setUploadForm(f => ({ ...f, category: v }))}
             options={categories.map(c => ({ value: c, label: c }))} />
-          <Input label="Document Date" type="date" value={uploadForm.document_date} onChange={v => setUploadForm(f => ({ ...f, document_date: v }))} />
           <div style={{ marginBottom: 16 }}>
             <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#374151", marginBottom: 6 }}>File *</label>
             <input type="file" accept=".pdf,.jpg,.jpeg,.png,.tiff" onChange={e => setFile(e.target.files[0])}
