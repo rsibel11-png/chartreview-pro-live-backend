@@ -1,9 +1,16 @@
-const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
-const { validateApiKey } = require('./auth');
+let initError = null;
+let DynamoDBClient, DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, ScanCommand, validateApiKey;
 
-const client = new DynamoDBClient({});
-const dynamo = DynamoDBDocumentClient.from(client);
+try {
+  ({ DynamoDBClient } = require('@aws-sdk/client-dynamodb'));
+  ({ DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb'));
+  ({ validateApiKey } = require('./auth'));
+} catch (e) {
+  initError = e.message;
+}
+
+const client = initError ? null : new DynamoDBClient({});
+const dynamo = initError ? null : DynamoDBDocumentClient.from(client);
 const TABLE = process.env.PATIENTS_TABLE;
 
 const response = (statusCode, body) => ({
@@ -20,7 +27,17 @@ const sanitize = (item) => {
   return out;
 };
 
+const debugHandler = async (event) => {
+  return response(200, {
+    initError,
+    TABLE,
+    nodeVersion: process.version,
+    env: Object.keys(process.env).filter(k => !k.includes('AWS_SECRET')),
+  });
+};
+
 const listHandler = async (event) => {
+  if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
     const result = await dynamo.send(new ScanCommand({ TableName: TABLE }));
     const patients = (result.Items || [])
@@ -34,6 +51,7 @@ const listHandler = async (event) => {
 };
 
 const createHandler = async (event) => {
+  if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
     const data = JSON.parse(event.body || '{}');
     const aws_patient_id = crypto.randomUUID();
@@ -51,6 +69,7 @@ const createHandler = async (event) => {
 };
 
 const getHandler = async (event) => {
+  if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
     const { aws_patient_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_patient_id } }));
@@ -63,6 +82,7 @@ const getHandler = async (event) => {
 };
 
 const updateHandler = async (event) => {
+  if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
     const { aws_patient_id } = event.pathParameters;
     const data = JSON.parse(event.body || '{}');
@@ -89,6 +109,7 @@ const updateHandler = async (event) => {
 };
 
 const removeHandler = async (event) => {
+  if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
     const { aws_patient_id } = event.pathParameters;
     await dynamo.send(new DeleteCommand({ TableName: TABLE, Key: { aws_patient_id } }));
@@ -100,9 +121,10 @@ const removeHandler = async (event) => {
 };
 
 module.exports = {
-  list: validateApiKey(listHandler),
-  create: validateApiKey(createHandler),
-  get: validateApiKey(getHandler),
-  update: validateApiKey(updateHandler),
-  remove: validateApiKey(removeHandler),
+  debug: debugHandler,
+  list: validateApiKey ? validateApiKey(listHandler) : listHandler,
+  create: validateApiKey ? validateApiKey(createHandler) : createHandler,
+  get: validateApiKey ? validateApiKey(getHandler) : getHandler,
+  update: validateApiKey ? validateApiKey(updateHandler) : updateHandler,
+  remove: validateApiKey ? validateApiKey(removeHandler) : removeHandler,
 };
