@@ -253,6 +253,17 @@ resources:
         LoggingConfiguration:
           DestinationBucketName: !Ref AccessLogsBucket
           LogFilePrefix: document-access-logs/
+        CorsConfiguration:
+          CorsRules:
+            - AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - PUT
+                - GET
+                - HEAD
+              MaxAge: 3000
 
     AccessLogsBucket:
       Type: AWS::S3::Bucket
