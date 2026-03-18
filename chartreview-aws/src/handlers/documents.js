@@ -21,20 +21,34 @@ const getUploadUrlHandler = async (event) => {
     const data = JSON.parse(event.body || '{}');
     const aws_document_id = crypto.randomUUID();
     const key = 'documents/' + aws_document_id + '/' + data.file_name;
-    const command = new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: data.content_type || 'application/octet-stream' });
-    const upload_url = await getSignedUrl(s3, command, { expiresIn: 300 });
+    const contentType = data.content_type || 'application/octet-stream';
+
+    // Use unhoistableHeaders to prevent checksum headers being added to presigned URL
+    const command = new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: key,
+      ContentType: contentType,
+    });
+    const upload_url = await getSignedUrl(s3, command, {
+      expiresIn: 300,
+      unhoistableHeaders: new Set(['x-amz-checksum-crc32', 'x-amz-sdk-checksum-algorithm']),
+    });
+
     const now = new Date().toISOString();
     const item = {
       aws_document_id,
-      aws_patient_id: data.aws_patient_id || null,
-      patient_name: data.patient_name || null,
       file_name: data.file_name,
       file_key: key,
-      content_type: data.content_type || 'application/octet-stream',
+      content_type: contentType,
       status: 'uploaded',
       created_at: now,
-      updated_at: now
+      updated_at: now,
     };
+    if (data.aws_patient_id) item.aws_patient_id = data.aws_patient_id;
+    if (data.patient_name) item.patient_name = data.patient_name;
+    if (data.title) item.title = data.title;
+    if (data.category) item.category = data.category;
+
     await dynamo.send(new PutCommand({ TableName: TABLE, Item: item }));
     return response(200, { aws_document_id, upload_url });
   } catch (err) {
