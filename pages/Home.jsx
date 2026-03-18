@@ -948,7 +948,9 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
 
   useEffect(() => {
-    User.me().then(u => { setCurrentUser(u); setAuthLoading(false); }).catch(() => { setAuthLoading(false); });
+    User.me()
+      .then(u => { setCurrentUser(u || null); setAuthLoading(false); })
+      .catch(() => { setCurrentUser(null); setAuthLoading(false); });
   }, []);
 
   const navigate = (p) => setPage(p);
@@ -981,7 +983,7 @@ export default function App() {
         <div style={{ fontSize: 40, marginBottom: 16 }}>🏥</div>
         <h2 style={{ margin: "0 0 8px", color: "#1e3a5f", fontSize: 22 }}>ChartReview Pro</h2>
         <p style={{ color: "#64748b", marginBottom: 24, fontSize: 14 }}>HIPAA-compliant document management</p>
-        <a href={`https://app.base44.com/login?redirect=${encodeURIComponent(window.location.href)}`}
+        <a href={`/login?redirect=${encodeURIComponent(window.location.href)}`}
           style={{ display: "inline-block", background: "#1e3a5f", color: "#fff", padding: "12px 32px", borderRadius: 8, textDecoration: "none", fontWeight: 600, fontSize: 15 }}>
           Sign In
         </a>

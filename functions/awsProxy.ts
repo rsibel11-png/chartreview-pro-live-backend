@@ -5,13 +5,8 @@ const AWS_API_KEY = Deno.env.get("AWS_API_KEY") || "";
 
 Deno.serve(async (req) => {
   try {
-    console.log("[awsProxy] Request received");
-    console.log("[awsProxy] AWS_API_URL:", AWS_API_URL);
-    console.log("[awsProxy] AWS_API_KEY set:", !!AWS_API_KEY);
-
     const base44 = createClientFromRequest(req);
     const user = await base44.auth.me();
-    console.log("[awsProxy] User:", user ? user.email : "null");
 
     if (!user) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
@@ -27,7 +22,6 @@ Deno.serve(async (req) => {
     }
 
     const url = `${AWS_API_URL}${path}`;
-    console.log("[awsProxy] Fetching:", url);
 
     const fetchOptions: RequestInit = {
       method,
@@ -43,7 +37,7 @@ Deno.serve(async (req) => {
 
     const res = await fetch(url, fetchOptions);
     const text = await res.text();
-    console.log("[awsProxy] AWS response status:", res.status, "body:", text.substring(0, 200));
+    console.log("[awsProxy] AWS status:", res.status, "body:", text.substring(0, 300));
 
     let data;
     try {
@@ -52,7 +46,13 @@ Deno.serve(async (req) => {
       data = { raw: text };
     }
 
-    return Response.json(data, { status: res.status });
+    // Always return 200 to callFunction — embed the real status in the response
+    // so the frontend doesn't get errors for 201, 204, etc.
+    if (res.status >= 200 && res.status < 300) {
+      return Response.json(data, { status: 200 });
+    } else {
+      return Response.json({ error: data?.error || data?.message || text, aws_status: res.status }, { status: res.status });
+    }
   } catch (error) {
     console.error("[awsProxy] Error:", error.message);
     return Response.json({ error: error.message }, { status: 500 });
