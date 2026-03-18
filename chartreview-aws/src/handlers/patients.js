@@ -8,20 +8,15 @@ const TABLE = process.env.PATIENTS_TABLE;
 
 const response = (statusCode, body) => ({
   statusCode,
-  headers: {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  },
+  headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
   body: JSON.stringify(body),
 });
 
-// POST /patients
 const createHandler = async (event) => {
   try {
     const data = JSON.parse(event.body || '{}');
     const aws_patient_id = crypto.randomUUID();
     const now = new Date().toISOString();
-
     const item = {
       aws_patient_id,
       patient_name: data.patient_name,
@@ -29,41 +24,33 @@ const createHandler = async (event) => {
       case_number: data.case_number || null,
       notes: data.notes || null,
       created_at: now,
-      updated_at: now,
+      updated_at: now
     };
-
     await dynamo.send(new PutCommand({ TableName: TABLE, Item: item }));
     return response(201, { aws_patient_id });
   } catch (err) {
-    console.error(err);
-    return response(500, { error: 'Failed to create patient' });
+    console.error('createPatient error:', err);
+    return response(500, { error: err.message || 'Failed to create patient' });
   }
 };
 
-// GET /patients/{aws_patient_id}
 const getHandler = async (event) => {
   try {
     const { aws_patient_id } = event.pathParameters;
-    const result = await dynamo.send(new GetCommand({
-      TableName: TABLE,
-      Key: { aws_patient_id },
-    }));
-
+    const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_patient_id } }));
     if (!result.Item) return response(404, { error: 'Patient not found' });
     return response(200, result.Item);
   } catch (err) {
-    console.error(err);
-    return response(500, { error: 'Failed to get patient' });
+    console.error('getPatient error:', err);
+    return response(500, { error: err.message || 'Failed to get patient' });
   }
 };
 
-// PUT /patients/{aws_patient_id}
 const updateHandler = async (event) => {
   try {
     const { aws_patient_id } = event.pathParameters;
     const data = JSON.parse(event.body || '{}');
     const now = new Date().toISOString();
-
     await dynamo.send(new UpdateCommand({
       TableName: TABLE,
       Key: { aws_patient_id },
@@ -73,29 +60,24 @@ const updateHandler = async (event) => {
         ':d': data.date_of_birth || null,
         ':c': data.case_number || null,
         ':nt': data.notes || null,
-        ':u': now,
-      },
+        ':u': now
+      }
     }));
-
     return response(200, { message: 'Patient updated' });
   } catch (err) {
-    console.error(err);
-    return response(500, { error: 'Failed to update patient' });
+    console.error('updatePatient error:', err);
+    return response(500, { error: err.message || 'Failed to update patient' });
   }
 };
 
-// DELETE /patients/{aws_patient_id}
 const removeHandler = async (event) => {
   try {
     const { aws_patient_id } = event.pathParameters;
-    await dynamo.send(new DeleteCommand({
-      TableName: TABLE,
-      Key: { aws_patient_id },
-    }));
-    return response(204, {});
+    await dynamo.send(new DeleteCommand({ TableName: TABLE, Key: { aws_patient_id } }));
+    return response(200, { message: 'Patient deleted' });
   } catch (err) {
-    console.error(err);
-    return response(500, { error: 'Failed to delete patient' });
+    console.error('deletePatient error:', err);
+    return response(500, { error: err.message || 'Failed to delete patient' });
   }
 };
 
