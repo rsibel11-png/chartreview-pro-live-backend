@@ -983,7 +983,7 @@ export default function App() {
         <div style={{ fontSize: 40, marginBottom: 16 }}>🏥</div>
         <h2 style={{ margin: "0 0 8px", color: "#1e3a5f", fontSize: 22 }}>ChartReview Pro</h2>
         <p style={{ color: "#64748b", marginBottom: 24, fontSize: 14 }}>HIPAA-compliant document management</p>
-        <a href={`/login?redirect=${encodeURIComponent(window.location.href)}`}
+        <a href={`https://friday-app-3f4e9d76.base44.app/login`}
           style={{ display: "inline-block", background: "#1e3a5f", color: "#fff", padding: "12px 32px", borderRadius: 8, textDecoration: "none", fontWeight: 600, fontSize: 15 }}>
           Sign In
         </a>
