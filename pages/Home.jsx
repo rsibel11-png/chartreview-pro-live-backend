@@ -423,62 +423,56 @@ function PatientDetail({ patient, onNav, onBack }) {
   );
 }
 
+
 // ─── Documents ────────────────────────────────────────────────────────────────
 
 function Documents() {
   const [documents, setDocuments] = useState([]);
-  const [patients, setPatients] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [allDocuments, setAllDocuments] = useState([]);
+  const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState(null);
-  const [uploadForm, setUploadForm] = useState({ patient_id: "", title: "", category: "Medical Records", document_date: "" });
+  const [filterName, setFilterName] = useState("");
+  const [uploadForm, setUploadForm] = useState({ patient_name: "", title: "", category: "Medical Records", document_date: "" });
   const [file, setFile] = useState(null);
 
   const categories = ["Medical Records", "Imaging", "Lab Results", "Operative Notes", "Discharge Summary", "Consultation", "Physical Therapy", "Mental Health", "Legal", "Other"];
 
-  const load = useCallback(() => {
-    setLoading(true);
-    Promise.all([
-      awsGet("/patients").catch(() => ({ patients: [] })),
-    ]).then(([pData]) => {
-      setPatients(pData.patients || []);
-      setLoading(false);
-    });
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
   const uploadDoc = async () => {
     if (!file) return alert("Please select a file.");
-    if (!uploadForm.patient_id) return alert("Please select a patient.");
+    if (!uploadForm.patient_name.trim()) return alert("Please enter a patient name or file label.");
     setUploading(true);
     try {
-      // Get presigned upload URL
-      const ext = file.name.split(".").pop();
+      const nameParts = uploadForm.patient_name.trim().split(" ");
+      const firstName = nameParts[0] || uploadForm.patient_name.trim();
+      const lastName = nameParts.slice(1).join(" ") || "";
+
+      const pRes = await awsPost("/patients", { first_name: firstName, last_name: lastName }).catch(() => ({ id: "unknown" }));
+      const patientId = pRes?.id || pRes?.patient?.id || "unknown";
+
       const uploadData = await awsPost("/documents/upload-url", {
-        patient_id: uploadForm.patient_id,
+        patient_id: patientId,
+        patient_name: uploadForm.patient_name.trim(),
         file_name: file.name,
         file_type: file.type,
         title: uploadForm.title || file.name,
         category: uploadForm.category,
         document_date: uploadForm.document_date,
       });
-      // Upload directly to S3
       await fetch(uploadData.upload_url, { method: "PUT", body: file, headers: { "Content-Type": file.type } });
-      // Trigger processing
-      await awsPost(`/documents/${uploadData.document_id}/process`, {});
+      await awsPost(`/documents/${uploadData.document_id}/process`, {}).catch(() => {});
       alert("Document uploaded and processing started!");
       setShowUpload(false);
       setFile(null);
+      setUploadForm({ patient_name: "", title: "", category: "Medical Records", document_date: "" });
     } catch (e) { alert("Upload failed: " + e.message); }
     setUploading(false);
   };
 
-  const loadPatientDocs = async (patientId) => {
-    const d = await awsGet(`/patients/${patientId}/documents`).catch(() => ({ documents: [] }));
-    setDocuments(d.documents || []);
-  };
+  const filtered = allDocuments.filter(d =>
+    !filterName || (d.patient_name || d.title || "").toLowerCase().includes(filterName.toLowerCase())
+  );
 
   return (
     <div style={{ padding: 32 }}>
@@ -486,23 +480,32 @@ function Documents() {
         action={<Btn onClick={() => setShowUpload(true)}>+ Upload Document</Btn>} />
 
       <Card style={{ marginBottom: 20 }}>
-        <Select label="Filter by Patient" value={uploadForm.patient_id}
-          onChange={v => { setUploadForm(f => ({ ...f, patient_id: v })); if (v) loadPatientDocs(v); else setDocuments([]); }}
-          options={[{ value: "", label: "Select a patient..." }, ...patients.map(p => ({ value: p.id, label: `${p.first_name} ${p.last_name}` }))]} />
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <input
+            value={filterName}
+            onChange={e => setFilterName(e.target.value)}
+            placeholder="Filter by patient name or title..."
+            style={{ flex: 1, padding: "9px 12px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, outline: "none" }}
+          />
+          {filterName && <Btn onClick={() => setFilterName("")} variant="secondary">Clear</Btn>}
+        </div>
       </Card>
 
-      {loading ? <Loading /> : documents.length === 0 ? (
-        <Empty message={uploadForm.patient_id ? "No documents for this patient" : "Select a patient to view their documents"}
-          action={<Btn onClick={() => setShowUpload(true)}>Upload Document</Btn>} />
+      {loading ? <Loading /> : allDocuments.length === 0 ? (
+        <Empty message="No documents uploaded yet"
+          action={<Btn onClick={() => setShowUpload(true)}>Upload First Document</Btn>} />
+      ) : filtered.length === 0 ? (
+        <Empty message={`No documents matching "${filterName}"`} action={<Btn onClick={() => setFilterName("")} variant="secondary">Clear Filter</Btn>} />
       ) : (
         <div style={{ display: "grid", gap: 12 }}>
-          {documents.map(d => (
+          {filtered.map(d => (
             <Card key={d.id}>
               <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
                 <div style={{ fontSize: 28 }}>📄</div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 15, fontWeight: 600 }}>{d.title || d.file_name}</div>
                   <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>
+                    {d.patient_name && <span style={{ marginRight: 8 }}>👤 {d.patient_name}</span>}
                     {d.category} · {d.document_date || "No date"} · <Badge text={d.processing_status || "Pending"} color={d.processing_status === "completed" ? "#10b981" : "#f59e0b"} bg={d.processing_status === "completed" ? "#d1fae5" : "#fef3c7"} />
                   </div>
                 </div>
@@ -517,8 +520,13 @@ function Documents() {
 
       {showUpload && (
         <Modal title="Upload Document" onClose={() => setShowUpload(false)}>
-          <Select label="Patient *" value={uploadForm.patient_id} onChange={v => setUploadForm(f => ({ ...f, patient_id: v }))}
-            options={[{ value: "", label: "Select patient..." }, ...patients.map(p => ({ value: p.id, label: `${p.first_name} ${p.last_name}` }))]} />
+          <Input
+            label="Patient Name / File Label *"
+            value={uploadForm.patient_name}
+            onChange={v => setUploadForm(f => ({ ...f, patient_name: v }))}
+            placeholder="e.g. John Smith or Case 2024-001"
+            required
+          />
           <Input label="Document Title" value={uploadForm.title} onChange={v => setUploadForm(f => ({ ...f, title: v }))} placeholder="Leave blank to use filename" />
           <Select label="Category" value={uploadForm.category} onChange={v => setUploadForm(f => ({ ...f, category: v }))}
             options={categories.map(c => ({ value: c, label: c }))} />
@@ -538,6 +546,7 @@ function Documents() {
       {selectedDoc && (
         <Modal title={selectedDoc.title || selectedDoc.file_name} onClose={() => setSelectedDoc(null)} width={800}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+            {selectedDoc.patient_name && <div><span style={{ fontSize: 12, color: "#64748b" }}>Patient</span><div style={{ fontWeight: 500 }}>{selectedDoc.patient_name}</div></div>}
             <div><span style={{ fontSize: 12, color: "#64748b" }}>Category</span><div style={{ fontWeight: 500 }}>{selectedDoc.category}</div></div>
             <div><span style={{ fontSize: 12, color: "#64748b" }}>Status</span><div style={{ fontWeight: 500 }}>{selectedDoc.processing_status}</div></div>
             <div><span style={{ fontSize: 12, color: "#64748b" }}>Date</span><div style={{ fontWeight: 500 }}>{selectedDoc.document_date || "—"}</div></div>
