@@ -1,27 +1,27 @@
 
 import { useState, useEffect, useCallback } from "react";
-import { callFunction } from "@/api/functions";
 import { User } from "@/api/entities";
 
-async function awsGet(path) {
-  const data = await callFunction({ function_name: "awsProxy", payload: { method: "GET", path } });
-  return data;
+const AGENT_APP_ID = "69b9a5757ec74058e54fce34";
+
+async function awsProxy(method, path, body) {
+  const res = await fetch(`https://api.base44.com/api/apps/${AGENT_APP_ID}/functions/awsProxy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ method, path, payload: body }),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.statusText);
+    throw new Error("Request failed with status code " + res.status + ": " + err.substring(0, 200));
+  }
+  return res.json();
 }
 
-async function awsPost(path, body) {
-  const data = await callFunction({ function_name: "awsProxy", payload: { method: "POST", path, payload: body } });
-  return data;
-}
-
-async function awsPut(path, body) {
-  const data = await callFunction({ function_name: "awsProxy", payload: { method: "PUT", path, payload: body } });
-  return data;
-}
-
-async function awsDelete(path) {
-  const data = await callFunction({ function_name: "awsProxy", payload: { method: "DELETE", path } });
-  return data;
-}
+async function awsGet(path) { return awsProxy("GET", path); }
+async function awsPost(path, body) { return awsProxy("POST", path, body); }
+async function awsPut(path, body) { return awsProxy("PUT", path, body); }
+async function awsDelete(path) { return awsProxy("DELETE", path); }
 
 // ─── Shared Components ────────────────────────────────────────────────────────
 
