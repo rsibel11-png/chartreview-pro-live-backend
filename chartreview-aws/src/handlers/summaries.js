@@ -1,6 +1,5 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
-const { v4: uuidv4 } = require('uuid');
 const { validateApiKey } = require('./auth');
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -19,7 +18,7 @@ const response = (statusCode, body) => ({
 const createHandler = async (event) => {
   try {
     const data = JSON.parse(event.body || '{}');
-    const aws_summary_id = uuidv4();
+    const aws_summary_id = crypto.randomUUID();
     const now = new Date().toISOString();
 
     const item = {

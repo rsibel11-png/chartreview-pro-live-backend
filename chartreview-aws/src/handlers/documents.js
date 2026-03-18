@@ -3,7 +3,6 @@ const { DynamoDBDocumentClient, PutCommand, GetCommand, DeleteCommand, QueryComm
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { TextractClient, StartDocumentTextDetectionCommand, GetDocumentTextDetectionCommand } = require('@aws-sdk/client-textract');
-const { v4: uuidv4 } = require('uuid');
 const { validateApiKey } = require('./auth');
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -26,7 +25,7 @@ const response = (statusCode, body) => ({
 const getUploadUrlHandler = async (event) => {
   try {
     const data = JSON.parse(event.body || '{}');
-    const aws_document_id = uuidv4();
+    const aws_document_id = crypto.randomUUID();
     const s3_key = `documents/${aws_document_id}/${data.file_name}`;
     const now = new Date().toISOString();
 
