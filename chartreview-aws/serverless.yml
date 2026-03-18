@@ -4,7 +4,7 @@ frameworkVersion: '3'
 
 provider:
   name: aws
-  runtime: nodejs18.x
+  runtime: nodejs20.x
   region: us-east-1
   stage: ${opt:stage, 'prod'}
   environment:
@@ -12,7 +12,7 @@ provider:
     DOCUMENTS_TABLE: ${self:service}-documents-${self:provider.stage}
     SUMMARIES_TABLE: ${self:service}-summaries-${self:provider.stage}
     S3_BUCKET: ${self:service}-files-${self:provider.stage}
-    API_KEY: ${ssm:/chartreview/api-key}
+    API_KEY: "ChartReview#2026$ProdKey!Rx"
   iam:
     role:
       statements:
@@ -43,8 +43,6 @@ provider:
           Resource: "*"
 
 functions:
-  # ── AUTH MIDDLEWARE (applied to all functions via layer) ──
-  
   # ── PATIENTS ──
   createPatient:
     handler: src/handlers/patients.create
