@@ -3,9 +3,7 @@ const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCom
 const { validateApiKey } = require('./auth');
 
 const client = new DynamoDBClient({});
-const dynamo = DynamoDBDocumentClient.from(client, {
-  marshallOptions: { removeUndefinedValues: true, convertClassInstanceToMap: true },
-});
+const dynamo = DynamoDBDocumentClient.from(client);
 const TABLE = process.env.PATIENTS_TABLE;
 
 const response = (statusCode, body) => ({
