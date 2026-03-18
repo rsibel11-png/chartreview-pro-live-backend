@@ -209,7 +209,7 @@ function Dashboard({ onNav }) {
                   <div key={p.id} onClick={() => onNav("patients")} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid #f1f5f9", cursor: "pointer" }}>
                     <div style={{ width: 36, height: 36, borderRadius: "50%", background: "#1e3a5f20", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>👤</div>
                     <div>
-                      <div style={{ fontSize: 14, fontWeight: 500 }}>{p.first_name} {p.last_name}</div>
+                      <div style={{ fontSize: 14, fontWeight: 500 }}>{p.patient_name}</div>
                       <div style={{ fontSize: 12, color: "#94a3b8" }}>DOB: {p.date_of_birth || "—"}</div>
                     </div>
                   </div>
@@ -244,7 +244,7 @@ function Patients({ onNav, setSelectedPatient }) {
   const [search, setSearch] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ first_name: "", last_name: "", date_of_birth: "", gender: "", case_number: "", provider_name: "", notes: "" });
+  const [form, setForm] = useState({ patient_name: "", date_of_birth: "", case_number: "", notes: "" });
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(() => {
@@ -254,14 +254,14 @@ function Patients({ onNav, setSelectedPatient }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const openNew = () => { setEditing(null); setForm({ first_name: "", last_name: "", date_of_birth: "", gender: "", case_number: "", provider_name: "", notes: "" }); setShowModal(true); };
-  const openEdit = (p) => { setEditing(p); setForm({ first_name: p.first_name || "", last_name: p.last_name || "", date_of_birth: p.date_of_birth || "", gender: p.gender || "", case_number: p.case_number || "", provider_name: p.provider_name || "", notes: p.notes || "" }); setShowModal(true); };
+  const openNew = () => { setEditing(null); setForm({ patient_name: "", date_of_birth: "", case_number: "", notes: "" }); setShowModal(true); };
+  const openEdit = (p) => { setEditing(p); setForm({ patient_name: p.patient_name || "", date_of_birth: p.date_of_birth || "", case_number: p.case_number || "", notes: p.notes || "" }); setShowModal(true); };
 
   const save = async () => {
-    if (!form.first_name || !form.last_name) return alert("First and last name are required.");
+    if (!form.patient_name) return alert("Patient name is required.");
     setSaving(true);
     try {
-      if (editing) await awsPut(`/patients/${editing.id}`, form);
+      if (editing) await awsPut(`/patients/${editing.aws_patient_id}`, form);
       else await awsPost("/patients", form);
       setShowModal(false); load();
     } catch (e) { alert("Error saving patient: " + e.message); }
@@ -269,12 +269,12 @@ function Patients({ onNav, setSelectedPatient }) {
   };
 
   const del = async (p) => {
-    if (!confirm(`Delete patient ${p.first_name} ${p.last_name}? This cannot be undone.`)) return;
-    await awsDelete(`/patients/${p.id}`).catch(e => alert(e.message));
+    if (!confirm(`Delete patient ${p.patient_name}? This cannot be undone.`)) return;
+    await awsDelete(`/patients/${p.aws_patient_id}`).catch(e => alert(e.message));
     load();
   };
 
-  const filtered = patients.filter(p => `${p.first_name} ${p.last_name} ${p.case_number}`.toLowerCase().includes(search.toLowerCase()));
+  const filtered = patients.filter(p => `${p.patient_name || ""} ${p.case_number || ""}`.toLowerCase().includes(search.toLowerCase()));
 
   return (
     <div style={{ padding: 32 }}>
@@ -291,12 +291,12 @@ function Patients({ onNav, setSelectedPatient }) {
       ) : (
         <div style={{ display: "grid", gap: 12 }}>
           {filtered.map(p => (
-            <Card key={p.id} style={{ display: "flex", alignItems: "center", gap: 16, cursor: "pointer" }}>
+            <Card key={p.aws_patient_id} style={{ display: "flex", alignItems: "center", gap: 16, cursor: "pointer" }}>
               <div style={{ width: 44, height: 44, borderRadius: "50%", background: "#1e3a5f15", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>👤</div>
               <div style={{ flex: 1 }} onClick={() => { setSelectedPatient(p); onNav("patient-detail"); }}>
-                <div style={{ fontSize: 16, fontWeight: 600, color: "#1e293b" }}>{p.first_name} {p.last_name}</div>
+                <div style={{ fontSize: 16, fontWeight: 600, color: "#1e293b" }}>{p.patient_name}</div>
                 <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>
-                  {p.date_of_birth && `DOB: ${p.date_of_birth}`}{p.case_number && ` · Case: ${p.case_number}`}{p.provider_name && ` · Provider: ${p.provider_name}`}
+                  {p.date_of_birth && `DOB: ${p.date_of_birth}`}{p.case_number && ` · Case: ${p.case_number}`}
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
@@ -311,13 +311,10 @@ function Patients({ onNav, setSelectedPatient }) {
 
       {showModal && (
         <Modal title={editing ? "Edit Patient" : "New Patient"} onClose={() => setShowModal(false)}>
+          <Input label="Patient Name" value={form.patient_name} onChange={v => setForm(f => ({ ...f, patient_name: v }))} required />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" }}>
-            <Input label="First Name" value={form.first_name} onChange={v => setForm(f => ({ ...f, first_name: v }))} required />
-            <Input label="Last Name" value={form.last_name} onChange={v => setForm(f => ({ ...f, last_name: v }))} required />
             <Input label="Date of Birth" type="date" value={form.date_of_birth} onChange={v => setForm(f => ({ ...f, date_of_birth: v }))} />
-            <Select label="Gender" value={form.gender} onChange={v => setForm(f => ({ ...f, gender: v }))} options={[{ value: "", label: "Select..." }, { value: "Male", label: "Male" }, { value: "Female", label: "Female" }, { value: "Other", label: "Other" }]} />
             <Input label="Case Number" value={form.case_number} onChange={v => setForm(f => ({ ...f, case_number: v }))} />
-            <Input label="Provider Name" value={form.provider_name} onChange={v => setForm(f => ({ ...f, provider_name: v }))} />
           </div>
           <Textarea label="Notes" value={form.notes} onChange={v => setForm(f => ({ ...f, notes: v }))} rows={3} />
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 8 }}>
@@ -340,7 +337,7 @@ function PatientDetail({ patient, onNav, onBack }) {
   useEffect(() => {
     if (!patient) return;
     Promise.all([
-      awsGet(`/patients/${patient.id}/documents`).catch(() => ({ documents: [] })),
+      awsGet(`/patients/${patient.aws_patient_id}/documents`).catch(() => ({ documents: [] })),
     ]).then(([dData]) => {
       setDocuments(dData.documents || []);
       setLoading(false);
@@ -355,8 +352,8 @@ function PatientDetail({ patient, onNav, onBack }) {
         <Btn onClick={onBack} variant="secondary">← Back to Patients</Btn>
       </div>
       <PageHeader
-        title={`${patient.first_name} ${patient.last_name}`}
-        subtitle={[patient.date_of_birth && `DOB: ${patient.date_of_birth}`, patient.case_number && `Case: ${patient.case_number}`, patient.provider_name && `Provider: ${patient.provider_name}`].filter(Boolean).join(" · ")}
+        title={patient.patient_name || "Patient Detail"}
+        subtitle={[patient.date_of_birth && `DOB: ${patient.date_of_birth}`, patient.case_number && `Case: ${patient.case_number}`].filter(Boolean).join(" · ")}
       />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
@@ -628,8 +625,8 @@ function Summaries() {
     if (!form.patient_id) return alert("Please select a patient.");
     setSaving(true);
     try {
-      const patient = patients.find(p => p.id === form.patient_id);
-      const payload = { ...form, patient_name: patient ? `${patient.first_name} ${patient.last_name}` : "" };
+      const patient = patients.find(p => p.aws_patient_id === form.patient_id);
+      const payload = { ...form, patient_name: patient ? patient.patient_name : "" };
       if (editing) await awsPut(`/summaries/${editing.id}`, payload);
       else await awsPost("/summaries", payload);
       setShowForm(false);
@@ -696,7 +693,7 @@ function Summaries() {
         <Modal title={editing ? "Edit Summary" : "New Summary"} onClose={() => setShowForm(false)} width={760}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" }}>
             <Select label="Patient *" value={form.patient_id} onChange={v => setForm(f => ({ ...f, patient_id: v }))}
-              options={[{ value: "", label: "Select patient..." }, ...patients.map(p => ({ value: p.id, label: `${p.first_name} ${p.last_name}` }))]} />
+              options={[{ value: "", label: "Select patient..." }, ...patients.map(p => ({ value: p.aws_patient_id, label: p.patient_name || p.aws_patient_id }))]} />
             <Input label="Case Number" value={form.case_number} onChange={v => setForm(f => ({ ...f, case_number: v }))} />
           </div>
           <Select label="Status" value={form.status} onChange={v => setForm(f => ({ ...f, status: v }))}

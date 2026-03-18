@@ -44,6 +44,14 @@ provider:
 
 functions:
   # ── PATIENTS ──
+  listPatients:
+    handler: src/handlers/patients.list
+    events:
+      - http:
+          path: /patients
+          method: get
+          cors: true
+
   createPatient:
     handler: src/handlers/patients.create
     events:

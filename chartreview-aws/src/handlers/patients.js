@@ -1,5 +1,5 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { validateApiKey } = require('./auth');
 
 const client = new DynamoDBClient({});
@@ -11,6 +11,19 @@ const response = (statusCode, body) => ({
   headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
   body: JSON.stringify(body),
 });
+
+const listHandler = async (event) => {
+  try {
+    const result = await dynamo.send(new ScanCommand({ TableName: TABLE }));
+    const patients = (result.Items || []).sort((a, b) =>
+      (b.created_at || '').localeCompare(a.created_at || '')
+    );
+    return response(200, { patients });
+  } catch (err) {
+    console.error('listPatients error:', err);
+    return response(500, { error: err.message || 'Failed to list patients' });
+  }
+};
 
 const createHandler = async (event) => {
   try {
@@ -82,6 +95,7 @@ const removeHandler = async (event) => {
 };
 
 module.exports = {
+  list: validateApiKey(listHandler),
   create: validateApiKey(createHandler),
   get: validateApiKey(getHandler),
   update: validateApiKey(updateHandler),
