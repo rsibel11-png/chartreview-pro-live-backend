@@ -425,40 +425,59 @@ function Documents() {
     if (!uploadForm.patient_name.trim()) return alert("Please enter a patient name or file label.");
     setUploading(true);
     try {
-      // Create patient record in AWS
-      const pRes = await awsPost("/patients", { patient_name: uploadForm.patient_name.trim() }).catch(() => ({}));
-      const awsPatientId = pRes?.aws_patient_id || null;
+      // Step 1: Create patient record in AWS
+      let awsPatientId = null;
+      try {
+        const pRes = await awsPost("/patients", { patient_name: uploadForm.patient_name.trim() });
+        awsPatientId = pRes?.aws_patient_id || null;
+      } catch (e) {
+        alert("Upload failed at Step 1 (create patient): " + e.message);
+        setUploading(false); return;
+      }
 
-      // Get presigned S3 upload URL
-      const docPayload = {
-        patient_name: uploadForm.patient_name.trim(),
-        file_name: file.name,
-        content_type: file.type || "application/octet-stream",
-        file_size: file.size,
-        title: uploadForm.title || file.name,
-        category: uploadForm.category,
-      };
-      if (awsPatientId) docPayload.aws_patient_id = awsPatientId;
-      const uploadData = await awsPost("/documents/upload-url", docPayload);
+      // Step 2: Get presigned S3 upload URL
+      let uploadData;
+      try {
+        const docPayload = {
+          patient_name: uploadForm.patient_name.trim(),
+          file_name: file.name,
+          content_type: file.type || "application/octet-stream",
+          file_size: file.size,
+          title: uploadForm.title || file.name,
+          category: uploadForm.category,
+        };
+        if (awsPatientId) docPayload.aws_patient_id = awsPatientId;
+        uploadData = await awsPost("/documents/upload-url", docPayload);
+        if (!uploadData.upload_url) throw new Error("No upload_url in response: " + JSON.stringify(uploadData));
+      } catch (e) {
+        alert("Upload failed at Step 2 (get upload URL): " + e.message);
+        setUploading(false); return;
+      }
 
-      if (!uploadData.upload_url) throw new Error("Failed to get upload URL from server");
+      // Step 3: Upload file directly to S3 via presigned URL
+      try {
+        const s3Res = await fetch(uploadData.upload_url, {
+          method: "PUT",
+          body: file,
+          headers: { "Content-Type": file.type || "application/octet-stream" }
+        });
+        if (!s3Res.ok) {
+          const errText = await s3Res.text().catch(() => "");
+          throw new Error("S3 status " + s3Res.status + ": " + errText.substring(0, 200));
+        }
+      } catch (e) {
+        alert("Upload failed at Step 3 (S3 PUT): " + e.message);
+        setUploading(false); return;
+      }
 
-      // Upload file directly to S3 via presigned URL
-      const s3Res = await fetch(uploadData.upload_url, {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type || "application/octet-stream" }
-      });
-      if (!s3Res.ok) throw new Error("S3 upload failed: " + s3Res.status);
-
-      // Trigger OCR processing
+      // Step 4: Trigger processing
       await awsPost(`/documents/${uploadData.aws_document_id}/process`, {}).catch(() => {});
 
       alert("Document uploaded successfully! Processing started.");
       setShowUpload(false);
       setFile(null);
       setUploadForm({ patient_name: "", title: "", category: "Medical Records" });
-    } catch (e) { alert("Upload failed: " + e.message); }
+    } catch (e) { alert("Upload failed (unexpected): " + e.message); }
     setUploading(false);
   };
 
