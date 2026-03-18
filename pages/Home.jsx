@@ -944,14 +944,6 @@ function Admin() {
 export default function App() {
   const [page, setPage] = useState("dashboard");
   const [selectedPatient, setSelectedPatient] = useState(null);
-  const [currentUser, setCurrentUser] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true);
-
-  useEffect(() => {
-    User.me()
-      .then(u => { setCurrentUser(u || null); setAuthLoading(false); })
-      .catch(() => { setCurrentUser(null); setAuthLoading(false); });
-  }, []);
 
   const navigate = (p) => setPage(p);
 
@@ -967,29 +959,6 @@ export default function App() {
       default: return <Dashboard onNav={navigate} />;
     }
   };
-
-  if (authLoading) return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", fontFamily: "Inter, sans-serif", background: "#f8fafc" }}>
-      <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: 32, marginBottom: 12 }}>🏥</div>
-        <div style={{ color: "#64748b" }}>Loading ChartReview Pro...</div>
-      </div>
-    </div>
-  );
-
-  if (!currentUser) return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", fontFamily: "Inter, sans-serif", background: "#f8fafc" }}>
-      <div style={{ background: "#fff", borderRadius: 12, padding: 40, boxShadow: "0 4px 24px rgba(0,0,0,0.08)", textAlign: "center", maxWidth: 400, width: "100%" }}>
-        <div style={{ fontSize: 40, marginBottom: 16 }}>🏥</div>
-        <h2 style={{ margin: "0 0 8px", color: "#1e3a5f", fontSize: 22 }}>ChartReview Pro</h2>
-        <p style={{ color: "#64748b", marginBottom: 24, fontSize: 14 }}>HIPAA-compliant document management</p>
-        <a href={`https://friday-app-3f4e9d76.base44.app/login`}
-          style={{ display: "inline-block", background: "#1e3a5f", color: "#fff", padding: "12px 32px", borderRadius: 8, textDecoration: "none", fontWeight: 600, fontSize: 15 }}>
-          Sign In
-        </a>
-      </div>
-    </div>
-  );
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: "'Inter', -apple-system, sans-serif", background: "#f8fafc" }}>
