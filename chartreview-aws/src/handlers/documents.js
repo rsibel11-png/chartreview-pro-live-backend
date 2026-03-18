@@ -6,7 +6,14 @@ const { validateApiKey } = require('./auth');
 
 const client = new DynamoDBClient({});
 const dynamo = DynamoDBDocumentClient.from(client);
-const s3 = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
+
+// Create S3 client with request handler config that disables checksum
+const s3 = new S3Client({
+  region: process.env.AWS_REGION || 'us-east-1',
+  requestChecksumCalculation: 'WHEN_REQUIRED',
+  responseChecksumValidation: 'WHEN_REQUIRED',
+});
+
 const TABLE = process.env.DOCUMENTS_TABLE;
 const BUCKET = process.env.S3_BUCKET;
 
@@ -23,16 +30,13 @@ const getUploadUrlHandler = async (event) => {
     const key = 'documents/' + aws_document_id + '/' + data.file_name;
     const contentType = data.content_type || 'application/octet-stream';
 
-    // Use unhoistableHeaders to prevent checksum headers being added to presigned URL
     const command = new PutObjectCommand({
       Bucket: BUCKET,
       Key: key,
       ContentType: contentType,
     });
-    const upload_url = await getSignedUrl(s3, command, {
-      expiresIn: 300,
-      unhoistableHeaders: new Set(['x-amz-checksum-crc32', 'x-amz-sdk-checksum-algorithm']),
-    });
+
+    const upload_url = await getSignedUrl(s3, command, { expiresIn: 300 });
 
     const now = new Date().toISOString();
     const item = {
