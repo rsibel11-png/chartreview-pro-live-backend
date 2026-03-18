@@ -3,22 +3,24 @@ import { createClientFromRequest } from 'npm:@base44/sdk@0.8.21';
 const AWS_API_URL = Deno.env.get("AWS_API_URL") || "https://1h4kpspbs6.execute-api.us-east-1.amazonaws.com/prod";
 const AWS_API_KEY = Deno.env.get("AWS_API_KEY") || "";
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
 Deno.serve(async (req) => {
+  // Handle preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+
   try {
-    const base44 = createClientFromRequest(req);
-    const user = await base44.auth.me();
-
-    if (!user) {
-      return Response.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const body = await req.json().catch(() => ({}));
     const { method = "GET", path, payload } = body;
 
-    console.log("[awsProxy] method:", method, "path:", path);
-
     if (!path) {
-      return Response.json({ error: "Missing path" }, { status: 400 });
+      return Response.json({ error: "Missing path" }, { status: 400, headers: CORS_HEADERS });
     }
 
     const url = `${AWS_API_URL}${path}`;
@@ -46,15 +48,13 @@ Deno.serve(async (req) => {
       data = { raw: text };
     }
 
-    // Always return 200 to callFunction — embed the real status in the response
-    // so the frontend doesn't get errors for 201, 204, etc.
     if (res.status >= 200 && res.status < 300) {
-      return Response.json(data, { status: 200 });
+      return Response.json(data, { status: 200, headers: CORS_HEADERS });
     } else {
-      return Response.json({ error: data?.error || data?.message || text, aws_status: res.status }, { status: res.status });
+      return Response.json({ error: data?.error || data?.message || text, aws_status: res.status }, { status: res.status, headers: CORS_HEADERS });
     }
   } catch (error) {
     console.error("[awsProxy] Error:", error.message);
-    return Response.json({ error: error.message }, { status: 500 });
+    return Response.json({ error: error.message }, { status: 500, headers: CORS_HEADERS });
   }
 });
