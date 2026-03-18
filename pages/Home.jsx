@@ -427,18 +427,19 @@ function Documents() {
     try {
       // Create patient record in AWS
       const pRes = await awsPost("/patients", { patient_name: uploadForm.patient_name.trim() }).catch(() => ({}));
-      const awsPatientId = pRes?.aws_patient_id || "unknown";
+      const awsPatientId = pRes?.aws_patient_id || null;
 
       // Get presigned S3 upload URL
-      const uploadData = await awsPost("/documents/upload-url", {
-        aws_patient_id: awsPatientId,
+      const docPayload = {
         patient_name: uploadForm.patient_name.trim(),
         file_name: file.name,
-        file_type: file.type || "application/octet-stream",
+        content_type: file.type || "application/octet-stream",
         file_size: file.size,
         title: uploadForm.title || file.name,
         category: uploadForm.category,
-      });
+      };
+      if (awsPatientId) docPayload.aws_patient_id = awsPatientId;
+      const uploadData = await awsPost("/documents/upload-url", docPayload);
 
       if (!uploadData.upload_url) throw new Error("Failed to get upload URL from server");
 
