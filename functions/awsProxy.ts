@@ -5,8 +5,14 @@ const AWS_API_KEY = Deno.env.get("AWS_API_KEY") || "";
 
 Deno.serve(async (req) => {
   try {
+    console.log("[awsProxy] Request received");
+    console.log("[awsProxy] AWS_API_URL:", AWS_API_URL);
+    console.log("[awsProxy] AWS_API_KEY set:", !!AWS_API_KEY);
+
     const base44 = createClientFromRequest(req);
     const user = await base44.auth.me();
+    console.log("[awsProxy] User:", user ? user.email : "null");
+
     if (!user) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -14,11 +20,14 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const { method = "GET", path, payload } = body;
 
+    console.log("[awsProxy] method:", method, "path:", path);
+
     if (!path) {
       return Response.json({ error: "Missing path" }, { status: 400 });
     }
 
     const url = `${AWS_API_URL}${path}`;
+    console.log("[awsProxy] Fetching:", url);
 
     const fetchOptions: RequestInit = {
       method,
@@ -34,6 +43,7 @@ Deno.serve(async (req) => {
 
     const res = await fetch(url, fetchOptions);
     const text = await res.text();
+    console.log("[awsProxy] AWS response status:", res.status, "body:", text.substring(0, 200));
 
     let data;
     try {
@@ -44,6 +54,7 @@ Deno.serve(async (req) => {
 
     return Response.json(data, { status: res.status });
   } catch (error) {
+    console.error("[awsProxy] Error:", error.message);
     return Response.json({ error: error.message }, { status: 500 });
   }
 });
