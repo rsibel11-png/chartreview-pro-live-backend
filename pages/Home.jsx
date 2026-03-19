@@ -1334,24 +1334,14 @@ function AppInner() {
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const pData = await awsGet("/patients").catch(()=>({patients:[]}));
-      const pts   = pData.patients || [];
-      setPatients(pts);
-
-      if (pts.length > 0) {
-        const docResults = await Promise.all(
-          pts.map(p => awsGet(`/patients/${p.aws_patient_id}/documents`).catch(()=>[]))
-        );
-        const allDocs = docResults.flatMap(r => Array.isArray(r)?r:(r.documents||[]));
-        setDocuments(allDocs);
-
-        const sumResults = await Promise.all(
-          pts.map(p => awsGet(`/summaries?patient_id=${p.aws_patient_id}`).catch(()=>({summaries:[]})))
-        );
-        setSummaries(sumResults.flatMap(r=>r.summaries||[]));
-      } else {
-        setDocuments([]); setSummaries([]);
-      }
+      const [pData, docsData, sumsData] = await Promise.all([
+        awsGet("/patients").catch(()=>({patients:[]})),
+        awsGet("/documents").catch(()=>[]),
+        awsGet("/summaries/all").catch(()=>({summaries:[]})),
+      ]);
+      setPatients(pData.patients || []);
+      setDocuments(Array.isArray(docsData) ? docsData : (docsData.documents || []));
+      setSummaries(sumsData.summaries || []);
     } catch(e) { console.error(e); }
     setLoading(false);
   }, []);
