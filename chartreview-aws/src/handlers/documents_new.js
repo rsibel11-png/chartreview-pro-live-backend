@@ -17,7 +17,7 @@ const lambda   = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1
 const TABLE           = process.env.DOCUMENTS_TABLE;
 const SUMMARIES_TABLE = process.env.SUMMARIES_TABLE;
 const BUCKET          = process.env.S3_BUCKET;
-const BEDROCK_MODEL   = 'anthropic.claude-3-5-sonnet-20241022-v2:0';
+const BEDROCK_MODEL   = 'us.anthropic.claude-3-5-sonnet-20241022-v2:0';
 const WORKER_FUNCTION_NAME = process.env.WORKER_FUNCTION_NAME || 'chartreview-pro-prod-processWorker';
 
 const response = (statusCode, body) => ({
