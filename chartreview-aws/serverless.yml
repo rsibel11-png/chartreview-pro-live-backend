@@ -48,6 +48,11 @@ provider:
             - bedrock:InvokeModel
           Resource:
             - arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource:
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-processWorker
 
 functions:
   # ── PATIENTS ──
@@ -134,12 +139,19 @@ functions:
 
   processDocument:
     handler: src/handlers/documents_new.process
-    timeout: 120
+    timeout: 29
     events:
       - http:
           path: /documents/{aws_document_id}/process
           method: post
           cors: true
+
+  # Worker: invoked async by processDocument, no HTTP trigger, long timeout
+  processWorker:
+    handler: src/handlers/documents_new.worker
+    timeout: 300
+    environment:
+      WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-processWorker
 
   listPatientDocuments:
     handler: src/handlers/documents_new.listByPatient
