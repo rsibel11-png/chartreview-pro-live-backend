@@ -26,26 +26,65 @@ const response = (statusCode, body) => ({
   body: JSON.stringify(body),
 });
 
-const getUploadUrlHandler = async (event) => {
+// ─── DIRECT UPLOAD: accepts base64 file, uploads to S3, creates DB record ───
+const directUploadHandler = async (event) => {
   try {
-    const data = JSON.parse(event.body || '{}');
-    const aws_document_id = crypto.randomUUID();
-    const key = 'documents/' + aws_document_id + '/' + data.file_name;
-    const contentType = data.content_type || 'application/octet-stream';
-    const command = new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType });
-    const upload_url = await getSignedUrl(s3, command, { expiresIn: 300 });
-    const now = new Date().toISOString();
-    const item = { aws_document_id, file_name: data.file_name, file_key: key, content_type: contentType, status: 'uploaded', created_at: now, updated_at: now };
+    var data;
+    // Handle both JSON body and multipart — we expect JSON with base64
+    if (event.isBase64Encoded) {
+      // Binary body passed through API Gateway
+      var raw = Buffer.from(event.body, 'base64');
+      // Try to parse as JSON first
+      try { data = JSON.parse(raw.toString('utf8')); } catch(e) { data = {}; }
+    } else {
+      data = JSON.parse(event.body || '{}');
+    }
+
+    var file_name    = data.file_name    || 'document.pdf';
+    var content_type = data.content_type || 'application/pdf';
+    var file_data    = data.file_data;   // base64 encoded file content
+
+    if (!file_data) {
+      return response(400, { error: 'file_data (base64) is required' });
+    }
+
+    var fileBuffer = Buffer.from(file_data, 'base64');
+    var aws_document_id = require('crypto').randomUUID();
+    var key = 'documents/' + aws_document_id + '/' + file_name;
+    var now = new Date().toISOString();
+
+    // Upload to S3
+    await s3.send(new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: key,
+      Body: fileBuffer,
+      ContentType: content_type,
+    }));
+
+    console.log('Uploaded to S3:', key, 'size:', fileBuffer.length);
+
+    // Save record to DynamoDB
+    var item = {
+      aws_document_id,
+      file_name,
+      file_key: key,
+      content_type,
+      status: 'uploaded',
+      created_at: now,
+      updated_at: now,
+    };
     if (data.aws_patient_id) item.aws_patient_id = data.aws_patient_id;
     if (data.patient_name)   item.patient_name   = data.patient_name;
-    if (data.title)          item.title          = data.title;
+    if (data.title)          item.title          = data.title || file_name;
     if (data.category)       item.category       = data.category;
     if (data.case_number)    item.case_number    = data.case_number;
     if (data.folder)         item.folder         = data.folder;
+
     await dynamo.send(new PutCommand({ TableName: TABLE, Item: item }));
-    return response(200, { aws_document_id, upload_url });
+
+    return response(200, { aws_document_id, file_key: key, status: 'uploaded' });
   } catch (err) {
-    console.error('getUploadUrl error:', err);
+    console.error('directUpload error:', err);
     return response(500, { error: err.message });
   }
 };
@@ -182,7 +221,7 @@ const processWorker = async (aws_document_id) => {
             if (pageResult.Blocks) allBlocks = allBlocks.concat(pageResult.Blocks);
             nextToken = pageResult.NextToken;
           }
-          console.log('Textract job status:', jobStatus, 'attempt:', attempt + 1);
+          console.log('Textract poll attempt', attempt + 1, 'status:', jobStatus, 'blocks so far:', allBlocks.length);
         }
 
         if (jobStatus === 'SUCCEEDED') {
@@ -190,12 +229,12 @@ const processWorker = async (aws_document_id) => {
             .filter(function(b) { return b.BlockType === 'LINE'; })
             .map(function(b) { return b.Text; })
             .join('\n');
-          console.log('Textract async extracted', extractedText.length, 'chars');
+          console.log('Textract async extracted', extractedText.length, 'chars from', allBlocks.length, 'blocks');
         } else {
-          extractedText = '[Textract failed: job status ' + jobStatus + ']';
+          extractedText = '[Textract job status: ' + jobStatus + ']';
         }
       } else {
-        // Sync extraction for images
+        // Sync for images
         var textractResult = await textract.send(new DetectDocumentTextCommand({
           Document: { S3Object: { Bucket: BUCKET, Name: doc.file_key } }
         }));
@@ -253,7 +292,7 @@ const processWorker = async (aws_document_id) => {
       summaryText = '[AI failed: ' + err.message + ']';
     }
 
-    var aws_summary_id = crypto.randomUUID();
+    var aws_summary_id = require('crypto').randomUUID();
     var now = new Date().toISOString();
 
     await dynamo.send(new PutCommand({
@@ -339,7 +378,8 @@ const listAllHandler = async (event) => {
 };
 
 module.exports = {
-  getUploadUrl:   validateApiKey(getUploadUrlHandler),
+  directUpload:   validateApiKey(directUploadHandler),
+  getUploadUrl:   validateApiKey(async (event) => response(410, { error: 'Use direct-upload instead' })),
   get:            validateApiKey(getHandler),
   remove:         validateApiKey(removeHandler),
   getDownloadUrl: validateApiKey(getDownloadUrlHandler),
@@ -347,5 +387,5 @@ module.exports = {
   process:        validateApiKey(processHandler),
   worker:         mainHandler,
   listByPatient:  validateApiKey(listByPatientHandler),
-  listAll:         validateApiKey(listAllHandler),
+  listAll:        validateApiKey(listAllHandler),
 };

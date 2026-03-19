@@ -46,8 +46,8 @@ provider:
         - Effect: Allow
           Action:
             - bedrock:InvokeModel
-          Resource:
-            - arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0
+            - bedrock:InvokeModelWithResponseStream
+          Resource: "*"
         - Effect: Allow
           Action:
             - lambda:InvokeFunction
@@ -97,6 +97,15 @@ functions:
           cors: true
 
   # ── DOCUMENTS ──
+  directUpload:
+    handler: src/handlers/documents_new.directUpload
+    timeout: 29
+    events:
+      - http:
+          path: /documents/direct-upload
+          method: post
+          cors: true
+
   getUploadUrl:
     handler: src/handlers/documents_new.getUploadUrl
     events:
