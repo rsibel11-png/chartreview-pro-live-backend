@@ -7,6 +7,7 @@ provider:
   runtime: nodejs20.x
   region: us-east-1
   stage: ${opt:stage, 'prod'}
+  timeout: 60
   environment:
     PATIENTS_TABLE: ${self:service}-patients-${self:provider.stage}
     DOCUMENTS_TABLE: ${self:service}-documents-${self:provider.stage}
@@ -38,9 +39,15 @@ provider:
           Resource: arn:aws:s3:::${self:service}-files-${self:provider.stage}/*
         - Effect: Allow
           Action:
+            - textract:DetectDocumentText
             - textract:StartDocumentTextDetection
             - textract:GetDocumentTextDetection
           Resource: "*"
+        - Effect: Allow
+          Action:
+            - bedrock:InvokeModel
+          Resource:
+            - arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0
 
 functions:
   # ── PATIENTS ──
@@ -86,7 +93,7 @@ functions:
 
   # ── DOCUMENTS ──
   getUploadUrl:
-    handler: src/handlers/documents.getUploadUrl
+    handler: src/handlers/documents_new.getUploadUrl
     events:
       - http:
           path: /documents/upload-url
@@ -94,15 +101,23 @@ functions:
           cors: true
 
   getDocument:
-    handler: src/handlers/documents.get
+    handler: src/handlers/documents_new.get
     events:
       - http:
           path: /documents/{aws_document_id}
           method: get
           cors: true
 
+  updateDocument:
+    handler: src/handlers/documents_new.update
+    events:
+      - http:
+          path: /documents/{aws_document_id}
+          method: put
+          cors: true
+
   deleteDocument:
-    handler: src/handlers/documents.remove
+    handler: src/handlers/documents_new.remove
     events:
       - http:
           path: /documents/{aws_document_id}
@@ -110,7 +125,7 @@ functions:
           cors: true
 
   getDownloadUrl:
-    handler: src/handlers/documents.getDownloadUrl
+    handler: src/handlers/documents_new.getDownloadUrl
     events:
       - http:
           path: /documents/{aws_document_id}/download-url
@@ -118,7 +133,8 @@ functions:
           cors: true
 
   processDocument:
-    handler: src/handlers/documents.process
+    handler: src/handlers/documents_new.process
+    timeout: 120
     events:
       - http:
           path: /documents/{aws_document_id}/process
@@ -126,7 +142,7 @@ functions:
           cors: true
 
   listPatientDocuments:
-    handler: src/handlers/documents.listByPatient
+    handler: src/handlers/documents_new.listByPatient
     events:
       - http:
           path: /patients/{aws_patient_id}/documents
@@ -166,12 +182,21 @@ functions:
           method: delete
           cors: true
 
+  listPatientSummaries:
+    handler: src/handlers/summaries.listByPatient
+    events:
+      - http:
+          path: /patients/{aws_patient_id}/summaries
+          method: get
+          cors: true
+
 resources:
   Resources:
 
     # ── DYNAMODB TABLES ──
     PatientsTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
       Properties:
         TableName: ${self:service}-patients-${self:provider.stage}
         BillingMode: PAY_PER_REQUEST
@@ -188,6 +213,7 @@ resources:
 
     DocumentsTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
       Properties:
         TableName: ${self:service}-documents-${self:provider.stage}
         BillingMode: PAY_PER_REQUEST
@@ -213,6 +239,7 @@ resources:
 
     SummariesTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
       Properties:
         TableName: ${self:service}-summaries-${self:provider.stage}
         BillingMode: PAY_PER_REQUEST
@@ -239,6 +266,7 @@ resources:
     # ── S3 BUCKET ──
     DocumentsBucket:
       Type: AWS::S3::Bucket
+      DeletionPolicy: Retain
       Properties:
         BucketName: ${self:service}-files-${self:provider.stage}
         BucketEncryption:
@@ -275,6 +303,7 @@ resources:
 
     AccessLogsBucket:
       Type: AWS::S3::Bucket
+      DeletionPolicy: Retain
       Properties:
         BucketName: ${self:service}-access-logs-${self:provider.stage}
         PublicAccessBlockConfiguration:

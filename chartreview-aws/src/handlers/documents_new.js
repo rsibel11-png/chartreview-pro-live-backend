@@ -14,12 +14,14 @@ const s3 = new S3Client({
   responseChecksumValidation: 'WHEN_REQUIRED',
 });
 const textract = new TextractClient({ region: process.env.AWS_REGION || 'us-east-1' });
-const bedrock = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-1' });
+const bedrock  = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-1' });
 
-const TABLE = process.env.DOCUMENTS_TABLE;
+const TABLE           = process.env.DOCUMENTS_TABLE;
 const SUMMARIES_TABLE = process.env.SUMMARIES_TABLE;
-const BUCKET = process.env.S3_BUCKET;
-const BEDROCK_MODEL = 'anthropic.claude-3-haiku-20240307-v1:0';
+const BUCKET          = process.env.S3_BUCKET;
+
+// Claude 3.5 Sonnet v2
+const BEDROCK_MODEL = 'anthropic.claude-3-5-sonnet-20241022-v2:0';
 
 const response = (statusCode, body) => ({
   statusCode,
@@ -27,6 +29,7 @@ const response = (statusCode, body) => ({
   body: JSON.stringify(body),
 });
 
+// ─── Upload URL ───────────────────────────────────────────────────────────────
 const getUploadUrlHandler = async (event) => {
   try {
     const data = JSON.parse(event.body || '{}');
@@ -34,28 +37,17 @@ const getUploadUrlHandler = async (event) => {
     const key = 'documents/' + aws_document_id + '/' + data.file_name;
     const contentType = data.content_type || 'application/octet-stream';
 
-    const command = new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: key,
-      ContentType: contentType,
-    });
-
+    const command = new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType });
     const upload_url = await getSignedUrl(s3, command, { expiresIn: 300 });
 
     const now = new Date().toISOString();
-    const item = {
-      aws_document_id,
-      file_name: data.file_name,
-      file_key: key,
-      content_type: contentType,
-      status: 'uploaded',
-      created_at: now,
-      updated_at: now,
-    };
+    const item = { aws_document_id, file_name: data.file_name, file_key: key, content_type: contentType, status: 'uploaded', created_at: now, updated_at: now };
     if (data.aws_patient_id) item.aws_patient_id = data.aws_patient_id;
-    if (data.patient_name) item.patient_name = data.patient_name;
-    if (data.title) item.title = data.title;
-    if (data.category) item.category = data.category;
+    if (data.patient_name)   item.patient_name   = data.patient_name;
+    if (data.title)          item.title          = data.title;
+    if (data.category)       item.category       = data.category;
+    if (data.case_number)    item.case_number    = data.case_number;
+    if (data.folder)         item.folder         = data.folder;
 
     await dynamo.send(new PutCommand({ TableName: TABLE, Item: item }));
     return response(200, { aws_document_id, upload_url });
@@ -65,6 +57,7 @@ const getUploadUrlHandler = async (event) => {
   }
 };
 
+// ─── Get ──────────────────────────────────────────────────────────────────────
 const getHandler = async (event) => {
   try {
     const { aws_document_id } = event.pathParameters;
@@ -72,59 +65,85 @@ const getHandler = async (event) => {
     if (!result.Item) return response(404, { error: 'Document not found' });
     return response(200, result.Item);
   } catch (err) {
-    console.error('getDocument error:', err);
-    return response(500, { error: err.message || 'Failed to get document' });
+    return response(500, { error: err.message });
   }
 };
 
+// ─── Delete ───────────────────────────────────────────────────────────────────
 const removeHandler = async (event) => {
   try {
     const { aws_document_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (result.Item && result.Item.file_key) {
-      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: result.Item.file_key }));
+      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: result.Item.file_key })).catch(() => {});
     }
     await dynamo.send(new DeleteCommand({ TableName: TABLE, Key: { aws_document_id } }));
     return response(200, { message: 'Document deleted' });
   } catch (err) {
-    console.error('deleteDocument error:', err);
-    return response(500, { error: err.message || 'Failed to delete document' });
+    return response(500, { error: err.message });
   }
 };
 
+// ─── Download URL ─────────────────────────────────────────────────────────────
 const getDownloadUrlHandler = async (event) => {
   try {
     const { aws_document_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!result.Item) return response(404, { error: 'Document not found' });
     const command = new GetObjectCommand({ Bucket: BUCKET, Key: result.Item.file_key });
-    const download_url = await getSignedUrl(s3, command, { expiresIn: 300 });
+    const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
     return response(200, { download_url });
   } catch (err) {
-    console.error('getDownloadUrl error:', err);
-    return response(500, { error: err.message || 'Failed to get download URL' });
+    return response(500, { error: err.message });
   }
 };
 
+// ─── Update ───────────────────────────────────────────────────────────────────
+const updateHandler = async (event) => {
+  try {
+    const { aws_document_id } = event.pathParameters;
+    const data = JSON.parse(event.body || '{}');
+    const now = new Date().toISOString();
+
+    const sets = ['updated_at = :u'];
+    const names = {};
+    const vals = { ':u': now };
+
+    if (data.folder !== undefined)   { sets.push('folder = :f');    vals[':f'] = data.folder; }
+    if (data.status !== undefined)   { sets.push('#s = :s');        names['#s'] = 'status'; vals[':s'] = data.status; }
+    if (data.patient_name !== undefined) { sets.push('patient_name = :pn'); vals[':pn'] = data.patient_name; }
+    if (data.category !== undefined) { sets.push('category = :cat'); vals[':cat'] = data.category; }
+
+    await dynamo.send(new UpdateCommand({
+      TableName: TABLE,
+      Key: { aws_document_id },
+      UpdateExpression: 'SET ' + sets.join(', '),
+      ExpressionAttributeNames: Object.keys(names).length ? names : undefined,
+      ExpressionAttributeValues: vals,
+    }));
+    return response(200, { message: 'Document updated' });
+  } catch (err) {
+    return response(500, { error: err.message });
+  }
+};
+
+// ─── Process (Textract + Claude) ──────────────────────────────────────────────
 const processHandler = async (event) => {
   const { aws_document_id } = event.pathParameters;
   try {
-    // 1. Get document record
     const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!docResult.Item) return response(404, { error: 'Document not found' });
     const doc = docResult.Item;
 
-    // 2. Mark as processing
+    // Mark processing
     await dynamo.send(new UpdateCommand({
-      TableName: TABLE,
-      Key: { aws_document_id },
+      TableName: TABLE, Key: { aws_document_id },
       UpdateExpression: 'SET #s = :s, updated_at = :u',
       ExpressionAttributeNames: { '#s': 'status' },
-      ExpressionAttributeValues: { ':s': 'processing', ':u': new Date().toISOString() }
+      ExpressionAttributeValues: { ':s': 'processing', ':u': new Date().toISOString() },
     }));
 
-    // 3. Extract text with Textract
-    console.log('Running Textract on:', doc.file_key);
+    // 1. Textract
     let extractedText = '';
     try {
       const textractResult = await textract.send(new DetectDocumentTextCommand({
@@ -134,30 +153,79 @@ const processHandler = async (event) => {
         .filter(b => b.BlockType === 'LINE')
         .map(b => b.Text)
         .join('\n');
-      console.log('Extracted', extractedText.length, 'characters');
-    } catch (textractErr) {
-      console.error('Textract error:', textractErr.message);
-      extractedText = '[Text extraction failed: ' + textractErr.message + ']';
+      console.log('Textract extracted', extractedText.length, 'chars');
+    } catch (err) {
+      console.error('Textract error:', err.message);
+      extractedText = '[Textract failed: ' + err.message + ']';
     }
 
-    // 4. Generate summary with Bedrock (Claude 3 Haiku)
-    console.log('Calling Bedrock for summary...');
+    // 2. Claude — extract structured visits
+    let visits = [];
+    let patient_name = doc.patient_name || '';
+    let case_number  = doc.case_number  || '';
+    let provider_name = '';
+    let document_date = '';
+    let page_count = 1;
     let summaryText = '';
+
     try {
-      const prompt = `You are a medical and legal document analyst. Review the following document text and provide a structured summary including:
+      const prompt = `You are a medical-legal document analyst. Analyze this document text and extract ALL medical encounters, visits, examinations, or entries.
 
-1. Document Type (e.g. medical record, lab report, legal filing, etc.)
-2. Key Findings or Facts
-3. Dates mentioned (if any)
-4. Relevant parties (names, roles)
-5. Any diagnoses, treatments, or medical conditions mentioned
-6. Any legal claims or issues mentioned
-7. Overall summary in 2-3 sentences
+For EACH visit/encounter found, extract:
+- visit_date (YYYY-MM-DD format, or best approximation)
+- rendering_provider (doctor/provider name only, not patient)
+- practice_setting (exact facility/clinic name, or "Independent Medical Examination", "Chart Review", etc.)
+- chief_complaint (brief purpose of visit)
+- hpi_summary (concise 2-4 sentence history of present illness summary)
+- physical_exam_findings (key pertinent findings only, concise)
+- imaging_findings (any imaging reviewed or ordered)
+- lab_findings (any lab results)
+- impression_diagnosis (diagnosis/impressions)
+- treatment_plan (treatment or plan)
+- icd10_codes (array of ICD-10 codes if mentioned)
+- symptom_progression (one of: "improved", "same", "worse", "not_documented")
+- pain_scale (numeric scale if mentioned, else "not_documented")
+- injury_date (YYYY-MM-DD if mentioned)
 
-Document text:
-${extractedText.substring(0, 8000)}
+Also extract top-level:
+- patient_name (full name of patient)
+- case_number (case/claim number if any)
+- provider_name (primary provider name)
+- document_date (date of the document itself, YYYY-MM-DD)
+- page_count (estimated number of pages)
 
-Provide a clear, professional summary suitable for medical-legal review.`;
+CRITICAL: Extract EVERY visit as a separate entry. If there are 10 visits, return 10 entries.
+Summarize — do NOT transcribe verbatim. Keep each field concise.
+
+Document text (first 12000 chars):
+${extractedText.substring(0, 12000)}
+
+Respond ONLY with valid JSON in this exact format:
+{
+  "patient_name": "",
+  "case_number": "",
+  "provider_name": "",
+  "document_date": "",
+  "page_count": 1,
+  "visits": [
+    {
+      "visit_date": "",
+      "rendering_provider": "",
+      "practice_setting": "",
+      "chief_complaint": "",
+      "hpi_summary": "",
+      "physical_exam_findings": "",
+      "imaging_findings": "",
+      "lab_findings": "",
+      "impression_diagnosis": "",
+      "treatment_plan": "",
+      "icd10_codes": [],
+      "symptom_progression": "not_documented",
+      "pain_scale": "not_documented",
+      "injury_date": ""
+    }
+  ]
+}`;
 
       const bedrockResponse = await bedrock.send(new InvokeModelCommand({
         modelId: BEDROCK_MODEL,
@@ -165,60 +233,92 @@ Provide a clear, professional summary suitable for medical-legal review.`;
         accept: 'application/json',
         body: JSON.stringify({
           anthropic_version: 'bedrock-2023-05-31',
-          max_tokens: 1024,
+          max_tokens: 4096,
           messages: [{ role: 'user', content: prompt }]
         })
       }));
 
       const bedrockBody = JSON.parse(new TextDecoder().decode(bedrockResponse.body));
-      summaryText = bedrockBody.content[0].text;
-      console.log('Summary generated, length:', summaryText.length);
-    } catch (bedrockErr) {
-      console.error('Bedrock error:', bedrockErr.message);
-      summaryText = '[AI summary failed: ' + bedrockErr.message + ']';
+      const rawText = bedrockBody.content[0].text.trim();
+      console.log('Claude raw response length:', rawText.length);
+
+      // Parse JSON from Claude response
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        visits        = parsed.visits        || [];
+        patient_name  = parsed.patient_name  || patient_name;
+        case_number   = parsed.case_number   || case_number;
+        provider_name = parsed.provider_name || '';
+        document_date = parsed.document_date || '';
+        page_count    = parsed.page_count    || 1;
+        summaryText   = rawText;
+        console.log('Extracted', visits.length, 'visits');
+      }
+    } catch (err) {
+      console.error('Bedrock error:', err.message);
+      summaryText = '[AI failed: ' + err.message + ']';
     }
 
-    // 5. Save summary to Summaries table
+    // 3. Save/update summary in Summaries table
     const aws_summary_id = crypto.randomUUID();
     const now = new Date().toISOString();
+
     await dynamo.send(new PutCommand({
       TableName: SUMMARIES_TABLE,
       Item: {
         aws_summary_id,
         aws_document_id,
-        aws_patient_id: doc.aws_patient_id || null,
-        patient_name: doc.patient_name || null,
-        extracted_text: extractedText,
-        summary: summaryText,
-        document_title: doc.title || doc.file_name,
-        created_at: now,
-        updated_at: now,
+        aws_patient_id:  doc.aws_patient_id || null,
+        patient_name:    patient_name || doc.patient_name || null,
+        case_number:     case_number  || doc.case_number  || null,
+        provider_name,
+        document_date,
+        extracted_text:  extractedText.substring(0, 50000), // cap for DynamoDB
+        visits,
+        summary:         summaryText,
+        document_title:  doc.title || doc.file_name,
+        status:          'completed',
+        created_at:      now,
+        updated_at:      now,
       }
     }));
 
-    // 6. Mark document as processed
+    // 4. Mark document as processed
     await dynamo.send(new UpdateCommand({
       TableName: TABLE,
       Key: { aws_document_id },
-      UpdateExpression: 'SET #s = :s, aws_summary_id = :sid, updated_at = :u',
+      UpdateExpression: 'SET #s = :s, aws_summary_id = :sid, patient_name = :pn, provider_name = :prov, document_date = :dd, page_count = :pc, updated_at = :u',
       ExpressionAttributeNames: { '#s': 'status' },
-      ExpressionAttributeValues: { ':s': 'processed', ':sid': aws_summary_id, ':u': now }
+      ExpressionAttributeValues: {
+        ':s':    'processed',
+        ':sid':  aws_summary_id,
+        ':pn':   patient_name  || doc.patient_name || null,
+        ':prov': provider_name || null,
+        ':dd':   document_date || null,
+        ':pc':   page_count,
+        ':u':    now,
+      }
     }));
 
     return response(200, {
       message: 'Document processed successfully',
       aws_document_id,
       aws_summary_id,
-      summary: summaryText
+      patient_name,
+      case_number,
+      provider_name,
+      document_date,
+      page_count,
+      visits,
+      summary: summaryText,
     });
 
   } catch (err) {
     console.error('processDocument error:', err);
-    // Mark as failed
     try {
       await dynamo.send(new UpdateCommand({
-        TableName: TABLE,
-        Key: { aws_document_id },
+        TableName: TABLE, Key: { aws_document_id },
         UpdateExpression: 'SET #s = :s, updated_at = :u',
         ExpressionAttributeNames: { '#s': 'status' },
         ExpressionAttributeValues: { ':s': 'failed', ':u': new Date().toISOString() }
@@ -228,6 +328,7 @@ Provide a clear, professional summary suitable for medical-legal review.`;
   }
 };
 
+// ─── List by patient ──────────────────────────────────────────────────────────
 const listByPatientHandler = async (event) => {
   try {
     const { aws_patient_id } = event.pathParameters;
@@ -239,16 +340,16 @@ const listByPatientHandler = async (event) => {
     }));
     return response(200, result.Items || []);
   } catch (err) {
-    console.error('listByPatient error:', err);
-    return response(500, { error: err.message || 'Failed to list documents' });
+    return response(500, { error: err.message });
   }
 };
 
 module.exports = {
-  getUploadUrl: validateApiKey(getUploadUrlHandler),
-  get: validateApiKey(getHandler),
-  remove: validateApiKey(removeHandler),
-  getDownloadUrl: validateApiKey(getDownloadUrlHandler),
-  process: validateApiKey(processHandler),
+  getUploadUrl:  validateApiKey(getUploadUrlHandler),
+  get:           validateApiKey(getHandler),
+  remove:        validateApiKey(removeHandler),
+  getDownloadUrl:validateApiKey(getDownloadUrlHandler),
+  update:        validateApiKey(updateHandler),
+  process:       validateApiKey(processHandler),
   listByPatient: validateApiKey(listByPatientHandler),
 };
