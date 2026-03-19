@@ -2,7 +2,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { TextractClient, DetectDocumentTextCommand } = require('@aws-sdk/client-textract');
+const { TextractClient, StartDocumentTextDetectionCommand, GetDocumentTextDetectionCommand, DetectDocumentTextCommand } = require('@aws-sdk/client-textract');
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { validateApiKey } = require('./auth');
@@ -156,14 +156,55 @@ const processWorker = async (aws_document_id) => {
 
     var extractedText = '';
     try {
-      var textractResult = await textract.send(new DetectDocumentTextCommand({
-        Document: { S3Object: { Bucket: BUCKET, Name: doc.file_key } }
-      }));
-      extractedText = (textractResult.Blocks || [])
-        .filter(function(b) { return b.BlockType === 'LINE'; })
-        .map(function(b) { return b.Text; })
-        .join('\n');
-      console.log('Textract extracted', extractedText.length, 'chars');
+      var isPdf = (doc.content_type || '').toLowerCase().includes('pdf') ||
+                  (doc.file_key || '').toLowerCase().endsWith('.pdf');
+
+      if (isPdf) {
+        // Async multi-page PDF extraction
+        var startResult = await textract.send(new StartDocumentTextDetectionCommand({
+          DocumentLocation: { S3Object: { Bucket: BUCKET, Name: doc.file_key } }
+        }));
+        var jobId = startResult.JobId;
+        console.log('Textract async job started:', jobId);
+
+        // Poll until complete (max 25 attempts x 3s = 75s)
+        var jobStatus = 'IN_PROGRESS';
+        var allBlocks = [];
+        for (var attempt = 0; attempt < 25 && jobStatus === 'IN_PROGRESS'; attempt++) {
+          await new Promise(function(r) { setTimeout(r, 3000); });
+          var pollResult = await textract.send(new GetDocumentTextDetectionCommand({ JobId: jobId }));
+          jobStatus = pollResult.JobStatus;
+          if (pollResult.Blocks) allBlocks = allBlocks.concat(pollResult.Blocks);
+          // Handle pagination
+          var nextToken = pollResult.NextToken;
+          while (nextToken) {
+            var pageResult = await textract.send(new GetDocumentTextDetectionCommand({ JobId: jobId, NextToken: nextToken }));
+            if (pageResult.Blocks) allBlocks = allBlocks.concat(pageResult.Blocks);
+            nextToken = pageResult.NextToken;
+          }
+          console.log('Textract job status:', jobStatus, 'attempt:', attempt + 1);
+        }
+
+        if (jobStatus === 'SUCCEEDED') {
+          extractedText = allBlocks
+            .filter(function(b) { return b.BlockType === 'LINE'; })
+            .map(function(b) { return b.Text; })
+            .join('\n');
+          console.log('Textract async extracted', extractedText.length, 'chars');
+        } else {
+          extractedText = '[Textract failed: job status ' + jobStatus + ']';
+        }
+      } else {
+        // Sync extraction for images
+        var textractResult = await textract.send(new DetectDocumentTextCommand({
+          Document: { S3Object: { Bucket: BUCKET, Name: doc.file_key } }
+        }));
+        extractedText = (textractResult.Blocks || [])
+          .filter(function(b) { return b.BlockType === 'LINE'; })
+          .map(function(b) { return b.Text; })
+          .join('\n');
+        console.log('Textract sync extracted', extractedText.length, 'chars');
+      }
     } catch (err) {
       console.error('Textract error:', err.message);
       extractedText = '[Textract failed: ' + err.message + ']';
