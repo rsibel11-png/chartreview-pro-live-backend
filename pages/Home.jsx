@@ -412,7 +412,7 @@ function Documents() {
   const [showUpload, setShowUpload] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [filterName, setFilterName] = useState("");
-  const [uploadForm, setUploadForm] = useState({ patient_id: "", patient_name_free: "", title: "", category: "Medical Records" });
+  const [uploadForm, setUploadForm] = useState({ patient_name: "", title: "", category: "Medical Records" });
   const [file, setFile] = useState(null);
   const [processing, setProcessing] = useState({});
 
@@ -441,22 +441,19 @@ function Documents() {
 
   const uploadDoc = async () => {
     if (!file) return alert("Please select a file.");
-    const selectedPatient = patients.find(p => p.aws_patient_id === uploadForm.patient_id);
-    const patientName = selectedPatient ? selectedPatient.patient_name : uploadForm.patient_name_free.trim();
-    if (!patientName) return alert("Please select or enter a patient name.");
+    const patientName = uploadForm.patient_name.trim();
+    if (!patientName) return alert("Please enter a patient name.");
 
     setUploading(true);
     try {
-      // Step 1: Use existing patient ID or create new patient
-      let awsPatientId = selectedPatient ? selectedPatient.aws_patient_id : null;
-      if (!awsPatientId) {
-        try {
-          const pRes = await awsPost("/patients", { patient_name: patientName });
-          awsPatientId = pRes?.aws_patient_id || null;
-        } catch (e) {
-          alert("Upload failed at Step 1 (create patient): " + e.message);
-          setUploading(false); return;
-        }
+      // Step 1: Always create a new patient record
+      let awsPatientId = null;
+      try {
+        const pRes = await awsPost("/patients", { patient_name: patientName });
+        awsPatientId = pRes?.aws_patient_id || null;
+      } catch (e) {
+        alert("Upload failed at Step 1 (create patient): " + e.message);
+        setUploading(false); return;
       }
 
       // Step 2: Get presigned S3 upload URL
@@ -500,7 +497,7 @@ function Documents() {
       alert("Document uploaded! AI summary is being generated — check back in a moment.");
       setShowUpload(false);
       setFile(null);
-      setUploadForm({ patient_id: "", patient_name_free: "", title: "", category: "Medical Records" });
+      setUploadForm({ patient_name: "", title: "", category: "Medical Records" });
       await load();
     } catch (e) {
       alert("Upload failed: " + e.message);
@@ -585,21 +582,13 @@ function Documents() {
 
       {showUpload && (
         <Modal title="Upload Document" onClose={() => { setShowUpload(false); setFile(null); }}>
-          <div style={{ marginBottom: 16 }}>
-            <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#374151", marginBottom: 6 }}>
-              Patient <span style={{ color: "#ef4444" }}>*</span>
-            </label>
-            <select value={uploadForm.patient_id} onChange={e => setUploadForm(f => ({ ...f, patient_id: e.target.value, patient_name_free: "" }))}
-              style={{ width: "100%", padding: "9px 12px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, boxSizing: "border-box", marginBottom: 8 }}>
-              <option value="">— Select existing patient —</option>
-              {patients.map(p => <option key={p.aws_patient_id} value={p.aws_patient_id}>{p.patient_name}</option>)}
-            </select>
-            {!uploadForm.patient_id && (
-              <input value={uploadForm.patient_name_free} onChange={e => setUploadForm(f => ({ ...f, patient_name_free: e.target.value }))}
-                placeholder="Or type a new patient name..."
-                style={{ width: "100%", padding: "9px 12px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, boxSizing: "border-box" }} />
-            )}
-          </div>
+          <Input
+            label="Patient Name *"
+            value={uploadForm.patient_name}
+            onChange={v => setUploadForm(f => ({ ...f, patient_name: v }))}
+            placeholder="e.g. John Smith"
+            required
+          />
           <Input label="Document Title" value={uploadForm.title} onChange={v => setUploadForm(f => ({ ...f, title: v }))} placeholder="Leave blank to use filename" />
           <Select label="Category" value={uploadForm.category} onChange={v => setUploadForm(f => ({ ...f, category: v }))}
             options={categories.map(c => ({ value: c, label: c }))} />
