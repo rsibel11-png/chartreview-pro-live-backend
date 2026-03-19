@@ -135,9 +135,15 @@ const listByPatientHandler = async (event) => {
 // ─── List all (fallback) ──────────────────────────────────────────────────────
 const listAllHandler = async (event) => {
   try {
+    console.log('[listAll] TABLE:', TABLE);
+    console.log('[listAll] event.headers:', JSON.stringify(event.headers));
     const result = await dynamo.send(new ScanCommand({ TableName: TABLE }));
-    return response(200, { summaries: result.Items || [] });
+    console.log('[listAll] got', result.Items?.length, 'items');
+    const resp = response(200, { summaries: result.Items || [] });
+    console.log('[listAll] response statusCode:', resp.statusCode);
+    return resp;
   } catch (err) {
+    console.error('[listAll] ERROR:', err.message, err.stack);
     return response(500, { error: err.message });
   }
 };
