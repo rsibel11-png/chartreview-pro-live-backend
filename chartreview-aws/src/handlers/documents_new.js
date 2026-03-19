@@ -1,5 +1,5 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { TextractClient, DetectDocumentTextCommand } = require('@aws-sdk/client-textract');
@@ -288,6 +288,15 @@ const mainHandler = async (event) => {
   }
 };
 
+const listAllHandler = async (event) => {
+  try {
+    const result = await dynamo.send(new ScanCommand({ TableName: TABLE }));
+    return response(200, result.Items || []);
+  } catch (err) {
+    return response(500, { error: err.message });
+  }
+};
+
 module.exports = {
   getUploadUrl:   validateApiKey(getUploadUrlHandler),
   get:            validateApiKey(getHandler),
@@ -297,4 +306,5 @@ module.exports = {
   process:        validateApiKey(processHandler),
   worker:         mainHandler,
   listByPatient:  validateApiKey(listByPatientHandler),
+  listAll:         validateApiKey(listAllHandler),
 };

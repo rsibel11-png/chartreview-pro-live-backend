@@ -202,6 +202,23 @@ functions:
           method: get
           cors: true
 
+  listAllDocuments:
+    handler: src/handlers/documents_new.listAll
+    events:
+      - http:
+          path: /documents
+          method: get
+          cors: true
+
+  listAllSummaries:
+    handler: src/handlers/summaries.listAll
+    events:
+      - http:
+          path: /summaries
+          method: get
+          cors: true
+
+
 resources:
   Resources:
 
