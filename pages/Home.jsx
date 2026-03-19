@@ -1,6 +1,4 @@
-
 import { useState, useEffect, useCallback } from "react";
-import { User } from "@/api/entities";
 
 const PROXY_URL = "https://friday-e54fce34.base44.app/functions/awsProxy";
 
@@ -12,96 +10,140 @@ async function awsCall(method, path, body) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || "Request failed with status code " + res.status);
+    throw new Error(err.error || "Request failed: " + res.status);
   }
   return res.json();
 }
+const awsGet = (path) => awsCall("GET", path);
+const awsPost = (path, body) => awsCall("POST", path, body);
+const awsPut = (path, body) => awsCall("PUT", path, body);
+const awsDelete = (path) => awsCall("DELETE", path);
 
-async function awsGet(path) { return awsCall("GET", path); }
-async function awsPost(path, body) { return awsCall("POST", path, body); }
-async function awsPut(path, body) { return awsCall("PUT", path, body); }
-async function awsDelete(path) { return awsCall("DELETE", path); }
+// ─── Design Tokens ────────────────────────────────────────────────────────────
+const C = {
+  navy: "#1e3a5f",
+  navyLight: "#2a4f7c",
+  blue: "#3b82f6",
+  blueLight: "#eff6ff",
+  green: "#10b981",
+  greenLight: "#ecfdf5",
+  amber: "#f59e0b",
+  amberLight: "#fffbeb",
+  red: "#ef4444",
+  redLight: "#fef2f2",
+  purple: "#8b5cf6",
+  purpleLight: "#f5f3ff",
+  gray50: "#f8fafc",
+  gray100: "#f1f5f9",
+  gray200: "#e2e8f0",
+  gray400: "#94a3b8",
+  gray500: "#64748b",
+  gray700: "#334155",
+  gray900: "#0f172a",
+  white: "#ffffff",
+};
 
 // ─── Shared Components ────────────────────────────────────────────────────────
-
-function Sidebar({ current, onNav }) {
-  const items = [
+function Sidebar({ current, onNav, patientCount, docCount, summaryCount }) {
+  const nav = [
     { id: "dashboard", icon: "🏠", label: "Dashboard" },
-    { id: "patients", icon: "👤", label: "Patients" },
-    { id: "documents", icon: "📄", label: "Documents" },
-    { id: "summaries", icon: "📋", label: "Summaries" },
+    { id: "patients", icon: "👤", label: "Patients", badge: patientCount },
+    { id: "documents", icon: "📄", label: "Documents", badge: docCount },
+    { id: "summaries", icon: "📋", label: "Summaries", badge: summaryCount },
     { id: "macros", icon: "📝", label: "Notes Macros" },
     { id: "admin", icon: "⚙️", label: "Admin" },
   ];
   return (
-    <div style={{ width: 220, background: "#1e3a5f", color: "white", display: "flex", flexDirection: "column", flexShrink: 0, minHeight: "100vh" }}>
-      <div style={{ padding: "24px 20px 16px", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-        <div style={{ fontSize: 18, fontWeight: 700 }}>ChartReview Pro</div>
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", marginTop: 2 }}>HIPAA Compliant ✓</div>
+    <div style={{ width: 230, background: C.navy, color: C.white, display: "flex", flexDirection: "column", minHeight: "100vh", flexShrink: 0 }}>
+      <div style={{ padding: "28px 20px 20px" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: "-0.3px" }}>ChartReview Pro</div>
+        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ color: C.green }}>●</span> HIPAA Compliant · AWS
+        </div>
       </div>
-      <nav style={{ flex: 1, padding: "12px 0" }}>
-        {items.map(item => (
-          <button key={item.id} onClick={() => onNav(item.id)} style={{
-            display: "flex", alignItems: "center", gap: 10, width: "100%",
-            padding: "10px 20px", border: "none",
-            background: current === item.id ? "rgba(255,255,255,0.15)" : "transparent",
-            color: current === item.id ? "#fff" : "rgba(255,255,255,0.7)",
-            cursor: "pointer", fontSize: 14, textAlign: "left",
-            borderLeft: current === item.id ? "3px solid #4a9eff" : "3px solid transparent",
-          }}>
-            <span>{item.icon}</span><span>{item.label}</span>
-          </button>
-        ))}
+      <nav style={{ flex: 1, padding: "4px 10px" }}>
+        {nav.map(item => {
+          const active = current === item.id;
+          return (
+            <button key={item.id} onClick={() => onNav(item.id)} style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              width: "100%", padding: "10px 12px", border: "none",
+              background: active ? "rgba(255,255,255,0.12)" : "transparent",
+              color: active ? C.white : "rgba(255,255,255,0.65)",
+              cursor: "pointer", fontSize: 13.5, fontWeight: active ? 600 : 400,
+              borderRadius: 8, marginBottom: 2,
+              borderLeft: active ? `3px solid ${C.blue}` : "3px solid transparent",
+              transition: "all 0.15s",
+            }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                <span>{item.icon}</span><span>{item.label}</span>
+              </span>
+              {item.badge > 0 && (
+                <span style={{ background: active ? C.blue : "rgba(255,255,255,0.15)", color: C.white, fontSize: 11, padding: "1px 7px", borderRadius: 999, fontWeight: 600 }}>{item.badge}</span>
+              )}
+            </button>
+          );
+        })}
       </nav>
-      <div style={{ padding: "16px 20px", borderTop: "1px solid rgba(255,255,255,0.1)", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>
-        🔒 PHI stored on AWS
+      <div style={{ padding: "16px 20px", borderTop: "1px solid rgba(255,255,255,0.08)", fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
+        🔒 PHI stored on AWS · BAA Active
       </div>
     </div>
   );
 }
 
-function PageHeader({ title, subtitle, action }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-      <div>
-        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: "#1e3a5f" }}>{title}</h1>
-        {subtitle && <p style={{ margin: "4px 0 0", color: "#64748b", fontSize: 14 }}>{subtitle}</p>}
-      </div>
-      {action}
-    </div>
-  );
-}
-
-function Btn({ onClick, children, variant = "primary", style = {}, disabled }) {
-  const styles = {
-    primary: { background: "#1e3a5f", color: "#fff" },
-    secondary: { background: "#fff", color: "#1e3a5f", border: "1px solid #cbd5e1" },
-    danger: { background: "#ef4444", color: "#fff" },
-    success: { background: "#10b981", color: "#fff" },
+function Btn({ onClick, children, variant = "primary", size = "md", style = {}, disabled }) {
+  const variants = {
+    primary: { background: C.navy, color: C.white, border: "none" },
+    secondary: { background: C.white, color: C.navy, border: `1px solid ${C.gray200}` },
+    danger: { background: C.red, color: C.white, border: "none" },
+    success: { background: C.green, color: C.white, border: "none" },
+    ghost: { background: "transparent", color: C.gray500, border: "none" },
+    blue: { background: C.blue, color: C.white, border: "none" },
+  };
+  const sizes = {
+    sm: { padding: "5px 12px", fontSize: 12 },
+    md: { padding: "8px 16px", fontSize: 13.5 },
+    lg: { padding: "11px 22px", fontSize: 15 },
   };
   return (
     <button onClick={onClick} disabled={disabled} style={{
-      padding: "8px 16px", borderRadius: 8, border: "none", cursor: disabled ? "not-allowed" : "pointer",
-      fontSize: 14, fontWeight: 500, ...styles[variant], ...style, opacity: disabled ? 0.6 : 1
+      borderRadius: 8, cursor: disabled ? "not-allowed" : "pointer", fontWeight: 500,
+      opacity: disabled ? 0.55 : 1, transition: "opacity 0.15s",
+      ...variants[variant], ...sizes[size], ...style
     }}>{children}</button>
   );
 }
 
-function Card({ children, style = {} }) {
-  return <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e2e8f0", padding: 20, ...style }}>{children}</div>;
-}
-
-function Badge({ text, color = "#64748b", bg = "#f1f5f9" }) {
-  return <span style={{ padding: "2px 10px", borderRadius: 999, fontSize: 12, fontWeight: 500, color, background: bg }}>{text}</span>;
-}
-
-function Modal({ title, onClose, children, width = 560 }) {
+function Card({ children, style = {}, onClick, hover }) {
+  const [hov, setHov] = useState(false);
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "#fff", borderRadius: 14, padding: 28, width, maxWidth: "95vw", maxHeight: "90vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1e3a5f" }}>{title}</h2>
-          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#64748b" }}>✕</button>
+    <div onClick={onClick}
+      onMouseEnter={() => hover && setHov(true)}
+      onMouseLeave={() => hover && setHov(false)}
+      style={{
+        background: C.white, borderRadius: 12, border: `1px solid ${C.gray200}`,
+        padding: 20, cursor: onClick ? "pointer" : "default",
+        boxShadow: hov ? "0 4px 16px rgba(0,0,0,0.08)" : "none",
+        transition: "box-shadow 0.15s", ...style
+      }}>{children}</div>
+  );
+}
+
+function Badge({ text, color = C.gray500, bg = C.gray100, style = {} }) {
+  return <span style={{ padding: "3px 10px", borderRadius: 999, fontSize: 12, fontWeight: 500, color, background: bg, whiteSpace: "nowrap", ...style }}>{text}</span>;
+}
+
+function Modal({ title, onClose, children, width = 600, subtitle }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: C.white, borderRadius: 16, padding: 32, width, maxWidth: "95vw", maxHeight: "90vh", overflow: "auto", boxShadow: "0 24px 64px rgba(0,0,0,0.22)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 19, fontWeight: 700, color: C.navy }}>{title}</h2>
+            {subtitle && <p style={{ margin: "4px 0 0", color: C.gray500, fontSize: 13 }}>{subtitle}</p>}
+          </div>
+          <button onClick={onClose} style={{ background: C.gray100, border: "none", width: 32, height: 32, borderRadius: 8, cursor: "pointer", fontSize: 16, color: C.gray500, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
         </div>
         {children}
       </div>
@@ -109,200 +151,218 @@ function Modal({ title, onClose, children, width = 560 }) {
   );
 }
 
-function Input({ label, value, onChange, type = "text", placeholder, required, style = {} }) {
+function Field({ label, value, onChange, type = "text", placeholder, required, as = "input", rows = 3, options }) {
+  const base = { width: "100%", padding: "9px 12px", border: `1px solid ${C.gray200}`, borderRadius: 8, fontSize: 14, boxSizing: "border-box", outline: "none", color: C.gray900, background: C.white };
   return (
-    <div style={{ marginBottom: 16, ...style }}>
-      {label && <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#374151", marginBottom: 6 }}>{label}{required && <span style={{ color: "#ef4444" }}> *</span>}</label>}
-      <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-        style={{ width: "100%", padding: "9px 12px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, boxSizing: "border-box", outline: "none" }} />
-    </div>
-  );
-}
-
-function Textarea({ label, value, onChange, rows = 4, placeholder }) {
-  return (
-    <div style={{ marginBottom: 16 }}>
-      {label && <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#374151", marginBottom: 6 }}>{label}</label>}
-      <textarea value={value} onChange={e => onChange(e.target.value)} rows={rows} placeholder={placeholder}
-        style={{ width: "100%", padding: "9px 12px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, boxSizing: "border-box", resize: "vertical", outline: "none" }} />
-    </div>
-  );
-}
-
-function Select({ label, value, onChange, options }) {
-  return (
-    <div style={{ marginBottom: 16 }}>
-      {label && <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#374151", marginBottom: 6 }}>{label}</label>}
-      <select value={value} onChange={e => onChange(e.target.value)}
-        style={{ width: "100%", padding: "9px 12px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, boxSizing: "border-box", outline: "none" }}>
-        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    </div>
-  );
-}
-
-function Loading() {
-  return <div style={{ textAlign: "center", padding: 60, color: "#64748b" }}>Loading...</div>;
-}
-
-function Empty({ message, action }) {
-  return (
-    <div style={{ textAlign: "center", padding: 60, color: "#94a3b8" }}>
-      <div style={{ fontSize: 48, marginBottom: 12 }}>📭</div>
-      <div style={{ fontSize: 16, marginBottom: 16 }}>{message}</div>
-      {action}
-    </div>
-  );
-}
-
-// ─── Dashboard ────────────────────────────────────────────────────────────────
-
-function Dashboard({ onNav }) {
-  const [stats, setStats] = useState({ patients: 0, documents: 0, summaries: 0 });
-  const [loading, setLoading] = useState(true);
-  const [recentPatients, setRecentPatients] = useState([]);
-
-  useEffect(() => {
-    Promise.all([
-      awsGet("/patients").catch(() => ({ patients: [] })),
-    ]).then(([pData]) => {
-      const patients = pData.patients || [];
-      setStats(s => ({ ...s, patients: patients.length }));
-      setRecentPatients(patients.slice(0, 5));
-      setLoading(false);
-    }).catch(() => setLoading(false));
-  }, []);
-
-  const statCards = [
-    { label: "Total Patients", value: stats.patients, icon: "👤", color: "#3b82f6", page: "patients" },
-    { label: "Documents", value: stats.documents, icon: "📄", color: "#10b981", page: "documents" },
-    { label: "Summaries", value: stats.summaries, icon: "📋", color: "#8b5cf6", page: "summaries" },
-  ];
-
-  return (
-    <div style={{ padding: 32 }}>
-      <PageHeader title="Dashboard" subtitle="Welcome to ChartReview Pro" />
-
-      {loading ? <Loading /> : (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20, marginBottom: 32 }}>
-            {statCards.map(sc => (
-              <Card key={sc.label} style={{ cursor: "pointer" }} >
-                <div onClick={() => onNav(sc.page)} style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                  <div style={{ width: 52, height: 52, borderRadius: 12, background: sc.color + "20", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>{sc.icon}</div>
-                  <div>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: "#1e293b" }}>{sc.value}</div>
-                    <div style={{ fontSize: 13, color: "#64748b" }}>{sc.label}</div>
-                  </div>
-                </div>
-              </Card>
-            ))}
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-            <Card>
-              <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 600, color: "#1e3a5f" }}>Recent Patients</h3>
-              {recentPatients.length === 0 ? (
-                <div style={{ color: "#94a3b8", fontSize: 14, textAlign: "center", padding: 20 }}>No patients yet</div>
-              ) : (
-                recentPatients.map(p => (
-                  <div key={p.id} onClick={() => onNav("patients")} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid #f1f5f9", cursor: "pointer" }}>
-                    <div style={{ width: 36, height: 36, borderRadius: "50%", background: "#1e3a5f20", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>👤</div>
-                    <div>
-                      <div style={{ fontSize: 14, fontWeight: 500 }}>{p.patient_name}</div>
-                      <div style={{ fontSize: 12, color: "#94a3b8" }}>DOB: {p.date_of_birth || "—"}</div>
-                    </div>
-                  </div>
-                ))
-              )}
-              <div style={{ marginTop: 12 }}>
-                <Btn onClick={() => onNav("patients")} variant="secondary" style={{ width: "100%", justifyContent: "center" }}>View All Patients</Btn>
-              </div>
-            </Card>
-
-            <Card>
-              <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 600, color: "#1e3a5f" }}>Quick Actions</h3>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <Btn onClick={() => onNav("patients")} style={{ justifyContent: "flex-start" }}>👤 Add New Patient</Btn>
-                <Btn onClick={() => onNav("documents")} style={{ justifyContent: "flex-start" }}>📄 Upload Document</Btn>
-                <Btn onClick={() => onNav("summaries")} style={{ justifyContent: "flex-start" }}>📋 Create Summary</Btn>
-                <Btn onClick={() => onNav("macros")} variant="secondary" style={{ justifyContent: "flex-start" }}>📝 Manage Notes Macros</Btn>
-              </div>
-            </Card>
-          </div>
-        </>
+    <div style={{ marginBottom: 14 }}>
+      {label && <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: C.gray700, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.4px" }}>
+        {label}{required && <span style={{ color: C.red }}> *</span>}
+      </label>}
+      {as === "textarea" ? (
+        <textarea value={value} onChange={e => onChange(e.target.value)} rows={rows} placeholder={placeholder} style={{ ...base, resize: "vertical" }} />
+      ) : as === "select" ? (
+        <select value={value} onChange={e => onChange(e.target.value)} style={base}>
+          {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      ) : (
+        <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} style={base} />
       )}
     </div>
   );
 }
 
-// ─── Patients ─────────────────────────────────────────────────────────────────
+function Spinner() {
+  return <div style={{ textAlign: "center", padding: "60px 0", color: C.gray400, fontSize: 14 }}>Loading...</div>;
+}
 
-function Patients({ onNav, setSelectedPatient }) {
-  const [patients, setPatients] = useState([]);
-  const [loading, setLoading] = useState(true);
+function Empty({ icon = "📭", message, action }) {
+  return (
+    <div style={{ textAlign: "center", padding: "60px 20px", color: C.gray400 }}>
+      <div style={{ fontSize: 44, marginBottom: 12 }}>{icon}</div>
+      <div style={{ fontSize: 15, marginBottom: 20, color: C.gray500 }}>{message}</div>
+      {action}
+    </div>
+  );
+}
+
+function StatCard({ icon, label, value, color, onClick }) {
+  return (
+    <Card hover={!!onClick} onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 16 }}>
+      <div style={{ width: 52, height: 52, borderRadius: 14, background: color + "18", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>{icon}</div>
+      <div>
+        <div style={{ fontSize: 26, fontWeight: 800, color: C.gray900 }}>{value}</div>
+        <div style={{ fontSize: 13, color: C.gray500, marginTop: 1 }}>{label}</div>
+      </div>
+    </Card>
+  );
+}
+
+function SectionHeader({ title, subtitle, action }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+      <div>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: C.navy }}>{title}</h1>
+        {subtitle && <p style={{ margin: "3px 0 0", color: C.gray500, fontSize: 13 }}>{subtitle}</p>}
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function SearchBar({ value, onChange, placeholder = "Search...", onRefresh }) {
+  return (
+    <Card style={{ marginBottom: 16, padding: "12px 16px" }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <span style={{ color: C.gray400, fontSize: 15 }}>🔍</span>
+        <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+          style={{ flex: 1, border: "none", outline: "none", fontSize: 14, color: C.gray900, background: "transparent" }} />
+        {value && <Btn onClick={() => onChange("")} variant="ghost" size="sm">✕</Btn>}
+        {onRefresh && <Btn onClick={onRefresh} variant="secondary" size="sm">↻ Refresh</Btn>}
+      </div>
+    </Card>
+  );
+}
+
+// ─── Status helpers ───────────────────────────────────────────────────────────
+function statusBadge(status) {
+  const map = {
+    uploaded: { text: "Uploaded", color: C.gray500, bg: C.gray100 },
+    processing: { text: "Processing…", color: C.amber, bg: C.amberLight },
+    processed: { text: "Processed ✓", color: C.green, bg: C.greenLight },
+    completed: { text: "Completed ✓", color: C.green, bg: C.greenLight },
+    failed: { text: "Failed", color: C.red, bg: C.redLight },
+    pending: { text: "Pending", color: C.amber, bg: C.amberLight },
+  };
+  const s = map[status] || map.uploaded;
+  return <Badge text={s.text} color={s.color} bg={s.bg} />;
+}
+
+function categoryBadge(cat) {
+  const map = {
+    medical: { color: C.blue, bg: C.blueLight },
+    legal: { color: C.purple, bg: C.purpleLight },
+    other: { color: C.gray500, bg: C.gray100 },
+  };
+  const s = map[cat] || map.other;
+  return <Badge text={cat || "other"} color={s.color} bg={s.bg} />;
+}
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+function Dashboard({ onNav, patients, documents, summaries }) {
+  const recentDocs = [...documents].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)).slice(0, 5);
+  const processed = documents.filter(d => d.status === "processed" || d.status === "completed").length;
+
+  return (
+    <div style={{ padding: 32 }}>
+      <SectionHeader title="Dashboard" subtitle="Welcome to ChartReview Pro" />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 28 }}>
+        <StatCard icon="👤" label="Patients" value={patients.length} color={C.blue} onClick={() => onNav("patients")} />
+        <StatCard icon="📄" label="Documents" value={documents.length} color={C.green} onClick={() => onNav("documents")} />
+        <StatCard icon="✅" label="Processed" value={processed} color={C.purple} />
+        <StatCard icon="📋" label="Summaries" value={summaries.length} color={C.amber} onClick={() => onNav("summaries")} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+        <Card>
+          <div style={{ fontWeight: 700, fontSize: 15, color: C.navy, marginBottom: 14 }}>Recent Documents</div>
+          {recentDocs.length === 0 ? (
+            <div style={{ color: C.gray400, fontSize: 13, textAlign: "center", padding: 20 }}>No documents yet</div>
+          ) : recentDocs.map(d => (
+            <div key={d.aws_document_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.gray100}` }}>
+              <span style={{ fontSize: 18 }}>📄</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 500, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.title || d.file_name}</div>
+                {d.patient_name && <div style={{ fontSize: 12, color: C.gray500 }}>👤 {d.patient_name}</div>}
+              </div>
+              {statusBadge(d.status)}
+            </div>
+          ))}
+        </Card>
+
+        <Card>
+          <div style={{ fontWeight: 700, fontSize: 15, color: C.navy, marginBottom: 14 }}>Patients</div>
+          {patients.length === 0 ? (
+            <div style={{ color: C.gray400, fontSize: 13, textAlign: "center", padding: 20 }}>No patients yet</div>
+          ) : patients.slice(0, 6).map(p => (
+            <div key={p.aws_patient_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.gray100}` }}>
+              <div style={{ width: 32, height: 32, borderRadius: "50%", background: C.blueLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, color: C.blue, flexShrink: 0 }}>
+                {(p.patient_name || "?")[0].toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 500, color: C.gray900 }}>{p.patient_name}</div>
+                {p.case_number && <div style={{ fontSize: 12, color: C.gray500 }}>Case: {p.case_number}</div>}
+              </div>
+            </div>
+          ))}
+          {patients.length > 6 && <div style={{ fontSize: 12, color: C.blue, marginTop: 8, cursor: "pointer" }} onClick={() => onNav("patients")}>View all {patients.length} patients →</div>}
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ─── Patients ─────────────────────────────────────────────────────────────────
+function Patients({ patients, documents, onNav, onSelectPatient, onRefresh }) {
   const [search, setSearch] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ patient_name: "", date_of_birth: "", case_number: "", notes: "" });
   const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ patient_name: "", date_of_birth: "", case_number: "", notes: "" });
 
-  const load = useCallback(() => {
-    setLoading(true);
-    awsGet("/patients").then(d => { setPatients(d.patients || []); setLoading(false); }).catch(() => setLoading(false));
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  const filtered = patients.filter(p =>
+    `${p.patient_name || ""} ${p.case_number || ""}`.toLowerCase().includes(search.toLowerCase())
+  );
 
   const openNew = () => { setEditing(null); setForm({ patient_name: "", date_of_birth: "", case_number: "", notes: "" }); setShowModal(true); };
   const openEdit = (p) => { setEditing(p); setForm({ patient_name: p.patient_name || "", date_of_birth: p.date_of_birth || "", case_number: p.case_number || "", notes: p.notes || "" }); setShowModal(true); };
 
   const save = async () => {
-    if (!form.patient_name) return alert("Patient name is required.");
+    if (!form.patient_name.trim()) return alert("Patient name is required.");
     setSaving(true);
     try {
       if (editing) await awsPut(`/patients/${editing.aws_patient_id}`, form);
       else await awsPost("/patients", form);
-      setShowModal(false); load();
-    } catch (e) { alert("Error saving patient: " + e.message); }
+      setShowModal(false);
+      onRefresh();
+    } catch (e) { alert(e.message); }
     setSaving(false);
   };
 
   const del = async (p) => {
-    if (!confirm(`Delete patient ${p.patient_name}? This cannot be undone.`)) return;
-    await awsDelete(`/patients/${p.aws_patient_id}`).catch(e => alert(e.message));
-    load();
+    if (!confirm(`Delete patient "${p.patient_name}"? This cannot be undone.`)) return;
+    try { await awsDelete(`/patients/${p.aws_patient_id}`); onRefresh(); } catch (e) { alert(e.message); }
   };
 
-  const filtered = patients.filter(p => `${p.patient_name || ""} ${p.case_number || ""}`.toLowerCase().includes(search.toLowerCase()));
+  const docCount = (id) => documents.filter(d => d.aws_patient_id === id).length;
 
   return (
     <div style={{ padding: 32 }}>
-      <PageHeader title="Patients" subtitle={`${patients.length} patients on file`}
+      <SectionHeader title="Patients" subtitle={`${patients.length} patient${patients.length !== 1 ? "s" : ""} on file`}
         action={<Btn onClick={openNew}>+ New Patient</Btn>} />
+      <SearchBar value={search} onChange={setSearch} placeholder="Search by name or case number..." onRefresh={onRefresh} />
 
-      <div style={{ marginBottom: 20 }}>
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or case number..."
-          style={{ padding: "10px 16px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, width: 320, outline: "none" }} />
-      </div>
-
-      {loading ? <Loading /> : filtered.length === 0 ? (
-        <Empty message="No patients found" action={<Btn onClick={openNew}>Add First Patient</Btn>} />
+      {filtered.length === 0 ? (
+        <Empty icon="👤" message="No patients found" action={<Btn onClick={openNew}>Add First Patient</Btn>} />
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
+        <div style={{ display: "grid", gap: 10 }}>
           {filtered.map(p => (
-            <Card key={p.aws_patient_id} style={{ display: "flex", alignItems: "center", gap: 16, cursor: "pointer" }}>
-              <div style={{ width: 44, height: 44, borderRadius: "50%", background: "#1e3a5f15", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>👤</div>
-              <div style={{ flex: 1 }} onClick={() => { setSelectedPatient(p); onNav("patient-detail"); }}>
-                <div style={{ fontSize: 16, fontWeight: 600, color: "#1e293b" }}>{p.patient_name}</div>
-                <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>
-                  {p.date_of_birth && `DOB: ${p.date_of_birth}`}{p.case_number && ` · Case: ${p.case_number}`}
+            <Card key={p.aws_patient_id} hover style={{ display: "flex", alignItems: "center", gap: 16 }}>
+              <div style={{ width: 44, height: 44, borderRadius: "50%", background: C.blueLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, color: C.blue, flexShrink: 0 }}>
+                {(p.patient_name || "?")[0].toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => { onSelectPatient(p); onNav("patient-detail"); }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: C.gray900 }}>{p.patient_name}</div>
+                <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 2 }}>
+                  {p.case_number && <span style={{ marginRight: 10 }}>📁 Case: {p.case_number}</span>}
+                  {p.date_of_birth && <span style={{ marginRight: 10 }}>🎂 DOB: {p.date_of_birth}</span>}
+                  <span>📄 {docCount(p.aws_patient_id)} document{docCount(p.aws_patient_id) !== 1 ? "s" : ""}</span>
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <Btn onClick={() => { setSelectedPatient(p); onNav("patient-detail"); }} variant="secondary">View</Btn>
-                <Btn onClick={() => openEdit(p)} variant="secondary">Edit</Btn>
-                <Btn onClick={() => del(p)} variant="danger">Delete</Btn>
+              <div style={{ display: "flex", gap: 6 }}>
+                <Btn onClick={() => { onSelectPatient(p); onNav("patient-detail"); }} variant="secondary" size="sm">View</Btn>
+                <Btn onClick={() => openEdit(p)} variant="ghost" size="sm">Edit</Btn>
+                <Btn onClick={() => del(p)} variant="ghost" size="sm" style={{ color: C.red }}>Delete</Btn>
               </div>
             </Card>
           ))}
@@ -311,15 +371,13 @@ function Patients({ onNav, setSelectedPatient }) {
 
       {showModal && (
         <Modal title={editing ? "Edit Patient" : "New Patient"} onClose={() => setShowModal(false)}>
-          <Input label="Patient Name" value={form.patient_name} onChange={v => setForm(f => ({ ...f, patient_name: v }))} required />
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" }}>
-            <Input label="Date of Birth" type="date" value={form.date_of_birth} onChange={v => setForm(f => ({ ...f, date_of_birth: v }))} />
-            <Input label="Case Number" value={form.case_number} onChange={v => setForm(f => ({ ...f, case_number: v }))} />
-          </div>
-          <Textarea label="Notes" value={form.notes} onChange={v => setForm(f => ({ ...f, notes: v }))} rows={3} />
-          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 8 }}>
+          <Field label="Patient Name" value={form.patient_name} onChange={v => setForm(p => ({ ...p, patient_name: v }))} required />
+          <Field label="Date of Birth" value={form.date_of_birth} onChange={v => setForm(p => ({ ...p, date_of_birth: v }))} placeholder="MM/DD/YYYY" />
+          <Field label="Case Number" value={form.case_number} onChange={v => setForm(p => ({ ...p, case_number: v }))} />
+          <Field label="Notes" value={form.notes} onChange={v => setForm(p => ({ ...p, notes: v }))} as="textarea" rows={3} />
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 4 }}>
             <Btn onClick={() => setShowModal(false)} variant="secondary">Cancel</Btn>
-            <Btn onClick={save} disabled={saving}>{saving ? "Saving..." : editing ? "Update" : "Create"}</Btn>
+            <Btn onClick={save} disabled={saving}>{saving ? "Saving…" : editing ? "Save Changes" : "Create Patient"}</Btn>
           </div>
         </Modal>
       )}
@@ -328,180 +386,107 @@ function Patients({ onNav, setSelectedPatient }) {
 }
 
 // ─── Patient Detail ───────────────────────────────────────────────────────────
-
-function PatientDetail({ patient, onNav, onBack }) {
-  const [documents, setDocuments] = useState([]);
-  const [summaries, setSummaries] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (!patient) return;
-    Promise.all([
-      awsGet(`/patients/${patient.aws_patient_id}/documents`).catch(() => ({ documents: [] })),
-    ]).then(([dData]) => {
-      setDocuments(dData.documents || []);
-      setLoading(false);
-    });
-  }, [patient]);
-
-  if (!patient) return <div style={{ padding: 32 }}>No patient selected. <Btn onClick={onBack} variant="secondary">Back</Btn></div>;
+function PatientDetail({ patient, documents, summaries, onBack, onNav }) {
+  const patientDocs = documents.filter(d => d.aws_patient_id === patient.aws_patient_id);
+  const patientSummaries = summaries.filter(s => s.aws_patient_id === patient.aws_patient_id);
 
   return (
     <div style={{ padding: 32 }}>
-      <div style={{ marginBottom: 20 }}>
-        <Btn onClick={onBack} variant="secondary">← Back to Patients</Btn>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+        <Btn onClick={onBack} variant="secondary" size="sm">← Back</Btn>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: C.navy }}>{patient.patient_name}</h1>
+        {patient.case_number && <Badge text={`Case: ${patient.case_number}`} color={C.blue} bg={C.blueLight} />}
       </div>
-      <PageHeader
-        title={patient.patient_name || "Patient Detail"}
-        subtitle={[patient.date_of_birth && `DOB: ${patient.date_of_birth}`, patient.case_number && `Case: ${patient.case_number}`].filter(Boolean).join(" · ")}
-      />
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-        <Card>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#1e3a5f" }}>Documents ({documents.length})</h3>
-            <Btn onClick={() => onNav("documents")} variant="secondary" style={{ fontSize: 12, padding: "5px 12px" }}>Upload</Btn>
-          </div>
-          {loading ? <Loading /> : documents.length === 0 ? (
-            <div style={{ textAlign: "center", color: "#94a3b8", padding: 20 }}>No documents yet</div>
-          ) : (
-            documents.map(d => (
-              <div key={d.id} style={{ padding: "10px 0", borderBottom: "1px solid #f1f5f9" }}>
-                <div style={{ fontSize: 14, fontWeight: 500 }}>{d.title || d.file_name}</div>
-                <div style={{ fontSize: 12, color: "#94a3b8" }}>{d.category} · {d.processing_status}</div>
-              </div>
-            ))
-          )}
-        </Card>
-
-        <Card>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#1e3a5f" }}>Summaries ({summaries.length})</h3>
-            <Btn onClick={() => onNav("summaries")} variant="secondary" style={{ fontSize: 12, padding: "5px 12px" }}>Create</Btn>
-          </div>
-          {summaries.length === 0 ? (
-            <div style={{ textAlign: "center", color: "#94a3b8", padding: 20 }}>No summaries yet</div>
-          ) : (
-            summaries.map(s => (
-              <div key={s.id} style={{ padding: "10px 0", borderBottom: "1px solid #f1f5f9" }}>
-                <div style={{ fontSize: 14, fontWeight: 500 }}>{s.title}</div>
-              </div>
-            ))
-          )}
-        </Card>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14, marginBottom: 24 }}>
+        <StatCard icon="📄" label="Documents" value={patientDocs.length} color={C.blue} />
+        <StatCard icon="📋" label="Summaries" value={patientSummaries.length} color={C.purple} />
+        <StatCard icon="✅" label="Processed" value={patientDocs.filter(d => d.status === "processed" || d.status === "completed").length} color={C.green} />
       </div>
 
       {patient.notes && (
-        <Card style={{ marginTop: 24 }}>
-          <h3 style={{ margin: "0 0 12px", fontSize: 16, fontWeight: 600, color: "#1e3a5f" }}>Notes</h3>
-          <p style={{ margin: 0, color: "#374151", fontSize: 14, lineHeight: 1.6 }}>{patient.notes}</p>
+        <Card style={{ marginBottom: 20, background: C.gray50 }}>
+          <div style={{ fontSize: 12.5, color: C.gray500, fontWeight: 600, marginBottom: 4 }}>NOTES</div>
+          <div style={{ fontSize: 14, color: C.gray700 }}>{patient.notes}</div>
+        </Card>
+      )}
+
+      <Card style={{ marginBottom: 20 }}>
+        <div style={{ fontWeight: 700, fontSize: 15, color: C.navy, marginBottom: 14 }}>Documents</div>
+        {patientDocs.length === 0 ? (
+          <div style={{ color: C.gray400, textAlign: "center", padding: 24, fontSize: 13 }}>No documents for this patient</div>
+        ) : patientDocs.map(d => (
+          <div key={d.aws_document_id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${C.gray100}` }}>
+            <span style={{ fontSize: 20 }}>📄</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: C.gray900 }}>{d.title || d.file_name}</div>
+              <div style={{ fontSize: 12, color: C.gray500 }}>{d.category} · {d.created_at ? new Date(d.created_at).toLocaleDateString() : "—"}</div>
+            </div>
+            {statusBadge(d.status)}
+          </div>
+        ))}
+      </Card>
+
+      {patientSummaries.length > 0 && (
+        <Card>
+          <div style={{ fontWeight: 700, fontSize: 15, color: C.navy, marginBottom: 14 }}>AI Summaries</div>
+          {patientSummaries.map(s => (
+            <div key={s.aws_summary_id} style={{ padding: "12px 0", borderBottom: `1px solid ${C.gray100}` }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: C.gray900, marginBottom: 4 }}>{s.document_title || "Summary"}</div>
+              <div style={{ fontSize: 13, color: C.gray600, lineHeight: 1.6 }}>{(s.summary || "").substring(0, 300)}…</div>
+            </div>
+          ))}
         </Card>
       )}
     </div>
   );
 }
 
-
 // ─── Documents ────────────────────────────────────────────────────────────────
-
-function Documents() {
-  const [allDocuments, setAllDocuments] = useState([]);
-  const [patients, setPatients] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
+function Documents({ patients, documents, onRefresh }) {
+  const [search, setSearch] = useState("");
+  const [catFilter, setCatFilter] = useState("all");
   const [showUpload, setShowUpload] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState(null);
-  const [filterName, setFilterName] = useState("");
-  const [uploadForm, setUploadForm] = useState({ patient_name: "", title: "", category: "Medical Records" });
-  const [file, setFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
   const [processing, setProcessing] = useState({});
+  const [file, setFile] = useState(null);
+  const [uploadForm, setUploadForm] = useState({ patient_name: "", title: "", category: "Medical Records" });
 
   const categories = ["Medical Records", "Imaging", "Lab Results", "Operative Notes", "Discharge Summary", "Consultation", "Physical Therapy", "Mental Health", "Legal", "Other"];
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const pData = await awsGet("/patients").catch(() => ({ patients: [] }));
-      const pts = pData.patients || [];
-      setPatients(pts);
-
-      // Fetch documents for all patients in parallel
-      const docResults = await Promise.all(
-        pts.map(p => awsGet(`/patients/${p.aws_patient_id}/documents`).catch(() => []))
-      );
-      const allDocs = docResults.flat();
-      setAllDocuments(allDocs);
-    } catch (e) {
-      console.error("load error", e);
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  const filtered = documents.filter(d => {
+    const q = search.toLowerCase();
+    const matchQ = !search || `${d.patient_name || ""} ${d.title || ""} ${d.file_name || ""}`.toLowerCase().includes(q);
+    const matchCat = catFilter === "all" || (d.category || "").toLowerCase() === catFilter;
+    return matchQ && matchCat;
+  });
 
   const uploadDoc = async () => {
     if (!file) return alert("Please select a file.");
-    const patientName = uploadForm.patient_name.trim();
-    if (!patientName) return alert("Please enter a patient name.");
-
+    if (!uploadForm.patient_name.trim()) return alert("Please enter a patient name.");
     setUploading(true);
     try {
-      // Step 1: Always create a new patient record
-      let awsPatientId = null;
-      try {
-        const pRes = await awsPost("/patients", { patient_name: patientName });
-        awsPatientId = pRes?.aws_patient_id || null;
-      } catch (e) {
-        alert("Upload failed at Step 1 (create patient): " + e.message);
-        setUploading(false); return;
-      }
-
-      // Step 2: Get presigned S3 upload URL
-      let uploadData;
-      try {
-        const docPayload = {
-          aws_patient_id: awsPatientId,
-          patient_name: patientName,
-          file_name: file.name,
-          content_type: file.type || "application/octet-stream",
-          title: uploadForm.title || file.name,
-          category: uploadForm.category,
-        };
-        uploadData = await awsPost("/documents/upload-url", docPayload);
-        if (!uploadData.upload_url) throw new Error("No upload_url in response");
-      } catch (e) {
-        alert("Upload failed at Step 2 (get upload URL): " + e.message);
-        setUploading(false); return;
-      }
-
-      // Step 3: Upload directly to S3
-      try {
-        const s3Res = await fetch(uploadData.upload_url, {
-          method: "PUT",
-          body: file,
-          headers: { "Content-Type": file.type || "application/octet-stream" }
-        });
-        if (!s3Res.ok) throw new Error("S3 upload failed: " + s3Res.status);
-      } catch (e) {
-        alert("Upload failed at Step 3 (S3 PUT): " + e.message);
-        setUploading(false); return;
-      }
-
-      // Step 4: Trigger AI processing
-      try {
-        await awsPost(`/documents/${uploadData.aws_document_id}/process`, {});
-      } catch (e) {
-        console.warn("Processing trigger failed (non-fatal):", e.message);
-      }
-
-      alert("Document uploaded! AI summary is being generated — check back in a moment.");
-      setShowUpload(false);
-      setFile(null);
+      const pRes = await awsPost("/patients", { patient_name: uploadForm.patient_name.trim() });
+      const awsPatientId = pRes?.aws_patient_id || null;
+      const docPayload = {
+        aws_patient_id: awsPatientId,
+        patient_name: uploadForm.patient_name.trim(),
+        file_name: file.name,
+        content_type: file.type || "application/octet-stream",
+        title: uploadForm.title || file.name,
+        category: uploadForm.category,
+      };
+      const uploadData = await awsPost("/documents/upload-url", docPayload);
+      if (!uploadData.upload_url) throw new Error("No upload URL returned");
+      const s3Res = await fetch(uploadData.upload_url, { method: "PUT", body: file, headers: { "Content-Type": file.type || "application/octet-stream" } });
+      if (!s3Res.ok) throw new Error("S3 upload failed: " + s3Res.status);
+      await awsPost(`/documents/${uploadData.aws_document_id}/process`, {}).catch(() => {});
+      alert("Document uploaded! AI summary is generating — refresh in a moment.");
+      setShowUpload(false); setFile(null);
       setUploadForm({ patient_name: "", title: "", category: "Medical Records" });
-      await load();
-    } catch (e) {
-      alert("Upload failed: " + e.message);
-    }
+      onRefresh();
+    } catch (e) { alert("Upload failed: " + e.message); }
     setUploading(false);
   };
 
@@ -509,71 +494,55 @@ function Documents() {
     setProcessing(p => ({ ...p, [doc.aws_document_id]: true }));
     try {
       const res = await awsPost(`/documents/${doc.aws_document_id}/process`, {});
-      alert("Processing complete!\n\n" + (res.summary ? res.summary.substring(0, 400) + "..." : "Summary saved."));
-      await load();
-    } catch (e) {
-      alert("Processing failed: " + e.message);
-    }
+      alert("✅ Summary generated!\n\n" + (res.summary || "").substring(0, 500));
+      onRefresh();
+    } catch (e) { alert("Processing failed: " + e.message); }
     setProcessing(p => ({ ...p, [doc.aws_document_id]: false }));
-  };
-
-  const filtered = allDocuments.filter(d =>
-    !filterName || (d.patient_name || d.title || d.file_name || "").toLowerCase().includes(filterName.toLowerCase())
-  );
-
-  const statusBadge = (status) => {
-    const map = {
-      uploaded: { text: "Uploaded", color: "#64748b", bg: "#f1f5f9" },
-      processing: { text: "Processing", color: "#d97706", bg: "#fef3c7" },
-      processed: { text: "Processed ✓", color: "#10b981", bg: "#d1fae5" },
-      failed: { text: "Failed", color: "#ef4444", bg: "#fee2e2" },
-    };
-    const s = map[status] || map.uploaded;
-    return <Badge text={s.text} color={s.color} bg={s.bg} />;
   };
 
   return (
     <div style={{ padding: 32 }}>
-      <PageHeader title="Documents" subtitle="Upload and manage medical documents"
+      <SectionHeader title="Documents" subtitle={`${documents.length} document${documents.length !== 1 ? "s" : ""}`}
         action={<Btn onClick={() => setShowUpload(true)}>+ Upload Document</Btn>} />
 
-      <Card style={{ marginBottom: 20 }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          <input value={filterName} onChange={e => setFilterName(e.target.value)}
-            placeholder="Filter by patient name or title..."
-            style={{ flex: 1, padding: "9px 12px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, outline: "none" }} />
-          <Btn onClick={load} variant="secondary">↻ Refresh</Btn>
-          {filterName && <Btn onClick={() => setFilterName("")} variant="secondary">Clear</Btn>}
+      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        <div style={{ flex: 1 }}>
+          <SearchBar value={search} onChange={setSearch} placeholder="Search by patient, title…" onRefresh={onRefresh} />
         </div>
-      </Card>
+        <select value={catFilter} onChange={e => setCatFilter(e.target.value)}
+          style={{ padding: "0 14px", border: `1px solid ${C.gray200}`, borderRadius: 8, fontSize: 13.5, color: C.gray700, background: C.white, cursor: "pointer" }}>
+          <option value="all">All Categories</option>
+          <option value="medical">Medical</option>
+          <option value="legal">Legal</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
 
-      {loading ? <Loading /> : allDocuments.length === 0 ? (
-        <Empty message="No documents uploaded yet"
-          action={<Btn onClick={() => setShowUpload(true)}>Upload First Document</Btn>} />
+      {documents.length === 0 ? (
+        <Empty icon="📄" message="No documents uploaded yet" action={<Btn onClick={() => setShowUpload(true)}>Upload First Document</Btn>} />
       ) : filtered.length === 0 ? (
-        <Empty message={"No documents matching \"" + filterName + "\""} action={<Btn onClick={() => setFilterName("")} variant="secondary">Clear Filter</Btn>} />
+        <Empty icon="🔍" message="No documents match your search" />
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
+        <div style={{ display: "grid", gap: 10 }}>
           {filtered.map(d => (
-            <Card key={d.aws_document_id}>
-              <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                <div style={{ fontSize: 28 }}>📄</div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 15, fontWeight: 600 }}>{d.title || d.file_name}</div>
-                  <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>
-                    {d.patient_name && <span style={{ marginRight: 8 }}>👤 {d.patient_name}</span>}
-                    {d.category && <span style={{ marginRight: 8 }}>{d.category}</span>}
-                    {statusBadge(d.status)}
-                  </div>
+            <Card key={d.aws_document_id} hover style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 10, background: C.blueLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>📄</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14.5, fontWeight: 600, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.title || d.file_name}</div>
+                <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 2, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  {d.patient_name && <span>👤 {d.patient_name}</span>}
+                  {d.category && categoryBadge(d.category)}
+                  {d.created_at && <span>📅 {new Date(d.created_at).toLocaleDateString()}</span>}
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  {d.status !== "processed" && (
-                    <Btn onClick={() => processDoc(d)} variant="secondary" disabled={processing[d.aws_document_id]}>
-                      {processing[d.aws_document_id] ? "Processing..." : "⚡ Process"}
-                    </Btn>
-                  )}
-                  <Btn onClick={() => setSelectedDoc(d)} variant="secondary">View</Btn>
-                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                {statusBadge(d.status)}
+                {(d.status === "uploaded" || d.status === "failed") && (
+                  <Btn onClick={() => processDoc(d)} variant="blue" size="sm" disabled={processing[d.aws_document_id]}>
+                    {processing[d.aws_document_id] ? "…" : "⚡ Process"}
+                  </Btn>
+                )}
+                <Btn onClick={() => setSelectedDoc(d)} variant="secondary" size="sm">View</Btn>
               </div>
             </Card>
           ))}
@@ -581,51 +550,54 @@ function Documents() {
       )}
 
       {showUpload && (
-        <Modal title="Upload Document" onClose={() => { setShowUpload(false); setFile(null); }}>
-          <Input
-            label="Patient Name *"
-            value={uploadForm.patient_name}
-            onChange={v => setUploadForm(f => ({ ...f, patient_name: v }))}
-            placeholder="e.g. John Smith"
-            required
-          />
-          <Input label="Document Title" value={uploadForm.title} onChange={v => setUploadForm(f => ({ ...f, title: v }))} placeholder="Leave blank to use filename" />
-          <Select label="Category" value={uploadForm.category} onChange={v => setUploadForm(f => ({ ...f, category: v }))}
+        <Modal title="Upload Document" subtitle="Document will be processed by AI automatically" onClose={() => { setShowUpload(false); setFile(null); }}>
+          <Field label="Patient Name" value={uploadForm.patient_name} onChange={v => setUploadForm(f => ({ ...f, patient_name: v }))} placeholder="e.g. John Smith" required />
+          <Field label="Document Title" value={uploadForm.title} onChange={v => setUploadForm(f => ({ ...f, title: v }))} placeholder="Leave blank to use filename" />
+          <Field label="Category" value={uploadForm.category} onChange={v => setUploadForm(f => ({ ...f, category: v }))} as="select"
             options={categories.map(c => ({ value: c, label: c }))} />
           <div style={{ marginBottom: 16 }}>
-            <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#374151", marginBottom: 6 }}>File <span style={{ color: "#ef4444" }}>*</span></label>
+            <label style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: C.gray700, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.4px" }}>
+              File <span style={{ color: C.red }}>*</span>
+            </label>
             <input type="file" accept=".pdf,.jpg,.jpeg,.png,.tiff" onChange={e => setFile(e.target.files[0])} style={{ fontSize: 14 }} />
+            {file && <div style={{ marginTop: 6, fontSize: 12, color: C.gray500 }}>📎 {file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)</div>}
           </div>
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
             <Btn onClick={() => { setShowUpload(false); setFile(null); }} variant="secondary">Cancel</Btn>
-            <Btn onClick={uploadDoc} disabled={uploading}>{uploading ? "Uploading..." : "Upload"}</Btn>
+            <Btn onClick={uploadDoc} disabled={uploading}>{uploading ? "Uploading…" : "Upload & Process"}</Btn>
           </div>
         </Modal>
       )}
 
       {selectedDoc && (
-        <Modal title={selectedDoc.title || selectedDoc.file_name} onClose={() => setSelectedDoc(null)} width={700}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
-            <div><span style={{ fontSize: 12, color: "#64748b" }}>Patient</span><div style={{ fontWeight: 500 }}>{selectedDoc.patient_name || "—"}</div></div>
-            <div><span style={{ fontSize: 12, color: "#64748b" }}>Category</span><div style={{ fontWeight: 500 }}>{selectedDoc.category || "—"}</div></div>
-            <div><span style={{ fontSize: 12, color: "#64748b" }}>Status</span><div>{statusBadge(selectedDoc.status)}</div></div>
-            <div><span style={{ fontSize: 12, color: "#64748b" }}>Uploaded</span><div style={{ fontWeight: 500 }}>{selectedDoc.created_at ? new Date(selectedDoc.created_at).toLocaleDateString() : "—"}</div></div>
+        <Modal title={selectedDoc.title || selectedDoc.file_name} subtitle={`Patient: ${selectedDoc.patient_name || "—"}`} onClose={() => setSelectedDoc(null)} width={700}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 20 }}>
+            <div style={{ background: C.gray50, borderRadius: 8, padding: 12 }}>
+              <div style={{ fontSize: 11, color: C.gray500, fontWeight: 600, marginBottom: 3 }}>STATUS</div>
+              {statusBadge(selectedDoc.status)}
+            </div>
+            <div style={{ background: C.gray50, borderRadius: 8, padding: 12 }}>
+              <div style={{ fontSize: 11, color: C.gray500, fontWeight: 600, marginBottom: 3 }}>CATEGORY</div>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>{selectedDoc.category || "—"}</div>
+            </div>
+            <div style={{ background: C.gray50, borderRadius: 8, padding: 12 }}>
+              <div style={{ fontSize: 11, color: C.gray500, fontWeight: 600, marginBottom: 3 }}>UPLOADED</div>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>{selectedDoc.created_at ? new Date(selectedDoc.created_at).toLocaleDateString() : "—"}</div>
+            </div>
           </div>
           {selectedDoc.aws_summary_id && (
-            <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8, padding: 16, marginBottom: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: "#166534", marginBottom: 4 }}>✓ AI Summary Generated</div>
-              <div style={{ fontSize: 13, color: "#166534" }}>Summary ID: {selectedDoc.aws_summary_id}</div>
+            <div style={{ background: C.greenLight, border: `1px solid #6ee7b7`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#065f46" }}>✓ AI Summary Generated</div>
+              <div style={{ fontSize: 12, color: "#047857", marginTop: 2 }}>Summary ID: {selectedDoc.aws_summary_id}</div>
             </div>
           )}
           <div style={{ display: "flex", gap: 8 }}>
-            {selectedDoc.status !== "processed" && (
-              <Btn onClick={() => { processDoc(selectedDoc); setSelectedDoc(null); }} variant="success">⚡ Generate Summary</Btn>
+            {(selectedDoc.status === "uploaded" || selectedDoc.status === "failed") && (
+              <Btn onClick={() => { processDoc(selectedDoc); setSelectedDoc(null); }} variant="success">⚡ Generate AI Summary</Btn>
             )}
             <Btn onClick={async () => {
-              try {
-                const r = await awsGet(`/documents/${selectedDoc.aws_document_id}/download-url`);
-                window.open(r.download_url, "_blank");
-              } catch (e) { alert("Download failed: " + e.message); }
+              try { const r = await awsGet(`/documents/${selectedDoc.aws_document_id}/download-url`); window.open(r.download_url, "_blank"); }
+              catch (e) { alert("Download failed: " + e.message); }
             }} variant="secondary">⬇ Download</Btn>
           </div>
         </Modal>
@@ -634,140 +606,57 @@ function Documents() {
   );
 }
 
-function Summaries() {
-  const [summaries, setSummaries] = useState([]);
-  const [patients, setPatients] = useState([]);
-  const [macros, setMacros] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(null);
-  const [showForm, setShowForm] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
-    patient_id: "", case_number: "", header_note: "", ime_note: "", chart_review_note: "",
-    physical_examination_note: "", discussion_note: "", footer_note: "", status: "Draft"
-  });
+// ─── Summaries ────────────────────────────────────────────────────────────────
+function Summaries({ summaries, onRefresh }) {
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [pData, sData] = await Promise.all([
-        awsGet("/patients").catch(() => ({ patients: [] })),
-        awsGet("/summaries").catch(() => ({ summaries: [] })),
-      ]);
-      setPatients(pData.patients || []);
-      setSummaries(sData.summaries || []);
-    } catch (e) {}
-    setLoading(false);
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  // Load macros from Base44
-  useEffect(() => {
-    import("../api/entities").then(({ NotesMacro }) => {
-      NotesMacro.list().then(setMacros).catch(() => {});
-    });
-  }, []);
-
-  const openNew = () => {
-    setEditing(null);
-    setForm({ patient_id: "", case_number: "", header_note: "", ime_note: "", chart_review_note: "", physical_examination_note: "", discussion_note: "", footer_note: "", status: "Draft" });
-    setShowForm(true);
-  };
-
-  const openEdit = (s) => {
-    setEditing(s);
-    setForm({ patient_id: s.patient_id || "", case_number: s.case_number || "", header_note: s.header_note || "", ime_note: s.ime_note || "", chart_review_note: s.chart_review_note || "", physical_examination_note: s.physical_examination_note || "", discussion_note: s.discussion_note || "", footer_note: s.footer_note || "", status: s.status || "Draft" });
-    setShowForm(true);
-  };
-
-  const save = async () => {
-    if (!form.patient_id) return alert("Please select a patient.");
-    setSaving(true);
-    try {
-      const patient = patients.find(p => p.aws_patient_id === form.patient_id);
-      const payload = { ...form, patient_name: patient ? patient.patient_name : "" };
-      if (editing) await awsPut(`/summaries/${editing.id}`, payload);
-      else await awsPost("/summaries", payload);
-      setShowForm(false);
-      load();
-    } catch (e) { alert("Error: " + e.message); }
-    setSaving(false);
-  };
-
-  const del = async (s) => {
-    if (!confirm("Delete this summary?")) return;
-    await awsDelete(`/summaries/${s.id}`).catch(e => alert(e.message));
-    load();
-  };
-
-  const insertMacro = (field, macro) => {
-    setForm(f => ({ ...f, [field]: (f[field] ? f[field] + "\n\n" : "") + macro.content }));
-  };
-
-  const sectionField = (label, field) => (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <label style={{ fontSize: 13, fontWeight: 600, color: "#1e3a5f" }}>{label}</label>
-        {macros.filter(m => m.section === label || !m.section).length > 0 && (
-          <select onChange={e => { if (e.target.value) { const m = macros.find(x => x.id === e.target.value); if (m) insertMacro(field, m); e.target.value = ""; } }}
-            style={{ fontSize: 12, padding: "3px 8px", border: "1px solid #cbd5e1", borderRadius: 6 }}>
-            <option value="">Insert macro...</option>
-            {macros.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-          </select>
-        )}
-      </div>
-      <textarea value={form[field]} onChange={e => setForm(f => ({ ...f, [field]: e.target.value }))} rows={4}
-        style={{ width: "100%", padding: "9px 12px", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 14, boxSizing: "border-box", resize: "vertical" }} />
-    </div>
+  const filtered = summaries.filter(s =>
+    !search || `${s.patient_name || ""} ${s.document_title || ""} ${s.summary || ""}`.toLowerCase().includes(search.toLowerCase())
   );
 
   return (
     <div style={{ padding: 32 }}>
-      <PageHeader title="Medical Summaries" subtitle={`${summaries.length} summaries`}
-        action={<Btn onClick={openNew}>+ New Summary</Btn>} />
+      <SectionHeader title="AI Summaries" subtitle={`${summaries.length} summary${summaries.length !== 1 ? "ies" : "y"} generated`} />
+      <SearchBar value={search} onChange={setSearch} placeholder="Search summaries…" onRefresh={onRefresh} />
 
-      {loading ? <Loading /> : summaries.length === 0 ? (
-        <Empty message="No summaries yet" action={<Btn onClick={openNew}>Create First Summary</Btn>} />
+      {summaries.length === 0 ? (
+        <Empty icon="📋" message="No summaries yet — process a document to generate one" />
+      ) : filtered.length === 0 ? (
+        <Empty icon="🔍" message="No summaries match your search" />
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {summaries.map(s => (
-            <Card key={s.id}>
-              <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                <div style={{ fontSize: 28 }}>📋</div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 15, fontWeight: 600 }}>{s.patient_name || "Unknown Patient"}</div>
-                  <div style={{ fontSize: 13, color: "#64748b" }}>Case: {s.case_number || "—"} · <Badge text={s.status || "Draft"} color={s.status === "Final" ? "#10b981" : "#f59e0b"} bg={s.status === "Final" ? "#d1fae5" : "#fef3c7"} /></div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {filtered.map(s => (
+            <Card key={s.aws_summary_id} hover onClick={() => setSelected(s)} style={{ cursor: "pointer" }}>
+              <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+                <div style={{ width: 40, height: 40, borderRadius: 10, background: C.purpleLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>📋</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 600, color: C.gray900, marginBottom: 2 }}>{s.document_title || "Summary"}</div>
+                  {s.patient_name && <div style={{ fontSize: 12.5, color: C.blue, marginBottom: 6 }}>👤 {s.patient_name}</div>}
+                  <div style={{ fontSize: 13, color: C.gray600, lineHeight: 1.55, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+                    {s.summary || "No summary text"}
+                  </div>
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <Btn onClick={() => openEdit(s)} variant="secondary">Edit</Btn>
-                  <Btn onClick={() => del(s)} variant="danger">Delete</Btn>
-                </div>
+                <div style={{ fontSize: 11, color: C.gray400, flexShrink: 0 }}>{s.created_at ? new Date(s.created_at).toLocaleDateString() : "—"}</div>
               </div>
             </Card>
           ))}
         </div>
       )}
 
-      {showForm && (
-        <Modal title={editing ? "Edit Summary" : "New Summary"} onClose={() => setShowForm(false)} width={760}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px" }}>
-            <Select label="Patient *" value={form.patient_id} onChange={v => setForm(f => ({ ...f, patient_id: v }))}
-              options={[{ value: "", label: "Select patient..." }, ...patients.map(p => ({ value: p.aws_patient_id, label: p.patient_name || p.aws_patient_id }))]} />
-            <Input label="Case Number" value={form.case_number} onChange={v => setForm(f => ({ ...f, case_number: v }))} />
+      {selected && (
+        <Modal title={selected.document_title || "Summary"} subtitle={selected.patient_name ? `Patient: ${selected.patient_name}` : undefined} onClose={() => setSelected(null)} width={800}>
+          <div style={{ background: C.gray50, borderRadius: 10, padding: 20, maxHeight: 500, overflow: "auto" }}>
+            <pre style={{ margin: 0, fontFamily: "inherit", fontSize: 13.5, lineHeight: 1.7, whiteSpace: "pre-wrap", color: C.gray700 }}>{selected.summary || "No summary available"}</pre>
           </div>
-          <Select label="Status" value={form.status} onChange={v => setForm(f => ({ ...f, status: v }))}
-            options={[{ value: "Draft", label: "Draft" }, { value: "In Progress", label: "In Progress" }, { value: "Final", label: "Final" }]} />
-          {sectionField("Header Note", "header_note")}
-          {sectionField("IME Note", "ime_note")}
-          {sectionField("Chart Review Note", "chart_review_note")}
-          {sectionField("Physical Examination Note", "physical_examination_note")}
-          {sectionField("Discussion Note", "discussion_note")}
-          {sectionField("Footer Note", "footer_note")}
-          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 8 }}>
-            <Btn onClick={() => setShowForm(false)} variant="secondary">Cancel</Btn>
-            <Btn onClick={save} disabled={saving}>{saving ? "Saving..." : editing ? "Update" : "Create"}</Btn>
-          </div>
+          {selected.extracted_text && (
+            <details style={{ marginTop: 16 }}>
+              <summary style={{ cursor: "pointer", fontSize: 13, color: C.gray500, fontWeight: 500 }}>Show extracted text</summary>
+              <div style={{ background: C.gray50, borderRadius: 8, padding: 14, marginTop: 8, maxHeight: 200, overflow: "auto", fontSize: 12, color: C.gray600, lineHeight: 1.6 }}>
+                {selected.extracted_text}
+              </div>
+            </details>
+          )}
         </Modal>
       )}
     </div>
@@ -775,69 +664,69 @@ function Summaries() {
 }
 
 // ─── Notes Macros ─────────────────────────────────────────────────────────────
-
 function NotesMacros() {
   const [macros, setMacros] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [NotesMacroEntity, setEntity] = useState(null);
+  const [search, setSearch] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", content: "", section: "" });
-  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    import("../api/entities").then(({ NotesMacro }) => {
-      setEntity(() => NotesMacro);
-      NotesMacro.list().then(setMacros).catch(() => {}).finally(() => setLoading(false));
-    });
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { NotesMacro } = await import("../api/entities");
+      const data = await NotesMacro.list();
+      setMacros(data);
+    } catch (e) { console.error(e); }
+    setLoading(false);
   }, []);
 
-  const load = () => NotesMacroEntity?.list().then(setMacros).catch(() => {});
+  useEffect(() => { load(); }, [load]);
 
   const openNew = () => { setEditing(null); setForm({ name: "", content: "", section: "" }); setShowModal(true); };
-  const openEdit = (m) => { setEditing(m); setForm({ name: m.name, content: m.content, section: m.section || "" }); setShowModal(true); };
+  const openEdit = (m) => { setEditing(m); setForm({ name: m.name || "", content: m.content || "", section: m.section || "" }); setShowModal(true); };
 
   const save = async () => {
-    if (!form.name || !form.content) return alert("Name and content are required.");
-    setSaving(true);
+    if (!form.name.trim()) return alert("Name is required.");
     try {
-      if (editing) await NotesMacroEntity.update(editing.id, form);
-      else await NotesMacroEntity.create(form);
+      const { NotesMacro } = await import("../api/entities");
+      if (editing) await NotesMacro.update(editing.id, form);
+      else await NotesMacro.create(form);
       setShowModal(false); load();
-    } catch (e) { alert("Error: " + e.message); }
-    setSaving(false);
+    } catch (e) { alert(e.message); }
   };
 
   const del = async (m) => {
-    if (!confirm("Delete this macro?")) return;
-    await NotesMacroEntity.delete(m.id).catch(e => alert(e.message));
-    load();
+    if (!confirm(`Delete macro "${m.name}"?`)) return;
+    try { const { NotesMacro } = await import("../api/entities"); await NotesMacro.delete(m.id); load(); } catch (e) { alert(e.message); }
   };
 
-  const sections = ["Header Note", "IME Note", "Chart Review Note", "Physical Examination Note", "Discussion Note", "Footer Note"];
+  const sections = [...new Set(macros.map(m => m.section).filter(Boolean))];
+  const filtered = macros.filter(m => !search || `${m.name} ${m.section} ${m.content}`.toLowerCase().includes(search.toLowerCase()));
 
   return (
     <div style={{ padding: 32 }}>
-      <PageHeader title="Notes Macros" subtitle="Reusable text snippets for summary sections"
-        action={<Btn onClick={openNew}>+ New Macro</Btn>} />
+      <SectionHeader title="Notes Macros" subtitle="Reusable text templates for clinical notes" action={<Btn onClick={openNew}>+ New Macro</Btn>} />
+      <SearchBar value={search} onChange={setSearch} placeholder="Search macros…" onRefresh={load} />
 
-      {loading ? <Loading /> : macros.length === 0 ? (
-        <Empty message="No macros yet — create reusable text snippets for your summaries" action={<Btn onClick={openNew}>Create First Macro</Btn>} />
+      {loading ? <Spinner /> : filtered.length === 0 ? (
+        <Empty icon="📝" message="No macros yet" action={<Btn onClick={openNew}>Create First Macro</Btn>} />
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {macros.map(m => (
-            <Card key={m.id}>
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
-                <div style={{ fontSize: 28 }}>📝</div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 15, fontWeight: 600 }}>{m.name}</div>
-                  {m.section && <Badge text={m.section} color="#6366f1" bg="#eef2ff" />}
-                  <div style={{ fontSize: 13, color: "#64748b", marginTop: 6, lineHeight: 1.6, maxHeight: 60, overflow: "hidden" }}>{m.content}</div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {filtered.map(m => (
+            <Card key={m.id} hover style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                  <span style={{ fontSize: 14.5, fontWeight: 600, color: C.gray900 }}>{m.name}</span>
+                  {m.section && <Badge text={m.section} color={C.purple} bg={C.purpleLight} />}
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <Btn onClick={() => openEdit(m)} variant="secondary">Edit</Btn>
-                  <Btn onClick={() => del(m)} variant="danger">Delete</Btn>
-                </div>
+                <div style={{ fontSize: 13, color: C.gray500, lineHeight: 1.5, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{m.content}</div>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <Btn onClick={() => { navigator.clipboard?.writeText(m.content); }} variant="secondary" size="sm">Copy</Btn>
+                <Btn onClick={() => openEdit(m)} variant="ghost" size="sm">Edit</Btn>
+                <Btn onClick={() => del(m)} variant="ghost" size="sm" style={{ color: C.red }}>Del</Btn>
               </div>
             </Card>
           ))}
@@ -846,13 +735,12 @@ function NotesMacros() {
 
       {showModal && (
         <Modal title={editing ? "Edit Macro" : "New Macro"} onClose={() => setShowModal(false)}>
-          <Input label="Macro Name" value={form.name} onChange={v => setForm(f => ({ ...f, name: v }))} required placeholder="e.g. Normal Physical Exam" />
-          <Select label="Section (optional)" value={form.section} onChange={v => setForm(f => ({ ...f, section: v }))}
-            options={[{ value: "", label: "Any section" }, ...sections.map(s => ({ value: s, label: s }))]} />
-          <Textarea label="Content" value={form.content} onChange={v => setForm(f => ({ ...f, content: v }))} rows={6} placeholder="Enter the text that will be inserted..." />
+          <Field label="Name" value={form.name} onChange={v => setForm(p => ({ ...p, name: v }))} required placeholder="e.g. Normal Physical Exam" />
+          <Field label="Section" value={form.section} onChange={v => setForm(p => ({ ...p, section: v }))} placeholder="e.g. Physical Exam, HPI, Assessment" />
+          <Field label="Content" value={form.content} onChange={v => setForm(p => ({ ...p, content: v }))} as="textarea" rows={6} placeholder="Enter macro text…" />
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
             <Btn onClick={() => setShowModal(false)} variant="secondary">Cancel</Btn>
-            <Btn onClick={save} disabled={saving}>{saving ? "Saving..." : editing ? "Update" : "Create"}</Btn>
+            <Btn onClick={save}>{editing ? "Save Changes" : "Create Macro"}</Btn>
           </div>
         </Modal>
       )}
@@ -861,102 +749,93 @@ function NotesMacros() {
 }
 
 // ─── Admin ────────────────────────────────────────────────────────────────────
-
 function Admin() {
-  const [tab, setTab] = useState("breaches");
-  const [breaches, setBreaches] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
-  const [BreachEntity, setBreachEntity] = useState(null);
-  const [SuggestionEntity, setSuggestionEntity] = useState(null);
+  const [breaches, setBreaches] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [showModal, setShowModal] = useState(false);
-  const [modalType, setModalType] = useState("breach");
-  const [form, setForm] = useState({});
-  const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState("suggestions");
+  const [showBreachModal, setShowBreachModal] = useState(false);
+  const [form, setForm] = useState({ event_type: "", severity: "low", description: "", affected_users: "", status: "open" });
 
-  useEffect(() => {
-    import("../api/entities").then(({ BreachNotification, Suggestion }) => {
-      setBreachEntity(() => BreachNotification);
-      setSuggestionEntity(() => Suggestion);
-      Promise.all([BreachNotification.list(), Suggestion.list()]).then(([b, s]) => {
-        setBreaches(b); setSuggestions(s); setLoading(false);
-      }).catch(() => setLoading(false));
-    });
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { Suggestion, BreachNotification } = await import("../api/entities");
+      const [s, b] = await Promise.all([Suggestion.list(), BreachNotification.list()]);
+      setSuggestions(s); setBreaches(b);
+    } catch (e) { console.error(e); }
+    setLoading(false);
   }, []);
 
-  const load = () => {
-    BreachEntity?.list().then(setBreaches).catch(() => {});
-    SuggestionEntity?.list().then(setSuggestions).catch(() => {});
-  };
+  useEffect(() => { load(); }, [load]);
 
-  const openBreach = () => { setModalType("breach"); setForm({ event_type: "", severity: "Medium", description: "", affected_users: "", status: "Open", detected_date: new Date().toISOString().split("T")[0] }); setShowModal(true); };
-  const openSuggestion = () => { setModalType("suggestion"); setForm({ title: "", description: "", category: "", priority: "Medium", status: "Pending" }); setShowModal(true); };
-
-  const save = async () => {
-    setSaving(true);
+  const saveBreachReport = async () => {
+    if (!form.description.trim()) return alert("Description is required.");
     try {
-      if (modalType === "breach") await BreachEntity.create(form);
-      else await SuggestionEntity.create(form);
-      setShowModal(false); load();
-    } catch (e) { alert("Error: " + e.message); }
-    setSaving(false);
+      const { BreachNotification } = await import("../api/entities");
+      await BreachNotification.create({ ...form, detected_date: new Date().toISOString(), notification_sent: false });
+      setShowBreachModal(false); setForm({ event_type: "", severity: "low", description: "", affected_users: "", status: "open" }); load();
+    } catch (e) { alert(e.message); }
   };
 
-  const severityColor = { Low: "#10b981", Medium: "#f59e0b", High: "#ef4444", Critical: "#7c3aed" };
+  const severityBadge = (s) => {
+    const map = { low: { color: C.green, bg: C.greenLight }, medium: { color: C.amber, bg: C.amberLight }, high: { color: C.red, bg: C.redLight }, critical: { color: "#7f1d1d", bg: "#fee2e2" } };
+    const v = map[s] || map.low;
+    return <Badge text={s || "low"} color={v.color} bg={v.bg} />;
+  };
 
   return (
     <div style={{ padding: 32 }}>
-      <PageHeader title="Admin" subtitle="Security, compliance, and feedback" />
+      <SectionHeader title="Admin" subtitle="Manage feedback and compliance reports" />
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 24, borderBottom: "1px solid #e2e8f0", paddingBottom: 0 }}>
-        {[{ id: "breaches", label: "🔒 Breach Log" }, { id: "suggestions", label: "💡 Suggestions" }].map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={{
-            padding: "10px 20px", border: "none", background: "none", cursor: "pointer", fontSize: 14,
-            color: tab === t.id ? "#1e3a5f" : "#64748b", fontWeight: tab === t.id ? 600 : 400,
-            borderBottom: tab === t.id ? "2px solid #1e3a5f" : "2px solid transparent", marginBottom: -1
-          }}>{t.label}</button>
+      <div style={{ display: "flex", gap: 4, marginBottom: 20, background: C.gray100, borderRadius: 10, padding: 4, width: "fit-content" }}>
+        {[["suggestions", "💡 Suggestions"], ["breaches", "🔒 Breach Log"]].map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)} style={{
+            padding: "7px 18px", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13.5, fontWeight: 500,
+            background: tab === id ? C.white : "transparent", color: tab === id ? C.navy : C.gray500,
+            boxShadow: tab === id ? "0 1px 4px rgba(0,0,0,0.08)" : "none"
+          }}>{label}</button>
         ))}
       </div>
 
-      {loading ? <Loading /> : tab === "breaches" ? (
-        <>
-          <div style={{ marginBottom: 16, display: "flex", justifyContent: "flex-end" }}>
-            <Btn onClick={openBreach}>+ Log Breach Event</Btn>
-          </div>
-          {breaches.length === 0 ? <Empty message="No breach events logged" /> : (
-            <div style={{ display: "grid", gap: 12 }}>
-              {breaches.map(b => (
-                <Card key={b.id}>
-                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-                    <Badge text={b.severity} color="#fff" bg={severityColor[b.severity] || "#64748b"} />
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 600 }}>{b.event_type}</div>
-                      <div style={{ fontSize: 13, color: "#64748b", marginTop: 4 }}>{b.description}</div>
-                      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 4 }}>Detected: {b.detected_date} · Status: {b.status}</div>
-                    </div>
+      {loading ? <Spinner /> : tab === "suggestions" ? (
+        suggestions.length === 0 ? <Empty icon="💡" message="No suggestions submitted" /> : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {suggestions.map(s => (
+              <Card key={s.id}>
+                <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 14.5, fontWeight: 600, color: C.gray900, marginBottom: 4 }}>{s.title}</div>
+                    <div style={{ fontSize: 13, color: C.gray500 }}>{s.description}</div>
                   </div>
-                </Card>
-              ))}
-            </div>
-          )}
-        </>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    {s.priority && <Badge text={s.priority} color={C.amber} bg={C.amberLight} />}
+                    {s.status && <Badge text={s.status} color={C.gray500} bg={C.gray100} />}
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )
       ) : (
         <>
-          <div style={{ marginBottom: 16, display: "flex", justifyContent: "flex-end" }}>
-            <Btn onClick={openSuggestion}>+ Submit Suggestion</Btn>
+          <div style={{ marginBottom: 14, display: "flex", justifyContent: "flex-end" }}>
+            <Btn onClick={() => setShowBreachModal(true)} variant="danger">+ Report Breach</Btn>
           </div>
-          {suggestions.length === 0 ? <Empty message="No suggestions yet" /> : (
-            <div style={{ display: "grid", gap: 12 }}>
-              {suggestions.map(s => (
-                <Card key={s.id}>
-                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-                    <Badge text={s.priority} color={s.priority === "High" ? "#ef4444" : s.priority === "Medium" ? "#f59e0b" : "#10b981"}
-                      bg={s.priority === "High" ? "#fee2e2" : s.priority === "Medium" ? "#fef3c7" : "#d1fae5"} />
+          {breaches.length === 0 ? <Empty icon="🔒" message="No breach events logged — all clear" /> : (
+            <div style={{ display: "grid", gap: 10 }}>
+              {breaches.map(b => (
+                <Card key={b.id}>
+                  <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 600 }}>{s.title}</div>
-                      <div style={{ fontSize: 13, color: "#64748b", marginTop: 4 }}>{s.description}</div>
-                      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 4 }}>Status: {s.status}</div>
+                      <div style={{ display: "flex", gap: 8, marginBottom: 4, alignItems: "center" }}>
+                        <span style={{ fontSize: 14.5, fontWeight: 600, color: C.gray900 }}>{b.event_type || "Breach Event"}</span>
+                        {severityBadge(b.severity)}
+                      </div>
+                      <div style={{ fontSize: 13, color: C.gray500 }}>{b.description}</div>
+                      {b.detected_date && <div style={{ fontSize: 11.5, color: C.gray400, marginTop: 4 }}>Detected: {new Date(b.detected_date).toLocaleString()}</div>}
                     </div>
+                    <Badge text={b.status || "open"} color={b.status === "resolved" ? C.green : C.red} bg={b.status === "resolved" ? C.greenLight : C.redLight} />
                   </div>
                 </Card>
               ))}
@@ -965,29 +844,16 @@ function Admin() {
         </>
       )}
 
-      {showModal && (
-        <Modal title={modalType === "breach" ? "Log Breach Event" : "Submit Suggestion"} onClose={() => setShowModal(false)}>
-          {modalType === "breach" ? (
-            <>
-              <Input label="Event Type" value={form.event_type} onChange={v => setForm(f => ({ ...f, event_type: v }))} placeholder="e.g. Unauthorized Access" required />
-              <Select label="Severity" value={form.severity} onChange={v => setForm(f => ({ ...f, severity: v }))}
-                options={["Low", "Medium", "High", "Critical"].map(s => ({ value: s, label: s }))} />
-              <Input label="Detected Date" type="date" value={form.detected_date} onChange={v => setForm(f => ({ ...f, detected_date: v }))} />
-              <Textarea label="Description" value={form.description} onChange={v => setForm(f => ({ ...f, description: v }))} required />
-              <Input label="Affected Users" value={form.affected_users} onChange={v => setForm(f => ({ ...f, affected_users: v }))} />
-            </>
-          ) : (
-            <>
-              <Input label="Title" value={form.title} onChange={v => setForm(f => ({ ...f, title: v }))} required />
-              <Input label="Category" value={form.category} onChange={v => setForm(f => ({ ...f, category: v }))} />
-              <Select label="Priority" value={form.priority} onChange={v => setForm(f => ({ ...f, priority: v }))}
-                options={["Low", "Medium", "High"].map(p => ({ value: p, label: p }))} />
-              <Textarea label="Description" value={form.description} onChange={v => setForm(f => ({ ...f, description: v }))} required />
-            </>
-          )}
-          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 8 }}>
-            <Btn onClick={() => setShowModal(false)} variant="secondary">Cancel</Btn>
-            <Btn onClick={save} disabled={saving}>{saving ? "Saving..." : "Submit"}</Btn>
+      {showBreachModal && (
+        <Modal title="Report Breach Event" onClose={() => setShowBreachModal(false)}>
+          <Field label="Event Type" value={form.event_type} onChange={v => setForm(p => ({ ...p, event_type: v }))} placeholder="e.g. Unauthorized Access, Data Leak" />
+          <Field label="Severity" value={form.severity} onChange={v => setForm(p => ({ ...p, severity: v }))} as="select"
+            options={["low", "medium", "high", "critical"].map(v => ({ value: v, label: v.charAt(0).toUpperCase() + v.slice(1) }))} />
+          <Field label="Description" value={form.description} onChange={v => setForm(p => ({ ...p, description: v }))} as="textarea" rows={4} required />
+          <Field label="Affected Users / Records" value={form.affected_users} onChange={v => setForm(p => ({ ...p, affected_users: v }))} placeholder="e.g. 0 (none identified)" />
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <Btn onClick={() => setShowBreachModal(false)} variant="secondary">Cancel</Btn>
+            <Btn onClick={saveBreachReport} variant="danger">Submit Report</Btn>
           </div>
         </Modal>
       )}
@@ -995,33 +861,63 @@ function Admin() {
   );
 }
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
-
+// ─── App Root ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [page, setPage] = useState("dashboard");
+  const [patients, setPatients] = useState([]);
+  const [documents, setDocuments] = useState([]);
+  const [summaries, setSummaries] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [selectedPatient, setSelectedPatient] = useState(null);
+
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    try {
+      const pData = await awsGet("/patients").catch(() => ({ patients: [] }));
+      const pts = pData.patients || [];
+      setPatients(pts);
+
+      const docResults = await Promise.all(
+        pts.map(p => awsGet(`/patients/${p.aws_patient_id}/documents`).catch(() => []))
+      );
+      const allDocs = docResults.flat();
+      setDocuments(allDocs);
+      // Summaries are embedded in processed documents
+      const sums = allDocs.filter(d => d.aws_summary_id && d.summary).map(d => ({
+        aws_summary_id: d.aws_summary_id,
+        aws_patient_id: d.aws_patient_id,
+        patient_name: d.patient_name,
+        document_title: d.title || d.file_name,
+        summary: d.summary,
+        created_at: d.updated_at,
+      }));
+      setSummaries(sums);
+    } catch (e) { console.error(e); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   const navigate = (p) => setPage(p);
 
   const renderPage = () => {
+    if (loading && page === "dashboard") return <div style={{ padding: 32 }}><Spinner /></div>;
     switch (page) {
-      case "dashboard": return <Dashboard onNav={navigate} />;
-      case "patients": return <Patients onNav={navigate} setSelectedPatient={setSelectedPatient} />;
-      case "patient-detail": return <PatientDetail patient={selectedPatient} onNav={navigate} onBack={() => navigate("patients")} />;
-      case "documents": return <Documents />;
-      case "summaries": return <Summaries />;
+      case "dashboard": return <Dashboard onNav={navigate} patients={patients} documents={documents} summaries={summaries} />;
+      case "patients": return <Patients patients={patients} documents={documents} onNav={navigate} onSelectPatient={setSelectedPatient} onRefresh={loadAll} />;
+      case "patient-detail": return selectedPatient ? <PatientDetail patient={selectedPatient} documents={documents} summaries={summaries} onBack={() => navigate("patients")} onNav={navigate} /> : null;
+      case "documents": return <Documents patients={patients} documents={documents} onRefresh={loadAll} />;
+      case "summaries": return <Summaries summaries={summaries} onRefresh={loadAll} />;
       case "macros": return <NotesMacros />;
       case "admin": return <Admin />;
-      default: return <Dashboard onNav={navigate} />;
+      default: return null;
     }
   };
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", fontFamily: "'Inter', -apple-system, sans-serif", background: "#f8fafc" }}>
-      <Sidebar current={page} onNav={navigate} />
-      <div style={{ flex: 1, overflow: "auto" }}>
-        {renderPage()}
-      </div>
+    <div style={{ display: "flex", minHeight: "100vh", background: C.gray50, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+      <Sidebar current={page} onNav={navigate} patientCount={patients.length} docCount={documents.length} summaryCount={summaries.length} />
+      <div style={{ flex: 1, overflow: "auto" }}>{renderPage()}</div>
     </div>
   );
 }

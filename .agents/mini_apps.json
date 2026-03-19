@@ -5,11 +5,11 @@
     "Home": {
       "title": "Home"
     },
-    "Layout": {
-      "title": "Layout"
-    },
     "Home_new": {
       "title": "Home_new"
+    },
+    "Layout": {
+      "title": "Layout"
     }
   }
 }
