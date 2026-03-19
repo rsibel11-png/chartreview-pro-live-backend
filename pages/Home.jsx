@@ -1337,7 +1337,7 @@ function AppInner() {
       const [pData, docsData, sumsData] = await Promise.all([
         awsGet("/patients").catch(()=>({patients:[]})),
         awsGet("/documents").catch(()=>[]),
-        awsGet("/summaries/all").catch(()=>({summaries:[]})),
+        awsGet("/summaries-list").catch(()=>({summaries:[]})),
       ]);
       setPatients(pData.patients || []);
       setDocuments(Array.isArray(docsData) ? docsData : (docsData.documents || []));

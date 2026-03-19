@@ -214,7 +214,7 @@ functions:
     handler: src/handlers/summaries.listAll
     events:
       - http:
-          path: /summaries/all
+          path: /summaries-list
           method: get
           cors: true
 
