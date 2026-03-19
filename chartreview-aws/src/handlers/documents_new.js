@@ -18,7 +18,7 @@ const TABLE           = process.env.DOCUMENTS_TABLE;
 const SUMMARIES_TABLE = process.env.SUMMARIES_TABLE;
 const BUCKET          = process.env.S3_BUCKET;
 const BEDROCK_MODEL   = 'anthropic.claude-3-5-sonnet-20241022-v2:0';
-const WORKER_FUNCTION_NAME = process.env.WORKER_FUNCTION_NAME || `chartreview-pro-prod-processWorker`;
+const WORKER_FUNCTION_NAME = process.env.WORKER_FUNCTION_NAME || 'chartreview-pro-prod-processWorker';
 
 const response = (statusCode, body) => ({
   statusCode,
@@ -26,7 +26,6 @@ const response = (statusCode, body) => ({
   body: JSON.stringify(body),
 });
 
-// ─── Upload URL ───────────────────────────────────────────────────────────────
 const getUploadUrlHandler = async (event) => {
   try {
     const data = JSON.parse(event.body || '{}');
@@ -51,7 +50,6 @@ const getUploadUrlHandler = async (event) => {
   }
 };
 
-// ─── Get ──────────────────────────────────────────────────────────────────────
 const getHandler = async (event) => {
   try {
     const { aws_document_id } = event.pathParameters;
@@ -63,13 +61,12 @@ const getHandler = async (event) => {
   }
 };
 
-// ─── Delete ───────────────────────────────────────────────────────────────────
 const removeHandler = async (event) => {
   try {
     const { aws_document_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (result.Item && result.Item.file_key) {
-      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: result.Item.file_key })).catch(() => {});
+      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: result.Item.file_key })).catch(function() {});
     }
     await dynamo.send(new DeleteCommand({ TableName: TABLE, Key: { aws_document_id } }));
     return response(200, { message: 'Document deleted' });
@@ -78,7 +75,6 @@ const removeHandler = async (event) => {
   }
 };
 
-// ─── Download URL ─────────────────────────────────────────────────────────────
 const getDownloadUrlHandler = async (event) => {
   try {
     const { aws_document_id } = event.pathParameters;
@@ -92,7 +88,6 @@ const getDownloadUrlHandler = async (event) => {
   }
 };
 
-// ─── Update ───────────────────────────────────────────────────────────────────
 const updateHandler = async (event) => {
   try {
     const { aws_document_id } = event.pathParameters;
@@ -118,55 +113,55 @@ const updateHandler = async (event) => {
   }
 };
 
-// ─── Process — HTTP handler (fires async worker, returns immediately) ─────────
 const processHandler = async (event) => {
-  const { aws_document_id } = event.pathParameters;
+  var aws_document_id = event.pathParameters.aws_document_id;
   try {
-    const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
+    var docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id: aws_document_id } }));
     if (!docResult.Item) return response(404, { error: 'Document not found' });
-
-    // Mark as queued
     await dynamo.send(new UpdateCommand({
-      TableName: TABLE, Key: { aws_document_id },
+      TableName: TABLE,
+      Key: { aws_document_id: aws_document_id },
       UpdateExpression: 'SET #s = :s, updated_at = :u',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: { ':s': 'processing', ':u': new Date().toISOString() },
     }));
-
-    // Invoke self asynchronously (Event = fire-and-forget)
     await lambda.send(new InvokeCommand({
       FunctionName: WORKER_FUNCTION_NAME,
-      InvocationType: 'Event', // async, no wait
-      Payload: JSON.stringify({
-        __asyncWorker: true,
-        aws_document_id,
-      }),
+      InvocationType: 'Event',
+      Payload: JSON.stringify({ __asyncWorker: true, aws_document_id: aws_document_id }),
     }));
-
-    return response(200, { message: 'Processing started', aws_document_id, status: 'processing' });
+    return response(200, { message: 'Processing started', aws_document_id: aws_document_id, status: 'processing' });
   } catch (err) {
     console.error('processHandler error:', err);
     return response(500, { error: err.message });
   }
 };
 
-// ─── Async Worker — called by Lambda invoke, does the actual work ─────────────
+function buildPrompt(extractedText, docPatientName, docCaseNumber) {
+  var text = extractedText.substring(0, 12000);
+  var intro = 'You are a medical-legal document analyst. Analyze this document text and extract ALL medical encounters, visits, examinations, or entries.';
+  var fields = 'For EACH visit/encounter found, extract: visit_date (YYYY-MM-DD), rendering_provider, practice_setting, chief_complaint, hpi_summary (2-4 sentences), physical_exam_findings, imaging_findings, lab_findings, impression_diagnosis, treatment_plan, icd10_codes (array), symptom_progression (improved/same/worse/not_documented), pain_scale (number or not_documented), injury_date (YYYY-MM-DD).';
+  var toplevel = 'Also extract: patient_name, case_number, provider_name, document_date (YYYY-MM-DD), page_count.';
+  var instruction = 'CRITICAL: Extract EVERY visit as a separate entry. Summarize, do NOT transcribe verbatim. Keep each field concise.';
+  var format = '{"patient_name":"","case_number":"","provider_name":"","document_date":"","page_count":1,"visits":[{"visit_date":"","rendering_provider":"","practice_setting":"","chief_complaint":"","hpi_summary":"","physical_exam_findings":"","imaging_findings":"","lab_findings":"","impression_diagnosis":"","treatment_plan":"","icd10_codes":[],"symptom_progression":"not_documented","pain_scale":"not_documented","injury_date":""}]}';
+  return intro + '\n\n' + fields + '\n\n' + toplevel + '\n\n' + instruction + '\n\nDocument text:\n' + text + '\n\nRespond ONLY with valid JSON matching this format:\n' + format;
+}
+
 const processWorker = async (aws_document_id) => {
   console.log('processWorker started for', aws_document_id);
   try {
-    const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
+    var docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id: aws_document_id } }));
     if (!docResult.Item) { console.error('Document not found:', aws_document_id); return; }
-    const doc = docResult.Item;
+    var doc = docResult.Item;
 
-    // 1. Textract
-    let extractedText = '';
+    var extractedText = '';
     try {
-      const textractResult = await textract.send(new DetectDocumentTextCommand({
+      var textractResult = await textract.send(new DetectDocumentTextCommand({
         Document: { S3Object: { Bucket: BUCKET, Name: doc.file_key } }
       }));
       extractedText = (textractResult.Blocks || [])
-        .filter(b => b.BlockType === 'LINE')
-        .map(b => b.Text)
+        .filter(function(b) { return b.BlockType === 'LINE'; })
+        .map(function(b) { return b.Text; })
         .join('\n');
       console.log('Textract extracted', extractedText.length, 'chars');
     } catch (err) {
@@ -174,75 +169,18 @@ const processWorker = async (aws_document_id) => {
       extractedText = '[Textract failed: ' + err.message + ']';
     }
 
-    // 2. Claude — extract structured visits
-    let visits = [];
-    let patient_name  = doc.patient_name || '';
-    let case_number   = doc.case_number  || '';
-    let provider_name = '';
-    let document_date = '';
-    let page_count    = 1;
-    let summaryText   = '';
+    var visits = [];
+    var patient_name  = doc.patient_name || '';
+    var case_number   = doc.case_number  || '';
+    var provider_name = '';
+    var document_date = '';
+    var page_count    = 1;
+    var summaryText   = '';
 
     try {
-      const prompt = `You are a medical-legal document analyst. Analyze this document text and extract ALL medical encounters, visits, examinations, or entries.
+      var prompt = buildPrompt(extractedText, patient_name, case_number);
 
-For EACH visit/encounter found, extract:
-- visit_date (YYYY-MM-DD format, or best approximation)
-- rendering_provider (doctor/provider name only, not patient)
-- practice_setting (exact facility/clinic name, or "Independent Medical Examination", "Chart Review", etc.)
-- chief_complaint (brief purpose of visit)
-- hpi_summary (concise 2-4 sentence history of present illness summary)
-- physical_exam_findings (key pertinent findings only, concise)
-- imaging_findings (any imaging reviewed or ordered)
-- lab_findings (any lab results)
-- impression_diagnosis (diagnosis/impressions)
-- treatment_plan (treatment or plan)
-- icd10_codes (array of ICD-10 codes if mentioned)
-- symptom_progression (one of: "improved", "same", "worse", "not_documented")
-- pain_scale (numeric scale if mentioned, else "not_documented")
-- injury_date (YYYY-MM-DD if mentioned)
-
-Also extract top-level:
-- patient_name (full name of patient)
-- case_number (case/claim number if any)
-- provider_name (primary provider name)
-- document_date (date of the document itself, YYYY-MM-DD)
-- page_count (estimated number of pages)
-
-CRITICAL: Extract EVERY visit as a separate entry. If there are 10 visits, return 10 entries.
-Summarize — do NOT transcribe verbatim. Keep each field concise.
-
-Document text (first 12000 chars):
-${extractedText.substring(0, 12000)}
-
-Respond ONLY with valid JSON in this exact format:
-{
-  "patient_name": "",
-  "case_number": "",
-  "provider_name": "",
-  "document_date": "",
-  "page_count": 1,
-  "visits": [
-    {
-      "visit_date": "",
-      "rendering_provider": "",
-      "practice_setting": "",
-      "chief_complaint": "",
-      "hpi_summary": "",
-      "physical_exam_findings": "",
-      "imaging_findings": "",
-      "lab_findings": "",
-      "impression_diagnosis": "",
-      "treatment_plan": "",
-      "icd10_codes": [],
-      "symptom_progression": "not_documented",
-      "pain_scale": "not_documented",
-      "injury_date": ""
-    }
-  ]
-}`;
-
-      const bedrockResponse = await bedrock.send(new InvokeModelCommand({
+      var bedrockResponse = await bedrock.send(new InvokeModelCommand({
         modelId: BEDROCK_MODEL,
         contentType: 'application/json',
         accept: 'application/json',
@@ -253,13 +191,13 @@ Respond ONLY with valid JSON in this exact format:
         })
       }));
 
-      const bedrockBody = JSON.parse(new TextDecoder().decode(bedrockResponse.body));
-      const rawText = bedrockBody.content[0].text.trim();
+      var bedrockBody = JSON.parse(new TextDecoder().decode(bedrockResponse.body));
+      var rawText = bedrockBody.content[0].text.trim();
       console.log('Claude response length:', rawText.length);
 
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      var jsonMatch = rawText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+        var parsed = JSON.parse(jsonMatch[0]);
         visits        = parsed.visits        || [];
         patient_name  = parsed.patient_name  || patient_name;
         case_number   = parsed.case_number   || case_number;
@@ -274,22 +212,21 @@ Respond ONLY with valid JSON in this exact format:
       summaryText = '[AI failed: ' + err.message + ']';
     }
 
-    // 3. Save summary
-    const aws_summary_id = crypto.randomUUID();
-    const now = new Date().toISOString();
+    var aws_summary_id = crypto.randomUUID();
+    var now = new Date().toISOString();
 
     await dynamo.send(new PutCommand({
       TableName: SUMMARIES_TABLE,
       Item: {
-        aws_summary_id,
-        aws_document_id,
+        aws_summary_id:  aws_summary_id,
+        aws_document_id: aws_document_id,
         aws_patient_id:  doc.aws_patient_id || null,
         patient_name:    patient_name || doc.patient_name || null,
         case_number:     case_number  || doc.case_number  || null,
-        provider_name,
-        document_date,
+        provider_name:   provider_name,
+        document_date:   document_date,
         extracted_text:  extractedText.substring(0, 50000),
-        visits,
+        visits:          visits,
         summary:         summaryText,
         document_title:  doc.title || doc.file_name,
         status:          'completed',
@@ -298,10 +235,9 @@ Respond ONLY with valid JSON in this exact format:
       }
     }));
 
-    // 4. Mark document processed
     await dynamo.send(new UpdateCommand({
       TableName: TABLE,
-      Key: { aws_document_id },
+      Key: { aws_document_id: aws_document_id },
       UpdateExpression: 'SET #s = :s, aws_summary_id = :sid, patient_name = :pn, provider_name = :prov, document_date = :dd, page_count = :pc, updated_at = :u',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
@@ -315,25 +251,25 @@ Respond ONLY with valid JSON in this exact format:
       }
     }));
 
-    console.log('processWorker completed for', aws_document_id, '- summary:', aws_summary_id);
+    console.log('processWorker completed for', aws_document_id);
   } catch (err) {
     console.error('processWorker fatal error:', err);
     try {
       await dynamo.send(new UpdateCommand({
-        TableName: TABLE, Key: { aws_document_id },
+        TableName: TABLE,
+        Key: { aws_document_id: aws_document_id },
         UpdateExpression: 'SET #s = :s, updated_at = :u',
         ExpressionAttributeNames: { '#s': 'status' },
         ExpressionAttributeValues: { ':s': 'failed', ':u': new Date().toISOString() }
       }));
-    } catch (_) {}
+    } catch (e) {}
   }
 };
 
-// ─── List by patient ──────────────────────────────────────────────────────────
 const listByPatientHandler = async (event) => {
   try {
-    const { aws_patient_id } = event.pathParameters;
-    const result = await dynamo.send(new QueryCommand({
+    var aws_patient_id = event.pathParameters.aws_patient_id;
+    var result = await dynamo.send(new QueryCommand({
       TableName: TABLE,
       IndexName: 'patient-index',
       KeyConditionExpression: 'aws_patient_id = :pid',
@@ -345,14 +281,11 @@ const listByPatientHandler = async (event) => {
   }
 };
 
-// ─── Main Lambda handler — routes HTTP events and async worker events ─────────
 const mainHandler = async (event) => {
-  // Async worker invocation (no httpMethod)
   if (event.__asyncWorker) {
     await processWorker(event.aws_document_id);
     return;
   }
-  // Should not reach here directly — each function has its own handler
 };
 
 module.exports = {
@@ -362,6 +295,6 @@ module.exports = {
   getDownloadUrl: validateApiKey(getDownloadUrlHandler),
   update:         validateApiKey(updateHandler),
   process:        validateApiKey(processHandler),
-  worker:         mainHandler, // called async by Lambda invoke
+  worker:         mainHandler,
   listByPatient:  validateApiKey(listByPatientHandler),
 };
