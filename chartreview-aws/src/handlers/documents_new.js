@@ -938,6 +938,334 @@ const reassessHandler = async (event) => {
   }
 };
 
+
+// ---------------------------------------------------------------------------
+// Project Gamma -- Phase 1: Async Classification via Jobs table
+// ---------------------------------------------------------------------------
+// Replaces the synchronous /assess-relevance endpoint (504s on large files)
+// with a fire-and-poll pattern:
+//   1. POST /documents/{id}/classify/start  -> { job_id }
+//   2. classifyJobWorker Lambda does Bedrock Vision pass (no 29s timeout)
+//   3. GET /jobs/{job_id}                  -> { status, result }
+// ---------------------------------------------------------------------------
+
+const JOBS_TABLE = process.env.JOBS_TABLE || 'chartreview-jobs-prod';
+
+// --- SHARED: Bedrock classification prompt (used by both sync + async paths) ---
+const CLASSIFY_PROMPT = `Analyze this document VERY CAREFULLY and extract the following information:
+
+PART 1 - DOCUMENT CLASSIFICATION:
+1. Document category: Is this a medical or legal document?
+2. If medical, what type: doctor_office_notes, independent_medical_examination, hospital_records, radiology_reports, medical_expert_testimony, lab_results, or other?
+3. If legal, what type: deposition, legal_correspondence, court_filing, or other?
+
+PART 2 - OVERALL CLINICAL RELEVANCE:
+4. Is the ENTIRE document clinically relevant? Mark as relevant ONLY if it contains ACTUAL CLINICAL CONTENT with medical findings, examination results, diagnoses, or treatment notes.
+
+   ALWAYS MARK AS RELEVANT (do not reject):
+   - Police/accident/MVA/incident reports, EMT/EMS/paramedic reports, workers comp accident reports -- these establish mechanism of injury and are legally required.
+
+   REJECT (not clinically relevant) if ANY of these apply:
+   - Insurance/auth forms, EOBs, fax cover sheets, emails, billing, scheduling, patient intake forms without clinical content
+   - Photo-only documents (surveillance, vehicle, scene photos with no medical text)
+   - Hospital/rehab nursing-admin records: MAR grids, nursing flowsheets, vital sign grids, ADL logs, wound care checklists, dietary records, pharmacy printouts (AbacusRX etc.), Documentation Survey Report forms, resident activity logs, staffing tables, facility photo ID pages -- REJECT these even if mixed with some clinical pages, UNLESS a physician order or physician progress note is embedded on that specific page.
+   If uncertain, lean toward REJECTION.
+
+PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPENDENTLY):
+5. Scan EVERY SINGLE PAGE individually. Flag pages with LOW clinical relevance. TREAT EACH PAGE AS STANDALONE.
+
+   Always flag as low relevance:
+   - Cover/title pages, blank pages, headers/footers only, TOC, fax cover sheets, admin forms, billing pages, signature-only pages, separator pages, photo pages (surveillance, vehicles, people without clinical context)
+   - MAR/pharmacy grid pages, nursing flowsheet pages, vital sign grid pages, ADL log pages, Documentation Survey Report pages, any page that is primarily a table of checkmarks/initials/codes with no physician narrative
+   NOTE: Do NOT flag police reports, EMT/EMS reports, or accident reports as low relevance.
+   NOTE: PT/OT initial evaluations and discharge summaries ARE clinical -- do not flag those.
+
+   Return an ARRAY: {page_number: number, reason: "specific description"}
+   Only return [] if EVERY page has substantial clinical content. Be VERY aggressive flagging.
+
+PART 4 - METADATA EXTRACTION:
+6. Patient name (if medical document)
+7. Document date (earliest visit date if multiple)
+8. Provider/entity name (first provider if multiple)
+9. Case number if mentioned
+10. Count of office visits in this file
+11. EXACT page count
+
+CRITICAL: Each page is ONLY relevant if it contains substantive clinical content ON THAT PAGE ALONE.
+RECHECK: If you flagged no pages, verify every single page contains substantive clinical content.
+
+Return ONLY a JSON object:
+{
+  "category": "medical or legal or uncategorized",
+  "subcategory": "string",
+  "is_relevant_medical_document": true or false,
+  "patient_name": "string",
+  "document_date": "string",
+  "provider_name": "string",
+  "case_number": "string",
+  "office_visit_count": 0,
+  "page_count": 0,
+  "rejection_reason": "string",
+  "low_relevance_pages": [{"page_number": 1, "reason": "string"}]
+}`;
+
+// --- Shared: run Bedrock classification on a PDF buffer ----------------------
+// Returns parsed result object or throws.
+const runBedrockClassify = async (pdfBase64, aws_document_id) => {
+  console.log('runBedrockClassify: PDF size ' + (pdfBase64.length/1024/1024).toFixed(1) + 'MB for', aws_document_id);
+  const payload = {
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 4096,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+        { type: 'text', text: CLASSIFY_PROMPT },
+      ],
+    }],
+  };
+  const resp = await bedrock.send(new InvokeModelCommand({
+    modelId: 'us.anthropic.claude-sonnet-4-6',
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: JSON.stringify(payload),
+  }));
+  const body = JSON.parse(new TextDecoder().decode(resp.body));
+  const rawText = body.content?.[0]?.text || '';
+  const match = rawText.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('No JSON in Bedrock response: ' + rawText.substring(0, 300));
+  return JSON.parse(match[0]);
+};
+
+// --- Shared: write classification result to documents table ------------------
+const saveClassificationToDoc = async (aws_document_id, result, doc, pageOffset = 0) => {
+  if (pageOffset > 0 && Array.isArray(result.low_relevance_pages) && result.low_relevance_pages.length > 0) {
+    result.low_relevance_pages = result.low_relevance_pages.map(p => ({
+      ...p, page_number: (p.page_number || 0) + pageOffset,
+    }));
+  }
+  const isRejected = result.is_relevant_medical_document === false;
+  await dynamo.send(new UpdateCommand({
+    TableName: TABLE,
+    Key: { aws_document_id },
+    UpdateExpression: `SET #cat = :cat, subcategory = :sub, is_rejected = :rejected,
+      rejection_reason = :reason, patient_name = :pname, document_date = :ddate,
+      provider_name = :provider, case_number = :casenum, office_visit_count = :ovc,
+      page_count = :pc, low_relevance_pages = :lrp, relevance_assessed = :ra, updated_at = :now`,
+    ExpressionAttributeNames: { '#cat': 'category' },
+    ExpressionAttributeValues: {
+      ':cat':      result.category || 'uncategorized',
+      ':sub':      result.subcategory || 'other',
+      ':rejected': isRejected,
+      ':reason':   isRejected ? (result.rejection_reason || 'Not clinically relevant') : '',
+      ':pname':    result.patient_name || (doc && doc.patient_name) || '',
+      ':provider': result.provider_name || '',
+      ':ddate':    result.document_date || '',
+      ':casenum':  result.case_number || '',
+      ':ovc':      result.office_visit_count || 0,
+      ':pc':       result.page_count || (doc && doc.page_count) || 0,
+      ':lrp':      result.low_relevance_pages || [],
+      ':ra':       true,
+      ':now':      new Date().toISOString(),
+    },
+  }));
+  return isRejected;
+};
+
+// --- GET JOB ----------------------------------------------------------------
+const getJobHandler = async (event) => {
+  const orgId = event._orgId;
+  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  const job_id = event.pathParameters?.job_id;
+  if (!job_id) return response(400, { error: 'job_id required' });
+  try {
+    const result = await dynamo.send(new GetCommand({ TableName: JOBS_TABLE, Key: { job_id } }));
+    if (!result.Item) return response(404, { error: 'Job not found' });
+    if (result.Item.org_id !== orgId) return response(403, { error: 'Forbidden' });
+    return response(200, result.Item);
+  } catch (err) {
+    console.error('getJobHandler error:', err);
+    return response(500, { error: err.message });
+  }
+};
+
+// --- CLASSIFY START (async) -------------------------------------------------
+// POST /documents/{aws_document_id}/classify/start
+// Clears old classification state, writes a pending job, fires classifyWorker async.
+const classifyStartHandler = async (event) => {
+  const orgId = event._orgId;
+  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  const aws_document_id = event.pathParameters?.aws_document_id;
+  if (!aws_document_id) return response(400, { error: 'aws_document_id required' });
+
+  try {
+    const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
+    if (!docResult.Item) return response(404, { error: 'Document not found' });
+    if (docResult.Item.org_id && docResult.Item.org_id !== orgId) return response(403, { error: 'Forbidden' });
+
+    const requestBody = JSON.parse(event.body || '{}');
+    const page_offset = typeof requestBody.page_offset === 'number' ? requestBody.page_offset : 0;
+
+    // Write job record
+    const job_id = randomUUID();
+    const now = new Date().toISOString();
+    await dynamo.send(new PutCommand({
+      TableName: JOBS_TABLE,
+      Item: {
+        job_id,
+        job_type: 'classify',
+        aws_document_id,
+        org_id: orgId,
+        page_offset,
+        status: 'pending',
+        created_at: now,
+        updated_at: now,
+      },
+    }));
+
+    // Clear relevance_assessed so UI knows it is being re-processed
+    await dynamo.send(new UpdateCommand({
+      TableName: TABLE,
+      Key: { aws_document_id },
+      UpdateExpression: 'SET relevance_assessed = :ra, updated_at = :now',
+      ExpressionAttributeValues: { ':ra': false, ':now': now },
+    }));
+
+    // Fire classifyWorker async
+    const workerPayload = JSON.stringify({ __classifyJob: true, job_id, aws_document_id, org_id: orgId, page_offset });
+    if (process.env.CLASSIFY_QUEUE_URL) {
+      await sqs.send(new SendMessageCommand({
+        QueueUrl: process.env.CLASSIFY_QUEUE_URL,
+        MessageBody: workerPayload,
+      }));
+      console.log('classifyStart: queued via SQS job_id=' + job_id);
+    } else {
+      await lambda.send(new InvokeCommand({
+        FunctionName: process.env.CLASSIFY_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-classifyJobWorker',
+        InvocationType: 'Event',
+        Payload: workerPayload,
+      }));
+      console.log('classifyStart: invoked Lambda directly job_id=' + job_id);
+    }
+
+    return response(202, { job_id, status: 'pending', aws_document_id });
+  } catch (err) {
+    console.error('classifyStartHandler error:', err);
+    return response(500, { error: err.message });
+  }
+};
+
+// --- CLASSIFY JOB WORKER (async, no HTTP timeout) ---------------------------
+// Triggered by SQS classifyJobQueue or direct Lambda invoke.
+// Does the full Bedrock Vision classification pass and writes results.
+const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 0) => {
+  console.log('classifyJobWorker started: job_id=' + job_id + ' doc=' + aws_document_id + ' pageOffset=' + page_offset);
+  const now = () => new Date().toISOString();
+
+  // Mark job running
+  await dynamo.send(new UpdateCommand({
+    TableName: JOBS_TABLE,
+    Key: { job_id },
+    UpdateExpression: 'SET #s = :s, updated_at = :now',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':s': 'running', ':now': now() },
+  }));
+
+  try {
+    const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
+    const doc = docResult.Item;
+    if (!doc) throw new Error('Document not found: ' + aws_document_id);
+
+    // Text-density check (same as processWorker)
+    const SPARSE_CHARS_PER_PAGE = 30;
+    const extractedTextLen = (doc.extracted_text || '').length;
+    const docPageCount = doc.page_count || 1;
+    const charsPerPage = extractedTextLen / docPageCount;
+
+    let classifyResult;
+    if (charsPerPage < SPARSE_CHARS_PER_PAGE && extractedTextLen < 500) {
+      console.log('classifyJobWorker: sparse doc, auto-rejecting without Bedrock');
+      const autoLowPages = Array.from({ length: docPageCount }, (_, i) => ({
+        page_number: i + 1 + page_offset,
+        reason: 'photo/image-only page (no extractable text)',
+      }));
+      classifyResult = {
+        category: 'non_clinical',
+        subcategory: 'photo_image_only',
+        is_relevant_medical_document: false,
+        patient_name: doc.patient_name || '',
+        document_date: '',
+        provider_name: '',
+        case_number: '',
+        office_visit_count: 0,
+        page_count: docPageCount,
+        rejection_reason: 'No extractable text (' + charsPerPage.toFixed(1) + ' chars/page) -- likely photo or image-only document',
+        low_relevance_pages: autoLowPages,
+      };
+    } else {
+      // Fetch PDF from S3
+      const s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: doc.file_key }));
+      const chunks = [];
+      for await (const chunk of s3Object.Body) { chunks.push(chunk); }
+      const pdfBase64 = Buffer.concat(chunks).toString('base64');
+      classifyResult = await runBedrockClassify(pdfBase64, aws_document_id);
+    }
+
+    // Save classification to documents table
+    const isRejected = await saveClassificationToDoc(aws_document_id, classifyResult, doc, page_offset);
+
+    // Mark job complete with result summary
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE,
+      Key: { job_id },
+      UpdateExpression: 'SET #s = :s, result = :r, updated_at = :now',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: {
+        ':s': 'complete',
+        ':r': {
+          aws_document_id,
+          is_rejected: isRejected,
+          category: classifyResult.category,
+          subcategory: classifyResult.subcategory,
+          page_count: classifyResult.page_count,
+          low_relevance_pages: classifyResult.low_relevance_pages || [],
+          low_page_count: (classifyResult.low_relevance_pages || []).length,
+        },
+        ':now': now(),
+      },
+    }));
+    console.log('classifyJobWorker complete: job_id=' + job_id + ' rejected=' + isRejected);
+
+  } catch (err) {
+    console.error('classifyJobWorker error:', err);
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE,
+      Key: { job_id },
+      UpdateExpression: 'SET #s = :s, error_message = :e, updated_at = :now',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':s': 'failed', ':e': err.message, ':now': now() },
+    })).catch(() => {});
+  }
+};
+
+// --- CLASSIFY JOB QUEUE ENTRY POINT -----------------------------------------
+const classifyJobQueueHandler = async (event) => {
+  // SQS trigger
+  if (event.Records && event.Records[0] && event.Records[0].body) {
+    const msg = JSON.parse(event.Records[0].body);
+    if (msg.__classifyJob) {
+      await classifyJobWorker(msg.job_id, msg.aws_document_id, msg.org_id, msg.page_offset || 0);
+      return;
+    }
+  }
+  // Direct Lambda invoke fallback
+  if (event.__classifyJob) {
+    await classifyJobWorker(event.job_id, event.aws_document_id, event.org_id, event.page_offset || 0);
+    return;
+  }
+  console.warn('classifyJobQueueHandler: no __classifyJob flag in event');
+};
+
 module.exports = {
   directUpload:   validateApiKey(directUploadHandler),
   getUploadUrl:   validateApiKey(async (event) => {
@@ -986,7 +1314,6 @@ module.exports = {
   }),
   get:              validateApiKey(getHandler),
   getText:          validateApiKey(getTextHandler),
-  getFullText:      validateApiKey(getTextHandler),
   remove:           validateApiKey(removeHandler),
   getDownloadUrl:   validateApiKey(getDownloadUrlHandler),
   update:           validateApiKey(updateHandler),
@@ -997,4 +1324,8 @@ module.exports = {
   listAll:          validateApiKey(listAllHandler),
   assessRelevance:  validateApiKey(assessRelevanceHandler),
   reassessDocument: validateApiKey(reassessHandler),
+  classifyStart:    validateApiKey(classifyStartHandler),
+  classifyWorker:   classifyJobQueueHandler,
+  getJob:           validateApiKey(getJobHandler),
+  getFullText:      validateApiKey(getTextHandler),
 };
