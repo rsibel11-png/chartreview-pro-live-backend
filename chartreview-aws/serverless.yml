@@ -1,148 +1,195 @@
+# serverless.yml - CRPv5
+# v2 - classifyWorker Lambda removed. CLASSIFY_FUNCTION_NAME env var removed.
+#      classifyWorker IAM invoke permission removed.
+
 service: chartreview-pro
 
 frameworkVersion: '3'
 
 provider:
   name: aws
-  runtime: nodejs20.x
+  runtime: nodejs18.x
   region: us-east-1
-  stage: ${opt:stage, 'prod'}
-  timeout: 60
+  stage: prod
+  timeout: 29
   environment:
-    PATIENTS_TABLE: ${self:service}-patients-${self:provider.stage}
-    DOCUMENTS_TABLE: ${self:service}-documents-${self:provider.stage}
-    SUMMARIES_TABLE: ${self:service}-summaries-${self:provider.stage}
-    S3_BUCKET: ${self:service}-files-${self:provider.stage}
-    API_KEY: "ChartReview#2026$ProdKey!Rx"
+    DOCUMENTS_TABLE: chartreview-documents-prod
+    PATIENTS_TABLE: chartreview-patients-prod
+    SUMMARIES_TABLE: chartreview-summaries-prod
+    DOCUMENTS_BUCKET: chartreview-documents-prod
+    API_KEY: ChartReview#2026$ProdKey!Rx
+    WORKER_FUNCTION_NAME: chartreview-pro-prod-processWorker
   iam:
     role:
       statements:
         - Effect: Allow
           Action:
-            - dynamodb:PutItem
             - dynamodb:GetItem
+            - dynamodb:PutItem
             - dynamodb:UpdateItem
             - dynamodb:DeleteItem
             - dynamodb:Query
             - dynamodb:Scan
           Resource:
-            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-patients-${self:provider.stage}
-            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-documents-${self:provider.stage}
-            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-summaries-${self:provider.stage}
-            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-documents-${self:provider.stage}/index/*
-            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-summaries-${self:provider.stage}/index/*
+            - arn:aws:dynamodb:us-east-1:*:table/chartreview-documents-prod
+            - arn:aws:dynamodb:us-east-1:*:table/chartreview-documents-prod/index/*
+            - arn:aws:dynamodb:us-east-1:*:table/chartreview-patients-prod
+            - arn:aws:dynamodb:us-east-1:*:table/chartreview-patients-prod/index/*
+            - arn:aws:dynamodb:us-east-1:*:table/chartreview-summaries-prod
+            - arn:aws:dynamodb:us-east-1:*:table/chartreview-summaries-prod/index/*
         - Effect: Allow
           Action:
-            - s3:PutObject
             - s3:GetObject
+            - s3:PutObject
             - s3:DeleteObject
-          Resource: arn:aws:s3:::${self:service}-files-${self:provider.stage}/*
+            - s3:GetObjectAcl
+          Resource: arn:aws:s3:::chartreview-documents-prod/*
         - Effect: Allow
           Action:
-            - textract:DetectDocumentText
             - textract:StartDocumentTextDetection
             - textract:GetDocumentTextDetection
-          Resource: "*"
+            - textract:DetectDocumentText
+          Resource: '*'
         - Effect: Allow
           Action:
             - bedrock:InvokeModel
             - bedrock:InvokeModelWithResponseStream
-          Resource: "*"
+          Resource: '*'
         - Effect: Allow
           Action:
             - lambda:InvokeFunction
           Resource:
-            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-processWorker
+            - arn:aws:lambda:us-east-1:*:function:chartreview-pro-prod-processWorker
 
 functions:
-  # ── PATIENTS ──
+
+  # --- PATIENTS ---------------------------------------------------------------
+
   listPatients:
     handler: src/handlers/patients.list
+    timeout: 60
     events:
       - http:
-          path: /patients
+          path: patients
           method: get
           cors: true
 
   createPatient:
     handler: src/handlers/patients.create
+    timeout: 60
     events:
       - http:
-          path: /patients
+          path: patients
           method: post
           cors: true
 
   getPatient:
     handler: src/handlers/patients.get
+    timeout: 60
     events:
       - http:
-          path: /patients/{aws_patient_id}
+          path: patients/{aws_patient_id}
           method: get
           cors: true
 
   updatePatient:
     handler: src/handlers/patients.update
+    timeout: 60
     events:
       - http:
-          path: /patients/{aws_patient_id}
+          path: patients/{aws_patient_id}
           method: put
           cors: true
 
   deletePatient:
     handler: src/handlers/patients.remove
+    timeout: 60
     events:
       - http:
-          path: /patients/{aws_patient_id}
+          path: patients/{aws_patient_id}
           method: delete
           cors: true
 
-  # ── DOCUMENTS ──
+  # --- DOCUMENTS --------------------------------------------------------------
+
   directUpload:
     handler: src/handlers/documents_new.directUpload
     timeout: 29
     events:
       - http:
-          path: /documents/direct-upload
+          path: documents/direct-upload
           method: post
           cors: true
 
   getUploadUrl:
     handler: src/handlers/documents_new.getUploadUrl
+    timeout: 60
     events:
       - http:
-          path: /documents/upload-url
+          path: documents/upload-url
           method: post
+          cors: true
+
+  listAllDocuments:
+    handler: src/handlers/documents_new.listAll
+    timeout: 60
+    events:
+      - http:
+          path: documents
+          method: get
           cors: true
 
   getDocument:
     handler: src/handlers/documents_new.get
+    timeout: 60
     events:
       - http:
-          path: /documents/{aws_document_id}
+          path: documents/{aws_document_id}
+          method: get
+          cors: true
+
+  getDocumentText:
+    handler: src/handlers/documents_new.getText
+    timeout: 60
+    events:
+      - http:
+          path: documents/{aws_document_id}/text
+          method: get
+          cors: true
+
+  getDocumentFullText:
+    handler: src/handlers/documents_new.getFullText
+    timeout: 60
+    events:
+      - http:
+          path: documents/{aws_document_id}/fulltext
           method: get
           cors: true
 
   updateDocument:
     handler: src/handlers/documents_new.update
+    timeout: 60
     events:
       - http:
-          path: /documents/{aws_document_id}
+          path: documents/{aws_document_id}
           method: put
           cors: true
 
   deleteDocument:
     handler: src/handlers/documents_new.remove
+    timeout: 60
     events:
       - http:
-          path: /documents/{aws_document_id}
+          path: documents/{aws_document_id}
           method: delete
           cors: true
 
   getDownloadUrl:
     handler: src/handlers/documents_new.getDownloadUrl
+    timeout: 60
     events:
       - http:
-          path: /documents/{aws_document_id}/download-url
+          path: documents/{aws_document_id}/download-url
           method: get
           cors: true
 
@@ -151,127 +198,140 @@ functions:
     timeout: 29
     events:
       - http:
-          path: /documents/{aws_document_id}/process
+          path: documents/{aws_document_id}/process
           method: post
           cors: true
 
-  # Worker: invoked async by processDocument, no HTTP trigger, long timeout
   processWorker:
     handler: src/handlers/documents_new.worker
     timeout: 300
-    environment:
-      WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-processWorker
 
   listPatientDocuments:
     handler: src/handlers/documents_new.listByPatient
+    timeout: 60
     events:
       - http:
-          path: /patients/{aws_patient_id}/documents
+          path: patients/{aws_patient_id}/documents
           method: get
           cors: true
 
-  # ── SUMMARIES ──
-  createSummary:
-    handler: src/handlers/summaries.create
+  # --- SUMMARIES --------------------------------------------------------------
+
+  listAllSummaries:
+    handler: src/handlers/summaries.listAll
+    timeout: 60
     events:
       - http:
-          path: /summaries
+          path: summaries
+          method: get
+          cors: true
+
+  createSummary:
+    handler: src/handlers/summaries.create
+    timeout: 60
+    events:
+      - http:
+          path: summaries
           method: post
           cors: true
 
   getSummary:
     handler: src/handlers/summaries.get
+    timeout: 60
     events:
       - http:
-          path: /summaries/{aws_summary_id}
+          path: summaries/{aws_summary_id}
           method: get
           cors: true
 
   updateSummary:
     handler: src/handlers/summaries.update
+    timeout: 60
     events:
       - http:
-          path: /summaries/{aws_summary_id}
+          path: summaries/{aws_summary_id}
           method: put
           cors: true
 
   deleteSummary:
     handler: src/handlers/summaries.remove
+    timeout: 60
     events:
       - http:
-          path: /summaries/{aws_summary_id}
+          path: summaries/{aws_summary_id}
           method: delete
+          cors: true
+
+  generateSummary:
+    handler: src/handlers/summaries.generate
+    timeout: 300
+    events:
+      - http:
+          path: summaries/generate
+          method: post
           cors: true
 
   listPatientSummaries:
     handler: src/handlers/summaries.listByPatient
+    timeout: 60
     events:
       - http:
-          path: /patients/{aws_patient_id}/summaries
+          path: patients/{aws_patient_id}/summaries
           method: get
           cors: true
-
-  listAllDocuments:
-    handler: src/handlers/documents_new.listAll
-    events:
-      - http:
-          path: /documents
-          method: get
-          cors: true
-
-  listAllSummaries:
-    handler: src/handlers/summaries.listAll
-    events:
-      - http:
-          path: /summaries-list
-          method: get
-          cors: true
-
 
 resources:
   Resources:
-
-    # ── DYNAMODB TABLES ──
-    PatientsTable:
-      Type: AWS::DynamoDB::Table
-      DeletionPolicy: Retain
-      Properties:
-        TableName: ${self:service}-patients-${self:provider.stage}
-        BillingMode: PAY_PER_REQUEST
-        SSESpecification:
-          SSEEnabled: true
-        PointInTimeRecoverySpecification:
-          PointInTimeRecoveryEnabled: true
-        AttributeDefinitions:
-          - AttributeName: aws_patient_id
-            AttributeType: S
-        KeySchema:
-          - AttributeName: aws_patient_id
-            KeyType: HASH
 
     DocumentsTable:
       Type: AWS::DynamoDB::Table
       DeletionPolicy: Retain
       Properties:
-        TableName: ${self:service}-documents-${self:provider.stage}
+        TableName: chartreview-documents-prod
         BillingMode: PAY_PER_REQUEST
-        SSESpecification:
-          SSEEnabled: true
-        PointInTimeRecoverySpecification:
-          PointInTimeRecoveryEnabled: true
         AttributeDefinitions:
           - AttributeName: aws_document_id
             AttributeType: S
-          - AttributeName: aws_patient_id
+          - AttributeName: org_id
+            AttributeType: S
+          - AttributeName: created_at
             AttributeType: S
         KeySchema:
           - AttributeName: aws_document_id
             KeyType: HASH
         GlobalSecondaryIndexes:
-          - IndexName: patient-index
+          - IndexName: org_id-created_at-index
             KeySchema:
-              - AttributeName: aws_patient_id
+              - AttributeName: org_id
                 KeyType: HASH
+              - AttributeName: created_at
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    PatientsTable:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      Properties:
+        TableName: chartreview-patients-prod
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: aws_patient_id
+            AttributeType: S
+          - AttributeName: org_id
+            AttributeType: S
+          - AttributeName: created_at
+            AttributeType: S
+        KeySchema:
+          - AttributeName: aws_patient_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: org_id-created_at-index
+            KeySchema:
+              - AttributeName: org_id
+                KeyType: HASH
+              - AttributeName: created_at
+                KeyType: RANGE
             Projection:
               ProjectionType: ALL
 
@@ -279,73 +339,36 @@ resources:
       Type: AWS::DynamoDB::Table
       DeletionPolicy: Retain
       Properties:
-        TableName: ${self:service}-summaries-${self:provider.stage}
+        TableName: chartreview-summaries-prod
         BillingMode: PAY_PER_REQUEST
-        SSESpecification:
-          SSEEnabled: true
-        PointInTimeRecoverySpecification:
-          PointInTimeRecoveryEnabled: true
         AttributeDefinitions:
           - AttributeName: aws_summary_id
             AttributeType: S
-          - AttributeName: aws_patient_id
+          - AttributeName: org_id
+            AttributeType: S
+          - AttributeName: created_at
             AttributeType: S
         KeySchema:
           - AttributeName: aws_summary_id
             KeyType: HASH
         GlobalSecondaryIndexes:
-          - IndexName: patient-index
+          - IndexName: org_id-created_at-index
             KeySchema:
-              - AttributeName: aws_patient_id
+              - AttributeName: org_id
                 KeyType: HASH
+              - AttributeName: created_at
+                KeyType: RANGE
             Projection:
               ProjectionType: ALL
 
-    # ── S3 BUCKET ──
     DocumentsBucket:
       Type: AWS::S3::Bucket
       DeletionPolicy: Retain
       Properties:
-        BucketName: ${self:service}-files-${self:provider.stage}
-        BucketEncryption:
-          ServerSideEncryptionConfiguration:
-            - ServerSideEncryptionByDefault:
-                SSEAlgorithm: aws:kms
-        PublicAccessBlockConfiguration:
-          BlockPublicAcls: true
-          BlockPublicPolicy: true
-          IgnorePublicAcls: true
-          RestrictPublicBuckets: true
-        VersioningConfiguration:
-          Status: Enabled
-        LifecycleConfiguration:
-          Rules:
-            - Id: DeleteIncompleteMultipartUploads
-              Status: Enabled
-              AbortIncompleteMultipartUpload:
-                DaysAfterInitiation: 1
-        LoggingConfiguration:
-          DestinationBucketName: !Ref AccessLogsBucket
-          LogFilePrefix: document-access-logs/
+        BucketName: chartreview-documents-prod
         CorsConfiguration:
           CorsRules:
-            - AllowedOrigins:
-                - '*'
-              AllowedHeaders:
-                - '*'
-              AllowedMethods:
-                - PUT
-                - GET
-                - HEAD
+            - AllowedHeaders: ['*']
+              AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
+              AllowedOrigins: ['*']
               MaxAge: 3000
-
-    AccessLogsBucket:
-      Type: AWS::S3::Bucket
-      DeletionPolicy: Retain
-      Properties:
-        BucketName: ${self:service}-access-logs-${self:provider.stage}
-        PublicAccessBlockConfiguration:
-          BlockPublicAcls: true
-          BlockPublicPolicy: true
-          IgnorePublicAcls: true
-          RestrictPublicBuckets: true
