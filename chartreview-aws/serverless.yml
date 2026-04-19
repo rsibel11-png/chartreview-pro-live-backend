@@ -54,7 +54,18 @@ functions:
       - http:
           path: /patients/debug
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   # ── PATIENTS ──
   listPatients:
@@ -63,7 +74,18 @@ functions:
       - http:
           path: /patients
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   createPatient:
     handler: src/handlers/patients.create
@@ -71,7 +93,18 @@ functions:
       - http:
           path: /patients
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   getPatient:
     handler: src/handlers/patients.get
@@ -79,7 +112,18 @@ functions:
       - http:
           path: /patients/{aws_patient_id}
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   updatePatient:
     handler: src/handlers/patients.update
@@ -87,7 +131,18 @@ functions:
       - http:
           path: /patients/{aws_patient_id}
           method: put
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   deletePatient:
     handler: src/handlers/patients.remove
@@ -95,7 +150,18 @@ functions:
       - http:
           path: /patients/{aws_patient_id}
           method: delete
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   # ── DOCUMENTS ──
   getUploadUrl:
@@ -104,7 +170,18 @@ functions:
       - http:
           path: /documents/upload-url
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   getDocument:
     handler: src/handlers/documents.get
@@ -112,7 +189,18 @@ functions:
       - http:
           path: /documents/{aws_document_id}
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   deleteDocument:
     handler: src/handlers/documents.remove
@@ -120,7 +208,18 @@ functions:
       - http:
           path: /documents/{aws_document_id}
           method: delete
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   getDownloadUrl:
     handler: src/handlers/documents.getDownloadUrl
@@ -128,7 +227,18 @@ functions:
       - http:
           path: /documents/{aws_document_id}/download-url
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   processDocument:
     handler: src/handlers/documents.process
@@ -137,7 +247,18 @@ functions:
       - http:
           path: /documents/{aws_document_id}/process
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   listPatientDocuments:
     handler: src/handlers/documents.listByPatient
@@ -145,7 +266,18 @@ functions:
       - http:
           path: /patients/{aws_patient_id}/documents
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   # ── SUMMARIES ──
   createSummary:
@@ -154,7 +286,18 @@ functions:
       - http:
           path: /summaries
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   getSummary:
     handler: src/handlers/summaries.get
@@ -162,7 +305,18 @@ functions:
       - http:
           path: /summaries/{aws_summary_id}
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   updateSummary:
     handler: src/handlers/summaries.update
@@ -170,7 +324,18 @@ functions:
       - http:
           path: /summaries/{aws_summary_id}
           method: put
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   deleteSummary:
     handler: src/handlers/summaries.remove
@@ -178,7 +343,18 @@ functions:
       - http:
           path: /summaries/{aws_summary_id}
           method: delete
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
 resources:
   Resources:
