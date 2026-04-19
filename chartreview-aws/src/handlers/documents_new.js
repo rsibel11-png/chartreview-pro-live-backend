@@ -402,8 +402,10 @@ const processWorker = async (aws_document_id, assessOnly = false, pageOffset = 0
       // but the file is too large to send. Fall through to Bedrock and let it fail
       // naturally -- the outer catch will log it. Do NOT auto-reject clinical-density docs.
       const MAX_BEDROCK_BASE64 = 10 * 1024 * 1024; // 10MB base64
-      if (assessPdfBase64.length <= MAX_BEDROCK_BASE64) {
-        // File is within Bedrock size limit -- proceed with vision-based assess.
+      const assessTooBig = assessPdfBase64.length > MAX_BEDROCK_BASE64;
+      if (assessTooBig) {
+        console.warn('assessRelevance: base64 payload ' + (assessPdfBase64.length/1024/1024).toFixed(1) + 'MB exceeds Bedrock limit for', aws_document_id, '-- skipping vision assess, Textract will still run');
+      }
 
       const assessPrompt = `Analyze this document VERY CAREFULLY and extract the following information:
 
@@ -564,9 +566,6 @@ Return ONLY a JSON object with these exact fields:
     } catch (assessErr) {
       console.warn('assessRelevance in processWorker failed (non-fatal):', assessErr.message);
     }
-      } else {
-        console.warn('assessRelevance: base64 payload exceeds Bedrock limit for', aws_document_id, '-- skipping vision assess, Textract will still run');
-      }
     // -----------------------------------------------------------------------
 
     if (!assessOnly) {
