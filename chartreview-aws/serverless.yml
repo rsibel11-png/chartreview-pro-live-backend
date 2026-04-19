@@ -11,9 +11,9 @@ provider:
   apiGateway:
     minimumCompressionSize: 1024
   environment:
-    PATIENTS_TABLE: ${self:service}-patients-${self:provider.stage}
-    DOCUMENTS_TABLE: ${self:service}-documents-${self:provider.stage}
-    SUMMARIES_TABLE: ${self:service}-summaries-${self:provider.stage}
+    PATIENTS_TABLE: chartreview-patients-${self:provider.stage}
+    DOCUMENTS_TABLE: chartreview-documents-${self:provider.stage}
+    SUMMARIES_TABLE: chartreview-summaries-${self:provider.stage}
     S3_BUCKET: chartreview-pro-files-${self:provider.stage}
     API_KEY: "ChartReview#2026$ProdKey!Rx"
     WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-processWorker
