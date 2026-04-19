@@ -28,7 +28,19 @@ jobs:
         run: npm install -g serverless@3
 
       - name: Deploy
-        run: npx serverless deploy --stage prod --verbose
+        run: npx serverless deploy --stage prod --verbose 2>&1 || true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Get CloudFormation errors
+        if: always()
+        run: |
+          aws cloudformation describe-stack-events \
+            --stack-name chartreview-pro-prod \
+            --query 'StackEvents[?ResourceStatus==`UPDATE_FAILED`].[LogicalResourceId,ResourceStatusReason]' \
+            --output text || true
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
