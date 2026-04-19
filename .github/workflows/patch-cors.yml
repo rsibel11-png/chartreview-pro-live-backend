@@ -25,14 +25,13 @@ jobs:
             HAS_OPTIONS=$(aws apigateway get-method --rest-api-id $API_ID --resource-id $RID --http-method OPTIONS --region $REGION 2>&1)
             if echo "$HAS_OPTIONS" | grep -q "httpMethod"; then
               echo "Patching $RID..."
-              RESULT=$(aws apigateway update-integration-response \
+              aws apigateway update-integration-response \
                 --rest-api-id $API_ID \
                 --resource-id $RID \
                 --http-method OPTIONS \
                 --status-code 200 \
                 --region $REGION \
-                --patch-operations '[{"op":"replace","path":"/responseParameters/method.response.header.Access-Control-Allow-Headers","value":"'"'"'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"'"'"}]' 2>&1) && \
-                echo "  Done $RID" || echo "  Skipped $RID (no integration response): $RESULT"
+                --patch-operations '[{"op":"replace","path":"/responseParameters/method.response.header.Access-Control-Allow-Headers","value":"'"'"'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"'"'"}]' && echo "  Done $RID" || echo "  Skipped $RID (no integration response)"
             fi
           done
 
@@ -46,12 +45,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
         run: |
-          echo "=== Checking all OPTIONS resources ==="
-          RESOURCES=$(aws apigateway get-resources --rest-api-id 1h4kpspbs6 --region us-east-1 --query 'items[*].id' --output text)
-          for RID in $RESOURCES; do
-            HAS_OPTIONS=$(aws apigateway get-method --rest-api-id 1h4kpspbs6 --resource-id $RID --http-method OPTIONS --region us-east-1 2>&1)
-            if echo "$HAS_OPTIONS" | grep -q "httpMethod"; then
-              HEADERS=$(aws apigateway get-integration-response --rest-api-id 1h4kpspbs6 --resource-id $RID --http-method OPTIONS --status-code 200 --region us-east-1 --query 'responseParameters."method.response.header.Access-Control-Allow-Headers"' --output text 2>&1)
-              echo "$RID: $HEADERS"
-            fi
-          done
+          FIRST_RID=$(aws apigateway get-resources --rest-api-id 1h4kpspbs6 --region us-east-1 --query 'items[?resourceMethods.OPTIONS!=null] | [0].id' --output text)
+          echo "Checking resource $FIRST_RID:"
+          aws apigateway get-integration-response --rest-api-id 1h4kpspbs6 --resource-id $FIRST_RID --http-method OPTIONS --status-code 200 --region us-east-1
