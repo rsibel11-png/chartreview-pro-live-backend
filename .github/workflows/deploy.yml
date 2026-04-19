@@ -33,6 +33,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Create classifyJobWorker Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-classifyJobWorker --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-classifyJobWorker \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/documents_new.classifyJobWorker \
+            --timeout 600 \
+            --memory-size 1024 \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
@@ -56,6 +73,7 @@ jobs:
             "chartreview-pro-prod-assessRelevance"
             "chartreview-pro-prod-reassessDocument"
             "chartreview-pro-prod-classifyStart"
+            "chartreview-pro-prod-classifyJobWorker"
             "chartreview-pro-prod-getJob"
             "chartreview-pro-prod-listAllSummaries"
             "chartreview-pro-prod-createSummary"
