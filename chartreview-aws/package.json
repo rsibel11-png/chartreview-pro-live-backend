@@ -6,7 +6,8 @@
   "scripts": {
     "deploy": "serverless deploy --stage prod",
     "deploy:dev": "serverless deploy --stage dev",
-    "remove": "serverless remove --stage prod"
+    "remove": "serverless remove --stage prod",
+    "patch-cors": "bash scripts/patch-cors.sh"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.0.0",
