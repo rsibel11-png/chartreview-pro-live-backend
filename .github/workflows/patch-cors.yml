@@ -16,7 +16,6 @@ jobs:
           API_ID="1h4kpspbs6"
           STAGE="prod"
           REGION="us-east-1"
-          HEADERS="'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"
 
           echo "Fetching resources..."
           RESOURCES=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION --query 'items[*].id' --output text)
@@ -32,7 +31,7 @@ jobs:
                 --http-method OPTIONS \
                 --status-code 200 \
                 --region $REGION \
-                --patch-operations "op=replace,path=/responseParameters/method.response.header.Access-Control-Allow-Headers,value=$HEADERS"
+                --patch-operations '[{"op":"replace","path":"/responseParameters/method.response.header.Access-Control-Allow-Headers","value":"'"'"'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"'"'"}]'
               echo "  Done $RID"
             fi
           done
@@ -49,4 +48,9 @@ jobs:
         run: |
           FIRST_RID=$(aws apigateway get-resources --rest-api-id 1h4kpspbs6 --region us-east-1 --query 'items[?resourceMethods.OPTIONS!=null] | [0].id' --output text)
           echo "Checking resource $FIRST_RID:"
-          aws apigateway get-integration-response --rest-api-id 1h4kpspbs6 --resource-id $FIRST_RID --http-method OPTIONS --status-code 200 --region us-east-1
+          aws apigateway get-integration-response \
+            --rest-api-id 1h4kpspbs6 \
+            --resource-id $FIRST_RID \
+            --http-method OPTIONS \
+            --status-code 200 \
+            --region us-east-1
