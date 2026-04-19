@@ -368,137 +368,22 @@ functions:
 
 resources:
   Resources:
-
-  GatewayResponseDefault4XX:
-    Type: 'AWS::ApiGateway::GatewayResponse'
-    Properties:
-      ResponseParameters:
-        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"
-        gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE,PATCH'"
-      ResponseType: DEFAULT_4XX
-      RestApiId: !Ref ApiGatewayRestApi
-
-  GatewayResponseDefault5XX:
-    Type: 'AWS::ApiGateway::GatewayResponse'
-    Properties:
-      ResponseParameters:
-        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"
-        gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE,PATCH'"
-      ResponseType: DEFAULT_5XX
-      RestApiId: !Ref ApiGatewayRestApi
-
-    # ── DYNAMODB TABLES ──
-    PatientsTable:
-      Type: AWS::DynamoDB::Table
+    GatewayResponseDefault4XX:
+      Type: 'AWS::ApiGateway::GatewayResponse'
       Properties:
-        TableName: ${self:service}-patients-${self:provider.stage}
-        BillingMode: PAY_PER_REQUEST
-        SSESpecification:
-          SSEEnabled: true
-        PointInTimeRecoverySpecification:
-          PointInTimeRecoveryEnabled: true
-        AttributeDefinitions:
-          - AttributeName: aws_patient_id
-            AttributeType: S
-        KeySchema:
-          - AttributeName: aws_patient_id
-            KeyType: HASH
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE,PATCH'"
+        ResponseType: DEFAULT_4XX
+        RestApiId: !Ref ApiGatewayRestApi
 
-    DocumentsTable:
-      Type: AWS::DynamoDB::Table
+    GatewayResponseDefault5XX:
+      Type: 'AWS::ApiGateway::GatewayResponse'
       Properties:
-        TableName: ${self:service}-documents-${self:provider.stage}
-        BillingMode: PAY_PER_REQUEST
-        SSESpecification:
-          SSEEnabled: true
-        PointInTimeRecoverySpecification:
-          PointInTimeRecoveryEnabled: true
-        AttributeDefinitions:
-          - AttributeName: aws_document_id
-            AttributeType: S
-          - AttributeName: aws_patient_id
-            AttributeType: S
-        KeySchema:
-          - AttributeName: aws_document_id
-            KeyType: HASH
-        GlobalSecondaryIndexes:
-          - IndexName: patient-index
-            KeySchema:
-              - AttributeName: aws_patient_id
-                KeyType: HASH
-            Projection:
-              ProjectionType: ALL
-
-    SummariesTable:
-      Type: AWS::DynamoDB::Table
-      Properties:
-        TableName: ${self:service}-summaries-${self:provider.stage}
-        BillingMode: PAY_PER_REQUEST
-        SSESpecification:
-          SSEEnabled: true
-        PointInTimeRecoverySpecification:
-          PointInTimeRecoveryEnabled: true
-        AttributeDefinitions:
-          - AttributeName: aws_summary_id
-            AttributeType: S
-          - AttributeName: aws_patient_id
-            AttributeType: S
-        KeySchema:
-          - AttributeName: aws_summary_id
-            KeyType: HASH
-        GlobalSecondaryIndexes:
-          - IndexName: patient-index
-            KeySchema:
-              - AttributeName: aws_patient_id
-                KeyType: HASH
-            Projection:
-              ProjectionType: ALL
-
-    # ── S3 BUCKET ──
-    DocumentsBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:service}-files-${self:provider.stage}
-        BucketEncryption:
-          ServerSideEncryptionConfiguration:
-            - ServerSideEncryptionByDefault:
-                SSEAlgorithm: aws:kms
-        PublicAccessBlockConfiguration:
-          BlockPublicAcls: true
-          BlockPublicPolicy: true
-          IgnorePublicAcls: true
-          RestrictPublicBuckets: true
-        VersioningConfiguration:
-          Status: Enabled
-        LifecycleConfiguration:
-          Rules:
-            - Id: DeleteIncompleteMultipartUploads
-              Status: Enabled
-              AbortIncompleteMultipartUpload:
-                DaysAfterInitiation: 1
-        LoggingConfiguration:
-          DestinationBucketName: !Ref AccessLogsBucket
-          LogFilePrefix: document-access-logs/
-        CorsConfiguration:
-          CorsRules:
-            - AllowedOrigins:
-                - '*'
-              AllowedHeaders:
-                - '*'
-              AllowedMethods:
-                - PUT
-                - GET
-                - HEAD
-              MaxAge: 3000
-
-    AccessLogsBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:service}-access-logs-${self:provider.stage}
-        PublicAccessBlockConfiguration:
-          BlockPublicAcls: true
-          BlockPublicPolicy: true
-          IgnorePublicAcls: true
-          RestrictPublicBuckets: true
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE,PATCH'"
+        ResponseType: DEFAULT_5XX
+        RestApiId: !Ref ApiGatewayRestApi
