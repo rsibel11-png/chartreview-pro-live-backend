@@ -361,7 +361,10 @@ const processWorker = async (aws_document_id, assessOnly = false, pageOffset = 0
       const extractedTextLen = (doc.extracted_text || '').length;
       const docPageCount = doc.page_count || 1;
       const charsPerPage = extractedTextLen / docPageCount;
-      if (charsPerPage < SPARSE_CHARS_PER_PAGE && extractedTextLen < 500) {
+      // v29: skip sparse check on fresh uploads -- Textract hasn't run yet so extracted_text is empty.
+      // Only auto-reject as sparse/image-only if we are in assess-only mode (Textract already ran).
+      const shouldCheckSparse = assessOnly || extractedTextLen > 0;
+      if (shouldCheckSparse && charsPerPage < SPARSE_CHARS_PER_PAGE && extractedTextLen < 500) {
         console.log('assessRelevance: sparse text (' + charsPerPage.toFixed(1) + ' chars/page, ' + extractedTextLen + ' total) -- auto-marking all pages non-clinical without Bedrock');
         const autoLowPages = Array.from({ length: docPageCount }, (_, i) => ({
           page_number: i + 1 + pageOffset,
