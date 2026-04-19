@@ -67,6 +67,41 @@ functions:
               - X-Org-Id
             allowCredentials: false
 
+  # ── CORS PREFLIGHT ──
+  corsDocuments:
+    handler: src/handlers/documents_new.options
+    events:
+      - http:
+          path: /documents
+          method: options
+          cors: false
+      - http:
+          path: /documents/{proxy+}
+          method: options
+          cors: false
+  corsPatients:
+    handler: src/handlers/documents_new.options
+    events:
+      - http:
+          path: /patients
+          method: options
+          cors: false
+      - http:
+          path: /patients/{proxy+}
+          method: options
+          cors: false
+  corsSummaries:
+    handler: src/handlers/documents_new.options
+    events:
+      - http:
+          path: /summaries
+          method: options
+          cors: false
+      - http:
+          path: /summaries/{proxy+}
+          method: options
+          cors: false
+
   # ── PATIENTS ──
   listPatients:
     handler: src/handlers/patients.list
