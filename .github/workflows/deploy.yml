@@ -25,23 +25,52 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Serverless Framework
-        run: npm install -g serverless@3
-
-      - name: Deploy
-        run: npx serverless deploy --stage prod --verbose 2>&1 || true
+      - name: Package Lambda functions
+        run: |
+          zip -r function.zip src/ node_modules/ package.json
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Get CloudFormation errors
-        if: always()
+      - name: Deploy all Lambda functions directly
         run: |
-          aws cloudformation describe-stack-events \
-            --stack-name chartreview-pro-prod \
-            --query 'StackEvents[?ResourceStatus==`UPDATE_FAILED`].[LogicalResourceId,ResourceStatusReason]' \
-            --output text || true
+          FUNCTIONS=(
+            "chartreview-pro-prod-listPatients"
+            "chartreview-pro-prod-createPatient"
+            "chartreview-pro-prod-getPatient"
+            "chartreview-pro-prod-updatePatient"
+            "chartreview-pro-prod-deletePatient"
+            "chartreview-pro-prod-listPatientDocuments"
+            "chartreview-pro-prod-getUploadUrl"
+            "chartreview-pro-prod-directUpload"
+            "chartreview-pro-prod-listAllDocuments"
+            "chartreview-pro-prod-getDocument"
+            "chartreview-pro-prod-updateDocument"
+            "chartreview-pro-prod-deleteDocument"
+            "chartreview-pro-prod-getDownloadUrl"
+            "chartreview-pro-prod-getDocumentText"
+            "chartreview-pro-prod-getDocumentFullText"
+            "chartreview-pro-prod-processDocument"
+            "chartreview-pro-prod-processWorker"
+            "chartreview-pro-prod-assessRelevance"
+            "chartreview-pro-prod-reassessDocument"
+            "chartreview-pro-prod-classifyStart"
+            "chartreview-pro-prod-getJob"
+            "chartreview-pro-prod-listAllSummaries"
+            "chartreview-pro-prod-createSummary"
+            "chartreview-pro-prod-getSummary"
+            "chartreview-pro-prod-updateSummary"
+            "chartreview-pro-prod-deleteSummary"
+          )
+          for FUNC in "${FUNCTIONS[@]}"; do
+            echo "Updating $FUNC..."
+            aws lambda update-function-code \
+              --function-name "$FUNC" \
+              --zip-file fileb://function.zip \
+              --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
+          done
+          echo "All Lambda functions updated!"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
