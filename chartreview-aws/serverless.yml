@@ -17,9 +17,6 @@ provider:
     API_KEY: ChartReview#2026$ProdKey!Rx
     WORKER_FUNCTION_NAME: chartreview-pro-prod-processWorker
     PROCESSING_QUEUE_URL: !Ref ProcessingQueue
-    CLASSIFY_QUEUE_URL: !Ref ClassifyJobQueue
-    CLASSIFY_WORKER_FUNCTION_NAME: chartreview-pro-prod-classifyJobWorker
-    JOBS_TABLE: chartreview-jobs-prod
   apiGateway:
     description: chartreview-pro-prod-202604190420
   iam:
@@ -65,7 +62,6 @@ provider:
             - lambda:InvokeFunction
           Resource:
             - arn:aws:lambda:us-east-1:*:function:chartreview-pro-prod-processWorker
-            - arn:aws:lambda:us-east-1:*:function:chartreview-pro-prod-classifyJobWorker
         - Effect: Allow
           Action:
             - sqs:SendMessage
@@ -76,8 +72,6 @@ provider:
           Resource:
             - !GetAtt ProcessingQueue.Arn
             - !GetAtt ProcessingDLQ.Arn
-            - !GetAtt ClassifyJobQueue.Arn
-            - !GetAtt ClassifyJobDLQ.Arn
 
 functions:
 
@@ -425,54 +419,6 @@ functions:
               - x-org-id
             allowCredentials: false
 
-  classifyStart:
-    handler: src/handlers/documents_new.classifyStart
-    timeout: 29
-    events:
-      - http:
-          path: documents/{aws_document_id}/classify/start
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  classifyJobWorker:
-    handler: src/handlers/documents_new.classifyWorker
-    timeout: 600
-    events:
-      - sqs:
-          arn: !GetAtt ClassifyJobQueue.Arn
-          batchSize: 1
-
-  getJob:
-    handler: src/handlers/documents_new.getJob
-    timeout: 29
-    events:
-      - http:
-          path: jobs/{job_id}
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
   processWorker:
     handler: src/handlers/documents_new.worker
     timeout: 300
@@ -671,39 +617,6 @@ resources:
         VisibilityTimeout: 120
         MessageRetentionPeriod: 1209600
 
-    ClassifyJobQueue:
-      Type: AWS::SQS::Queue
-      Properties:
-        QueueName: chartreview-classify-queue
-        VisibilityTimeout: 720
-        MessageRetentionPeriod: 86400
-        RedrivePolicy:
-          deadLetterTargetArn: !GetAtt ClassifyJobDLQ.Arn
-          maxReceiveCount: 2
-
-    ClassifyJobDLQ:
-      Type: AWS::SQS::Queue
-      Properties:
-        QueueName: chartreview-classify-dlq
-        VisibilityTimeout: 120
-        MessageRetentionPeriod: 1209600
-
-    JobsTable:
-      Type: AWS::DynamoDB::Table
-      DeletionPolicy: Retain
-      Properties:
-        TableName: chartreview-jobs-prod
-        BillingMode: PAY_PER_REQUEST
-        AttributeDefinitions:
-          - AttributeName: job_id
-            AttributeType: S
-        KeySchema:
-          - AttributeName: job_id
-            KeyType: HASH
-        TimeToLiveSpecification:
-          AttributeName: ttl
-          Enabled: true
-
     DocumentsTable:
       Type: AWS::DynamoDB::Table
       DeletionPolicy: Retain
@@ -751,4 +664,5 @@ resources:
               AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
               AllowedOrigins: ['*']
               MaxAge: 3000
+
 
