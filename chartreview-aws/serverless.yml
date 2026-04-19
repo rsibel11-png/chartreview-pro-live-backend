@@ -2,6 +2,15 @@ service: chartreview-pro
 
 frameworkVersion: '3'
 
+plugins:
+  - serverless-plugin-scripts
+
+custom:
+  scripts:
+    hooks:
+      'after:deploy:finalize': bash scripts/patch-cors.sh
+
+
 provider:
   name: aws
   description: 'ChartReview Pro API v2 - cors-fix-7'
