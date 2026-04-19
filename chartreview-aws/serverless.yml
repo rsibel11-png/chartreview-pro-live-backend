@@ -20,6 +20,8 @@ provider:
     CLASSIFY_QUEUE_URL: !Ref ClassifyJobQueue
     CLASSIFY_WORKER_FUNCTION_NAME: chartreview-pro-prod-classifyJobWorker
     JOBS_TABLE: chartreview-jobs-prod
+  apiGateway:
+    description: chartreview-pro-prod-202604190420
   iam:
     role:
       statements:
