@@ -4,665 +4,295 @@ frameworkVersion: '3'
 
 provider:
   name: aws
-  runtime: nodejs18.x
+  runtime: nodejs20.x
   region: us-east-1
-  stage: prod
-  deploymentPrefix: crp-deploy-v2
-  timeout: 29
+  stage: ${opt:stage, 'prod'}
   environment:
-    DOCUMENTS_TABLE: chartreview-documents-prod
-    PATIENTS_TABLE: chartreview-patients-prod
-    SUMMARIES_TABLE: chartreview-summaries-prod
-    DOCUMENTS_BUCKET: chartreview-documents-prod
-    API_KEY: ChartReview#2026$ProdKey!Rx
-    WORKER_FUNCTION_NAME: chartreview-pro-prod-processWorker
-    PROCESSING_QUEUE_URL: !Ref ProcessingQueue
-  apiGateway:
-    description: chartreview-pro-prod-202604190420
+    PATIENTS_TABLE: ${self:service}-patients-${self:provider.stage}
+    DOCUMENTS_TABLE: ${self:service}-documents-${self:provider.stage}
+    SUMMARIES_TABLE: ${self:service}-summaries-${self:provider.stage}
+    S3_BUCKET: ${self:service}-files-${self:provider.stage}
+    API_KEY: "ChartReview#2026$ProdKey!Rx"
   iam:
     role:
       statements:
         - Effect: Allow
           Action:
-            - dynamodb:GetItem
             - dynamodb:PutItem
+            - dynamodb:GetItem
             - dynamodb:UpdateItem
             - dynamodb:DeleteItem
             - dynamodb:Query
             - dynamodb:Scan
           Resource:
-            - arn:aws:dynamodb:us-east-1:*:table/chartreview-documents-prod
-            - arn:aws:dynamodb:us-east-1:*:table/chartreview-documents-prod/index/*
-            - arn:aws:dynamodb:us-east-1:*:table/chartreview-patients-prod
-            - arn:aws:dynamodb:us-east-1:*:table/chartreview-patients-prod/index/*
-            - arn:aws:dynamodb:us-east-1:*:table/chartreview-summaries-prod
-            - arn:aws:dynamodb:us-east-1:*:table/chartreview-summaries-prod/index/*
-            - arn:aws:dynamodb:us-east-1:*:table/chartreview-jobs-prod
-            - arn:aws:dynamodb:us-east-1:*:table/chartreview-jobs-prod/index/*
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-patients-${self:provider.stage}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-documents-${self:provider.stage}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-summaries-${self:provider.stage}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-documents-${self:provider.stage}/index/*
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-summaries-${self:provider.stage}/index/*
         - Effect: Allow
           Action:
-            - s3:GetObject
             - s3:PutObject
+            - s3:GetObject
             - s3:DeleteObject
-            - s3:GetObjectAcl
-          Resource: arn:aws:s3:::chartreview-documents-prod/*
+          Resource: arn:aws:s3:::${self:service}-files-${self:provider.stage}/*
         - Effect: Allow
           Action:
+            - textract:DetectDocumentText
             - textract:StartDocumentTextDetection
             - textract:GetDocumentTextDetection
-            - textract:DetectDocumentText
-          Resource: '*'
+          Resource: "*"
         - Effect: Allow
           Action:
             - bedrock:InvokeModel
-            - bedrock:InvokeModelWithResponseStream
-          Resource: '*'
-        - Effect: Allow
-          Action:
-            - lambda:InvokeFunction
-          Resource:
-            - arn:aws:lambda:us-east-1:*:function:chartreview-pro-prod-processWorker
-        - Effect: Allow
-          Action:
-            - sqs:SendMessage
-            - sqs:ReceiveMessage
-            - sqs:DeleteMessage
-            - sqs:GetQueueAttributes
-            - sqs:GetQueueUrl
-          Resource:
-            - !GetAtt ProcessingQueue.Arn
-            - !GetAtt ProcessingDLQ.Arn
+          Resource: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
 
 functions:
-
-  # --- PATIENTS ---------------------------------------------------------------
-
-  listPatients:
-    handler: src/handlers/patients.list
-    timeout: 60
+  debugPatients:
+    handler: src/handlers/patients.debug
     events:
       - http:
-          path: patients
+          path: /patients/debug
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
+
+  # ── PATIENTS ──
+  listPatients:
+    handler: src/handlers/patients.list
+    events:
+      - http:
+          path: /patients
+          method: get
+          cors: true
 
   createPatient:
     handler: src/handlers/patients.create
-    timeout: 60
     events:
       - http:
-          path: patients
+          path: /patients
           method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   getPatient:
     handler: src/handlers/patients.get
-    timeout: 60
     events:
       - http:
-          path: patients/{aws_patient_id}
+          path: /patients/{aws_patient_id}
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   updatePatient:
     handler: src/handlers/patients.update
-    timeout: 60
     events:
       - http:
-          path: patients/{aws_patient_id}
+          path: /patients/{aws_patient_id}
           method: put
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   deletePatient:
     handler: src/handlers/patients.remove
-    timeout: 60
     events:
       - http:
-          path: patients/{aws_patient_id}
+          path: /patients/{aws_patient_id}
           method: delete
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
-  # --- DOCUMENTS --------------------------------------------------------------
-
-  directUpload:
-    handler: src/handlers/documents_new.directUpload
-    timeout: 29
-    events:
-      - http:
-          path: documents/direct-upload
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
+  # ── DOCUMENTS ──
   getUploadUrl:
-    handler: src/handlers/documents_new.getUploadUrl
-    timeout: 60
+    handler: src/handlers/documents.getUploadUrl
     events:
       - http:
-          path: documents/upload-url
+          path: /documents/upload-url
           method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  listAllDocuments:
-    handler: src/handlers/documents_new.listAll
-    timeout: 60
-    events:
-      - http:
-          path: documents
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   getDocument:
-    handler: src/handlers/documents_new.get
-    timeout: 60
+    handler: src/handlers/documents.get
     events:
       - http:
-          path: documents/{aws_document_id}
+          path: /documents/{aws_document_id}
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  getDocumentText:
-    handler: src/handlers/documents_new.getText
-    timeout: 60
-    events:
-      - http:
-          path: documents/{aws_document_id}/text
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  getDocumentFullText:
-    handler: src/handlers/documents_new.getFullText
-    timeout: 60
-    events:
-      - http:
-          path: documents/{aws_document_id}/fulltext
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  updateDocument:
-    handler: src/handlers/documents_new.update
-    timeout: 60
-    events:
-      - http:
-          path: documents/{aws_document_id}
-          method: put
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   deleteDocument:
-    handler: src/handlers/documents_new.remove
-    timeout: 60
+    handler: src/handlers/documents.remove
     events:
       - http:
-          path: documents/{aws_document_id}
+          path: /documents/{aws_document_id}
           method: delete
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   getDownloadUrl:
-    handler: src/handlers/documents_new.getDownloadUrl
-    timeout: 60
+    handler: src/handlers/documents.getDownloadUrl
     events:
       - http:
-          path: documents/{aws_document_id}/download-url
+          path: /documents/{aws_document_id}/download-url
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   processDocument:
-    handler: src/handlers/documents_new.process
-    timeout: 29
-    events:
-      - http:
-          path: documents/{aws_document_id}/process
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  assessRelevance:
-    handler: src/handlers/documents_new.assessRelevance
-    timeout: 120
-    events:
-      - http:
-          path: documents/{aws_document_id}/assess-relevance
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  reassessDocument:
-    handler: src/handlers/documents_new.reassessDocument
-    timeout: 29
-    events:
-      - http:
-          path: documents/{aws_document_id}/reassess
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  processWorker:
-    handler: src/handlers/documents_new.worker
-    timeout: 300
-    events:
-      - sqs:
-          arn: !GetAtt ProcessingQueue.Arn
-          batchSize: 1
-
-  dlqWorker:
-    handler: src/handlers/documents_new.dlqWorker
+    handler: src/handlers/documents.process
     timeout: 60
     events:
-      - sqs:
-          arn: !GetAtt ProcessingDLQ.Arn
-          batchSize: 10
+      - http:
+          path: /documents/{aws_document_id}/process
+          method: post
+          cors: true
 
   listPatientDocuments:
-    handler: src/handlers/documents_new.listByPatient
-    timeout: 60
+    handler: src/handlers/documents.listByPatient
     events:
       - http:
-          path: patients/{aws_patient_id}/documents
+          path: /patients/{aws_patient_id}/documents
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
-  # --- SUMMARIES --------------------------------------------------------------
-
-  listAllSummaries:
-    handler: src/handlers/summaries.listAll
-    timeout: 60
-    events:
-      - http:
-          path: summaries
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
+  # ── SUMMARIES ──
   createSummary:
     handler: src/handlers/summaries.create
-    timeout: 60
     events:
       - http:
-          path: summaries
+          path: /summaries
           method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   getSummary:
     handler: src/handlers/summaries.get
-    timeout: 60
     events:
       - http:
-          path: summaries/{aws_summary_id}
+          path: /summaries/{aws_summary_id}
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   updateSummary:
     handler: src/handlers/summaries.update
-    timeout: 60
     events:
       - http:
-          path: summaries/{aws_summary_id}
+          path: /summaries/{aws_summary_id}
           method: put
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
   deleteSummary:
     handler: src/handlers/summaries.remove
-    timeout: 60
     events:
       - http:
-          path: summaries/{aws_summary_id}
+          path: /summaries/{aws_summary_id}
           method: delete
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  generateSummary:
-    handler: src/handlers/summaries.generate
-    timeout: 300
-    events:
-      - http:
-          path: summaries/generate
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
-
-  listPatientSummaries:
-    handler: src/handlers/summaries.listByPatient
-    timeout: 60
-    events:
-      - http:
-          path: patients/{aws_patient_id}/summaries
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-              - x-api-key
-              - x-org-id
-            allowCredentials: false
+          cors: true
 
 resources:
   Resources:
 
-    ProcessingQueue:
-      Type: AWS::SQS::Queue
+    # ── DYNAMODB TABLES ──
+    PatientsTable:
+      Type: AWS::DynamoDB::Table
       Properties:
-        QueueName: chartreview-processing-queue
-        VisibilityTimeout: 360
-        MessageRetentionPeriod: 86400
-        RedrivePolicy:
-          deadLetterTargetArn: !GetAtt ProcessingDLQ.Arn
-          maxReceiveCount: 2
-
-    ProcessingDLQ:
-      Type: AWS::SQS::Queue
-      Properties:
-        QueueName: chartreview-processing-dlq
-        VisibilityTimeout: 120
-        MessageRetentionPeriod: 1209600
+        TableName: ${self:service}-patients-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          SSEEnabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: aws_patient_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: aws_patient_id
+            KeyType: HASH
 
     DocumentsTable:
       Type: AWS::DynamoDB::Table
-      DeletionPolicy: Retain
       Properties:
-        TableName: chartreview-documents-prod
+        TableName: ${self:service}-documents-${self:provider.stage}
         BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          SSEEnabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
         AttributeDefinitions:
           - AttributeName: aws_document_id
+            AttributeType: S
+          - AttributeName: aws_patient_id
             AttributeType: S
         KeySchema:
           - AttributeName: aws_document_id
             KeyType: HASH
-    PatientsTable:
-      Type: AWS::DynamoDB::Table
-      DeletionPolicy: Retain
-      Properties:
-        TableName: chartreview-patients-prod
-        BillingMode: PAY_PER_REQUEST
-        AttributeDefinitions:
-          - AttributeName: aws_patient_id
-            AttributeType: S
-        KeySchema:
-          - AttributeName: aws_patient_id
-            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: patient-index
+            KeySchema:
+              - AttributeName: aws_patient_id
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
     SummariesTable:
       Type: AWS::DynamoDB::Table
-      DeletionPolicy: Retain
       Properties:
-        TableName: chartreview-summaries-prod
+        TableName: ${self:service}-summaries-${self:provider.stage}
         BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          SSEEnabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
         AttributeDefinitions:
           - AttributeName: aws_summary_id
+            AttributeType: S
+          - AttributeName: aws_patient_id
             AttributeType: S
         KeySchema:
           - AttributeName: aws_summary_id
             KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: patient-index
+            KeySchema:
+              - AttributeName: aws_patient_id
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    # ── S3 BUCKET ──
     DocumentsBucket:
       Type: AWS::S3::Bucket
-      DeletionPolicy: Retain
       Properties:
-        BucketName: chartreview-documents-prod
+        BucketName: ${self:service}-files-${self:provider.stage}
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: aws:kms
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        VersioningConfiguration:
+          Status: Enabled
+        LifecycleConfiguration:
+          Rules:
+            - Id: DeleteIncompleteMultipartUploads
+              Status: Enabled
+              AbortIncompleteMultipartUpload:
+                DaysAfterInitiation: 1
+        LoggingConfiguration:
+          DestinationBucketName: !Ref AccessLogsBucket
+          LogFilePrefix: document-access-logs/
         CorsConfiguration:
           CorsRules:
-            - AllowedHeaders: ['*']
-              AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
-              AllowedOrigins: ['*']
+            - AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - PUT
+                - GET
+                - HEAD
               MaxAge: 3000
 
-
+    AccessLogsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-access-logs-${self:provider.stage}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
