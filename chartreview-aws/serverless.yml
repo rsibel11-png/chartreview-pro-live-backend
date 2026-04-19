@@ -7,6 +7,22 @@ provider:
   runtime: nodejs20.x
   region: us-east-1
   stage: ${opt:stage, 'prod'}
+  apiGateway:
+    minimumCompressionSize: 1024
+    cors:
+      origin: '*'
+      headers:
+        - Content-Type
+        - X-Amz-Date
+        - Authorization
+        - X-Api-Version
+        - x-api-key
+        - X-Api-Key
+        - x-org-id
+        - X-Org-Id
+        - X-Amz-Security-Token
+      allowCredentials: false
+      maxAge: 86400
   environment:
     PATIENTS_TABLE: ${self:service}-patients-${self:provider.stage}
     DOCUMENTS_TABLE: ${self:service}-documents-${self:provider.stage}
