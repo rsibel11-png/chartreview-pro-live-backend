@@ -237,6 +237,11 @@ functions:
           method: post
           cors: true
 
+  classifyJobWorker:
+    handler: src/handlers/documents_new.classifyJobWorker
+    timeout: 600
+    memorySize: 1024
+
   classifyStart:
     handler: src/handlers/documents_new.classifyStart
     timeout: 30
