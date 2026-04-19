@@ -87,7 +87,18 @@ functions:
       - http:
           path: patients
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   createPatient:
     handler: src/handlers/patients.create
@@ -96,7 +107,18 @@ functions:
       - http:
           path: patients
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   getPatient:
     handler: src/handlers/patients.get
@@ -105,7 +127,18 @@ functions:
       - http:
           path: patients/{aws_patient_id}
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   updatePatient:
     handler: src/handlers/patients.update
@@ -114,7 +147,18 @@ functions:
       - http:
           path: patients/{aws_patient_id}
           method: put
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   deletePatient:
     handler: src/handlers/patients.remove
@@ -123,7 +167,18 @@ functions:
       - http:
           path: patients/{aws_patient_id}
           method: delete
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   # --- DOCUMENTS --------------------------------------------------------------
 
@@ -134,7 +189,18 @@ functions:
       - http:
           path: documents/direct-upload
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   getUploadUrl:
     handler: src/handlers/documents_new.getUploadUrl
@@ -143,7 +209,18 @@ functions:
       - http:
           path: documents/upload-url
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   listAllDocuments:
     handler: src/handlers/documents_new.listAll
@@ -152,7 +229,18 @@ functions:
       - http:
           path: documents
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   getDocument:
     handler: src/handlers/documents_new.get
@@ -161,7 +249,18 @@ functions:
       - http:
           path: documents/{aws_document_id}
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   getDocumentText:
     handler: src/handlers/documents_new.getText
@@ -170,7 +269,18 @@ functions:
       - http:
           path: documents/{aws_document_id}/text
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   getDocumentFullText:
     handler: src/handlers/documents_new.getFullText
@@ -179,7 +289,18 @@ functions:
       - http:
           path: documents/{aws_document_id}/fulltext
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   updateDocument:
     handler: src/handlers/documents_new.update
@@ -188,7 +309,18 @@ functions:
       - http:
           path: documents/{aws_document_id}
           method: put
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   deleteDocument:
     handler: src/handlers/documents_new.remove
@@ -197,7 +329,18 @@ functions:
       - http:
           path: documents/{aws_document_id}
           method: delete
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   getDownloadUrl:
     handler: src/handlers/documents_new.getDownloadUrl
@@ -206,7 +349,18 @@ functions:
       - http:
           path: documents/{aws_document_id}/download-url
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   processDocument:
     handler: src/handlers/documents_new.process
@@ -215,7 +369,18 @@ functions:
       - http:
           path: documents/{aws_document_id}/process
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   assessRelevance:
     handler: src/handlers/documents_new.assessRelevance
@@ -224,7 +389,18 @@ functions:
       - http:
           path: documents/{aws_document_id}/assess-relevance
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   reassessDocument:
     handler: src/handlers/documents_new.reassessDocument
@@ -233,7 +409,18 @@ functions:
       - http:
           path: documents/{aws_document_id}/reassess
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   classifyStart:
     handler: src/handlers/documents_new.classifyStart
@@ -242,7 +429,18 @@ functions:
       - http:
           path: documents/{aws_document_id}/classify/start
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   classifyJobWorker:
     handler: src/handlers/documents_new.classifyWorker
@@ -260,7 +458,18 @@ functions:
       - http:
           path: jobs/{job_id}
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   processWorker:
     handler: src/handlers/documents_new.worker
@@ -286,7 +495,18 @@ functions:
       - http:
           path: patients/{aws_patient_id}/documents
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   # --- SUMMARIES --------------------------------------------------------------
 
@@ -297,7 +517,18 @@ functions:
       - http:
           path: summaries
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   createSummary:
     handler: src/handlers/summaries.create
@@ -306,7 +537,18 @@ functions:
       - http:
           path: summaries
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   getSummary:
     handler: src/handlers/summaries.get
@@ -315,7 +557,18 @@ functions:
       - http:
           path: summaries/{aws_summary_id}
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   updateSummary:
     handler: src/handlers/summaries.update
@@ -324,7 +577,18 @@ functions:
       - http:
           path: summaries/{aws_summary_id}
           method: put
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   deleteSummary:
     handler: src/handlers/summaries.remove
@@ -333,7 +597,18 @@ functions:
       - http:
           path: summaries/{aws_summary_id}
           method: delete
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   generateSummary:
     handler: src/handlers/summaries.generate
@@ -342,7 +617,18 @@ functions:
       - http:
           path: summaries/generate
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
   listPatientSummaries:
     handler: src/handlers/summaries.listByPatient
@@ -351,7 +637,18 @@ functions:
       - http:
           path: patients/{aws_patient_id}/summaries
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Key
+              - X-Amz-Security-Token
+              - X-Amz-User-Agent
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
 
 resources:
   Resources:
@@ -508,3 +805,4 @@ resources:
               AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
               AllowedOrigins: ['*']
               MaxAge: 3000
+
