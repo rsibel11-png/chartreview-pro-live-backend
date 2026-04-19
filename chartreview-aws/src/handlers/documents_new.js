@@ -1342,4 +1342,5 @@ module.exports = {
   classifyWorker:   classifyJobQueueHandler,
   getJob:           validateApiKey(getJobHandler),
   getFullText:      validateApiKey(getTextHandler),
+  options:          optionsHandler,
 };
