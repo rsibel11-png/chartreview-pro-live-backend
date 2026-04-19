@@ -1,0 +1,52 @@
+name: Patch CORS Headers
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Patch x-org-id into all OPTIONS integrations
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          API_ID="1h4kpspbs6"
+          STAGE="prod"
+          REGION="us-east-1"
+          HEADERS="'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"
+
+          echo "Fetching resources..."
+          RESOURCES=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION --query 'items[*].id' --output text)
+          echo "Resources: $RESOURCES"
+
+          for RID in $RESOURCES; do
+            HAS_OPTIONS=$(aws apigateway get-method --rest-api-id $API_ID --resource-id $RID --http-method OPTIONS --region $REGION 2>&1)
+            if echo "$HAS_OPTIONS" | grep -q "httpMethod"; then
+              echo "Patching $RID..."
+              aws apigateway update-integration-response \
+                --rest-api-id $API_ID \
+                --resource-id $RID \
+                --http-method OPTIONS \
+                --status-code 200 \
+                --region $REGION \
+                --patch-operations "op=replace,path=/responseParameters/method.response.header.Access-Control-Allow-Headers,value=$HEADERS"
+              echo "  Done $RID"
+            fi
+          done
+
+          echo "Deploying stage..."
+          aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION
+          echo "All done!"
+
+      - name: Verify patch
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          FIRST_RID=$(aws apigateway get-resources --rest-api-id 1h4kpspbs6 --region us-east-1 --query 'items[?resourceMethods.OPTIONS!=null] | [0].id' --output text)
+          echo "Checking resource $FIRST_RID:"
+          aws apigateway get-integration-response --rest-api-id 1h4kpspbs6 --resource-id $FIRST_RID --http-method OPTIONS --status-code 200 --region us-east-1
