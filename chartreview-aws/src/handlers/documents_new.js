@@ -24,10 +24,24 @@ const BUCKET               = process.env.DOCUMENTS_BUCKET;
 const BEDROCK_MODEL        = 'us.anthropic.claude-sonnet-4-6'; // PDF vision requires Sonnet
 const WORKER_FUNCTION_NAME = process.env.WORKER_FUNCTION_NAME   || 'chartreview-pro-prod-processWorker';
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Version,x-api-key,X-Api-Key,x-org-id,X-Org-Id',
+  'Access-Control-Allow-Methods': 'OPTIONS,GET,POST,PUT,DELETE,PATCH',
+};
+
 const response = (statusCode, body) => ({
   statusCode,
-  headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+  headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
   body: JSON.stringify(body),
+});
+
+
+// --- CORS PREFLIGHT -----------------------------------------------------------
+const optionsHandler = async () => ({
+  statusCode: 200,
+  headers: CORS_HEADERS,
+  body: '',
 });
 
 // --- DIRECT UPLOAD ----------------------------------------------------------
