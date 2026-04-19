@@ -442,7 +442,6 @@ PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPEND
 5. Scan EVERY SINGLE PAGE individually and identify which pages have LOW clinical relevance. TREAT EACH PAGE AS IF IT WERE STANDALONE.
 
    ALWAYS flag these pages as low relevance:
-   - Cover pages (first page with document title, clinic letterhead, etc.)
    - Blank pages or mostly blank pages (>50% whitespace)
    - Pages with only headers, footers, page numbers, or watermarks
    - Table of contents or index pages
@@ -455,7 +454,9 @@ PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPEND
    - Form pages with empty fields or placeholder text
    - Pages consisting entirely of photographs, surveillance images, or non-medical imagery with no clinical text
    - Pages that are scanned photos of people, vehicles, locations, or objects without any medical context
-   NOTE: Do NOT flag pages from police reports, accident reports, or incident reports as low relevance -- these are legally relevant to the case.
+   NOTE: Do NOT flag pages from police reports, accident reports, or incident reports -- legally relevant to the case.
+   NOTE: Do NOT flag radiology report pages, addendum pages, or continuation pages -- even if brief, they are part of an official medical report and are clinically relevant.
+   NOTE: Do NOT flag a page solely because it has a clinic logo or standard report header -- only flag if there is NO substantive clinical content on that page at all.
 
    Return an ARRAY of objects: {page_number: number, reason: "specific description"}
    Only return empty array [] if EVERY page has substantial clinical content.
