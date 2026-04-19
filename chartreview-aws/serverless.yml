@@ -2,43 +2,23 @@ service: chartreview-pro
 
 frameworkVersion: '3'
 
-plugins:
-  - serverless-plugin-scripts
-
-custom:
-  scripts:
-    hooks:
-      'after:deploy:finalize': bash scripts/patch-cors.sh
-
-
 provider:
   name: aws
-  description: 'ChartReview Pro API v2 - cors-fix-7'
+  description: 'ChartReview Pro API v3 - documents_new wired'
   runtime: nodejs20.x
   region: us-east-1
   stage: ${opt:stage, 'prod'}
   apiGateway:
     minimumCompressionSize: 1024
-    cors:
-      origin: '*'
-      headers:
-        - Content-Type
-        - X-Amz-Date
-        - Authorization
-        - X-Api-Version
-        - x-api-key
-        - X-Api-Key
-        - x-org-id
-        - X-Org-Id
-        - X-Amz-Security-Token
-      allowCredentials: false
-      maxAge: 86400
   environment:
     PATIENTS_TABLE: ${self:service}-patients-${self:provider.stage}
     DOCUMENTS_TABLE: ${self:service}-documents-${self:provider.stage}
     SUMMARIES_TABLE: ${self:service}-summaries-${self:provider.stage}
-    S3_BUCKET: ${self:service}-files-${self:provider.stage}
+    S3_BUCKET: chartreview-pro-files-${self:provider.stage}
     API_KEY: "ChartReview#2026$ProdKey!Rx"
+    WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-processWorker
+    CLASSIFY_WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-classifyWorker
+    AWS_ACCOUNT_ID: !Ref AWS::AccountId
   iam:
     role:
       statements:
@@ -61,7 +41,10 @@ provider:
             - s3:PutObject
             - s3:GetObject
             - s3:DeleteObject
-          Resource: arn:aws:s3:::${self:service}-files-${self:provider.stage}/*
+            - s3:ListBucket
+          Resource:
+            - arn:aws:s3:::chartreview-pro-files-${self:provider.stage}/*
+            - arn:aws:s3:::chartreview-pro-files-${self:provider.stage}
         - Effect: Allow
           Action:
             - textract:DetectDocumentText
@@ -71,27 +54,25 @@ provider:
         - Effect: Allow
           Action:
             - bedrock:InvokeModel
-          Resource: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+          Resource:
+            - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+            - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0"
+            - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+            - "arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-3-5-haiku-20241022-v1:0"
+            - "arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource: "*"
 
 functions:
-  debugPatients:
-    handler: src/handlers/patients.debug
-    events:
-      - http:
-          path: /patients/debug
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
-
   # ── PATIENTS ──
   listPatients:
     handler: src/handlers/patients.list
@@ -99,17 +80,7 @@ functions:
       - http:
           path: /patients
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
   createPatient:
     handler: src/handlers/patients.create
@@ -117,17 +88,7 @@ functions:
       - http:
           path: /patients
           method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
   getPatient:
     handler: src/handlers/patients.get
@@ -135,17 +96,7 @@ functions:
       - http:
           path: /patients/{aws_patient_id}
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
   updatePatient:
     handler: src/handlers/patients.update
@@ -153,17 +104,7 @@ functions:
       - http:
           path: /patients/{aws_patient_id}
           method: put
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
   deletePatient:
     handler: src/handlers/patients.remove
@@ -171,146 +112,171 @@ functions:
       - http:
           path: /patients/{aws_patient_id}
           method: delete
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
-
-  # ── DOCUMENTS ──
-  getUploadUrl:
-    handler: src/handlers/documents.getUploadUrl
-    events:
-      - http:
-          path: /documents/upload-url
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
-
-  getDocument:
-    handler: src/handlers/documents.get
-    events:
-      - http:
-          path: /documents/{aws_document_id}
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
-
-  deleteDocument:
-    handler: src/handlers/documents.remove
-    events:
-      - http:
-          path: /documents/{aws_document_id}
-          method: delete
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
-
-  getDownloadUrl:
-    handler: src/handlers/documents.getDownloadUrl
-    events:
-      - http:
-          path: /documents/{aws_document_id}/download-url
-          method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
-
-  processDocument:
-    handler: src/handlers/documents.process
-    timeout: 60
-    events:
-      - http:
-          path: /documents/{aws_document_id}/process
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
   listPatientDocuments:
-    handler: src/handlers/documents.listByPatient
+    handler: src/handlers/documents_new.listByPatient
     events:
       - http:
           path: /patients/{aws_patient_id}/documents
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
+
+  # ── DOCUMENTS ──
+  getUploadUrl:
+    handler: src/handlers/documents_new.getUploadUrl
+    timeout: 30
+    events:
+      - http:
+          path: /documents/upload-url
+          method: post
+          cors: true
+
+  directUpload:
+    handler: src/handlers/documents_new.directUpload
+    timeout: 30
+    events:
+      - http:
+          path: /documents/direct-upload
+          method: post
+          cors: true
+
+  listAllDocuments:
+    handler: src/handlers/documents_new.listAll
+    timeout: 30
+    events:
+      - http:
+          path: /documents
+          method: get
+          cors: true
+
+  getDocument:
+    handler: src/handlers/documents_new.get
+    timeout: 30
+    events:
+      - http:
+          path: /documents/{aws_document_id}
+          method: get
+          cors: true
+
+  updateDocument:
+    handler: src/handlers/documents_new.update
+    timeout: 30
+    events:
+      - http:
+          path: /documents/{aws_document_id}
+          method: put
+          cors: true
+
+  deleteDocument:
+    handler: src/handlers/documents_new.remove
+    timeout: 30
+    events:
+      - http:
+          path: /documents/{aws_document_id}
+          method: delete
+          cors: true
+
+  getDownloadUrl:
+    handler: src/handlers/documents_new.getDownloadUrl
+    timeout: 30
+    events:
+      - http:
+          path: /documents/{aws_document_id}/download-url
+          method: get
+          cors: true
+
+  getDocumentText:
+    handler: src/handlers/documents_new.getText
+    timeout: 30
+    events:
+      - http:
+          path: /documents/{aws_document_id}/text
+          method: get
+          cors: true
+
+  getDocumentFullText:
+    handler: src/handlers/documents_new.getFullText
+    timeout: 30
+    events:
+      - http:
+          path: /documents/{aws_document_id}/full-text
+          method: get
+          cors: true
+
+  processDocument:
+    handler: src/handlers/documents_new.process
+    timeout: 30
+    events:
+      - http:
+          path: /documents/{aws_document_id}/process
+          method: post
+          cors: true
+
+  processWorker:
+    handler: src/handlers/documents_new.worker
+    timeout: 900
+    memorySize: 1024
+
+  assessRelevance:
+    handler: src/handlers/documents_new.assessRelevance
+    timeout: 300
+    memorySize: 512
+    events:
+      - http:
+          path: /documents/{aws_document_id}/assess-relevance
+          method: post
+          cors: true
+
+  reassessDocument:
+    handler: src/handlers/documents_new.reassessDocument
+    timeout: 300
+    memorySize: 512
+    events:
+      - http:
+          path: /documents/{aws_document_id}/reassess
+          method: post
+          cors: true
+
+  classifyStart:
+    handler: src/handlers/documents_new.classifyStart
+    timeout: 30
+    events:
+      - http:
+          path: /documents/{aws_document_id}/classify
+          method: post
+          cors: true
+
+  classifyWorker:
+    handler: src/handlers/documents_new.classifyWorker
+    timeout: 900
+    memorySize: 1024
+
+  getJob:
+    handler: src/handlers/documents_new.getJob
+    timeout: 30
+    events:
+      - http:
+          path: /jobs/{job_id}
+          method: get
+          cors: true
 
   # ── SUMMARIES ──
+  listAllSummaries:
+    handler: src/handlers/summaries.listAll
+    events:
+      - http:
+          path: /summaries
+          method: get
+          cors: true
+
   createSummary:
     handler: src/handlers/summaries.create
     events:
       - http:
           path: /summaries
           method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
   getSummary:
     handler: src/handlers/summaries.get
@@ -318,17 +284,7 @@ functions:
       - http:
           path: /summaries/{aws_summary_id}
           method: get
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
   updateSummary:
     handler: src/handlers/summaries.update
@@ -336,17 +292,7 @@ functions:
       - http:
           path: /summaries/{aws_summary_id}
           method: put
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
   deleteSummary:
     handler: src/handlers/summaries.remove
@@ -354,17 +300,7 @@ functions:
       - http:
           path: /summaries/{aws_summary_id}
           method: delete
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
+          cors: true
 
 resources:
   Resources:
@@ -374,7 +310,7 @@ resources:
         ResponseParameters:
           gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
           gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"
-          gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE,PATCH'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE'"
         ResponseType: DEFAULT_4XX
         RestApiId: !Ref ApiGatewayRestApi
 
@@ -384,6 +320,6 @@ resources:
         ResponseParameters:
           gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
           gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id,X-Amz-Security-Token'"
-          gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE,PATCH'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE'"
         ResponseType: DEFAULT_5XX
         RestApiId: !Ref ApiGatewayRestApi
