@@ -1284,6 +1284,20 @@ const classifyJobQueueHandler = async (event) => {
   console.warn('classifyJobQueueHandler: no __classifyJob flag in event');
 };
 
+// Direct Lambda handler for classifyJobWorker (invoked async by classifyStart)
+const classifyJobWorkerHandler = async (event) => {
+  // Can be invoked directly with { job_id, aws_document_id, org_id, page_offset }
+  // or via the SQS queue body
+  let payload = event;
+  if (event.__classifyJob) {
+    payload = event;
+  } else if (event.Records) {
+    // SQS path
+    payload = JSON.parse(event.Records[0].body);
+  }
+  await classifyJobWorker(payload.job_id, payload.aws_document_id, payload.org_id, payload.page_offset || 0);
+};
+
 module.exports = {
   directUpload:   validateApiKey(directUploadHandler),
   getUploadUrl:   validateApiKey(async (event) => {
@@ -1344,6 +1358,7 @@ module.exports = {
   reassessDocument: validateApiKey(reassessHandler),
   classifyStart:    validateApiKey(classifyStartHandler),
   classifyWorker:   classifyJobQueueHandler,
+  classifyJobWorker: classifyJobWorkerHandler,
   getJob:           validateApiKey(getJobHandler),
   getFullText:      validateApiKey(getTextHandler),
   options:          optionsHandler,
