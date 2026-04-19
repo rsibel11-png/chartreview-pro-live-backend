@@ -4,6 +4,7 @@ frameworkVersion: '3'
 
 provider:
   name: aws
+  description: 'ChartReview Pro API v2 - cors-fix-7'
   runtime: nodejs20.x
   region: us-east-1
   stage: ${opt:stage, 'prod'}
@@ -76,7 +77,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -96,7 +96,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -115,7 +114,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -134,7 +132,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -153,7 +150,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -172,7 +168,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -192,7 +187,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -211,7 +205,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -230,7 +223,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -249,7 +241,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -269,7 +260,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -288,7 +278,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -308,7 +297,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -327,7 +315,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -346,7 +333,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
@@ -365,7 +351,6 @@ functions:
               - Content-Type
               - X-Amz-Date
               - Authorization
-              - X-Api-Version
               - x-api-key
               - X-Api-Key
               - x-org-id
