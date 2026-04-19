@@ -452,7 +452,6 @@ functions:
       - sqs:
           arn: !GetAtt ClassifyJobQueue.Arn
           batchSize: 1
-          maximumConcurrency: 2
 
   getJob:
     handler: src/handlers/documents_new.getJob
@@ -481,7 +480,6 @@ functions:
       - sqs:
           arn: !GetAtt ProcessingQueue.Arn
           batchSize: 1
-          maximumConcurrency: 3
 
   dlqWorker:
     handler: src/handlers/documents_new.dlqWorker
@@ -699,22 +697,9 @@ resources:
         AttributeDefinitions:
           - AttributeName: job_id
             AttributeType: S
-          - AttributeName: org_id
-            AttributeType: S
-          - AttributeName: created_at
-            AttributeType: S
         KeySchema:
           - AttributeName: job_id
             KeyType: HASH
-        GlobalSecondaryIndexes:
-          - IndexName: org_id-created_at-index
-            KeySchema:
-              - AttributeName: org_id
-                KeyType: HASH
-              - AttributeName: created_at
-                KeyType: RANGE
-            Projection:
-              ProjectionType: ALL
         TimeToLiveSpecification:
           AttributeName: ttl
           Enabled: true
@@ -728,23 +713,9 @@ resources:
         AttributeDefinitions:
           - AttributeName: aws_document_id
             AttributeType: S
-          - AttributeName: org_id
-            AttributeType: S
-          - AttributeName: created_at
-            AttributeType: S
         KeySchema:
           - AttributeName: aws_document_id
             KeyType: HASH
-        GlobalSecondaryIndexes:
-          - IndexName: org_id-created_at-index
-            KeySchema:
-              - AttributeName: org_id
-                KeyType: HASH
-              - AttributeName: created_at
-                KeyType: RANGE
-            Projection:
-              ProjectionType: ALL
-
     PatientsTable:
       Type: AWS::DynamoDB::Table
       DeletionPolicy: Retain
@@ -754,23 +725,9 @@ resources:
         AttributeDefinitions:
           - AttributeName: aws_patient_id
             AttributeType: S
-          - AttributeName: org_id
-            AttributeType: S
-          - AttributeName: created_at
-            AttributeType: S
         KeySchema:
           - AttributeName: aws_patient_id
             KeyType: HASH
-        GlobalSecondaryIndexes:
-          - IndexName: org_id-created_at-index
-            KeySchema:
-              - AttributeName: org_id
-                KeyType: HASH
-              - AttributeName: created_at
-                KeyType: RANGE
-            Projection:
-              ProjectionType: ALL
-
     SummariesTable:
       Type: AWS::DynamoDB::Table
       DeletionPolicy: Retain
@@ -780,23 +737,9 @@ resources:
         AttributeDefinitions:
           - AttributeName: aws_summary_id
             AttributeType: S
-          - AttributeName: org_id
-            AttributeType: S
-          - AttributeName: created_at
-            AttributeType: S
         KeySchema:
           - AttributeName: aws_summary_id
             KeyType: HASH
-        GlobalSecondaryIndexes:
-          - IndexName: org_id-created_at-index
-            KeySchema:
-              - AttributeName: org_id
-                KeyType: HASH
-              - AttributeName: created_at
-                KeyType: RANGE
-            Projection:
-              ProjectionType: ALL
-
     DocumentsBucket:
       Type: AWS::S3::Bucket
       DeletionPolicy: Retain
