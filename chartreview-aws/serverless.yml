@@ -90,8 +90,6 @@ functions:
               - X-Api-Key
               - x-org-id
               - X-Org-Id
-              - x-org-id
-              - X-Org-Id
             allowCredentials: false
 
   # ── PATIENTS ──
@@ -109,8 +107,6 @@ functions:
               - Authorization
               - x-api-key
               - X-Api-Key
-              - x-org-id
-              - X-Org-Id
               - x-org-id
               - X-Org-Id
             allowCredentials: false
@@ -131,8 +127,6 @@ functions:
               - X-Api-Key
               - x-org-id
               - X-Org-Id
-              - x-org-id
-              - X-Org-Id
             allowCredentials: false
 
   getPatient:
@@ -149,8 +143,6 @@ functions:
               - Authorization
               - x-api-key
               - X-Api-Key
-              - x-org-id
-              - X-Org-Id
               - x-org-id
               - X-Org-Id
             allowCredentials: false
@@ -171,8 +163,6 @@ functions:
               - X-Api-Key
               - x-org-id
               - X-Org-Id
-              - x-org-id
-              - X-Org-Id
             allowCredentials: false
 
   deletePatient:
@@ -189,8 +179,6 @@ functions:
               - Authorization
               - x-api-key
               - X-Api-Key
-              - x-org-id
-              - X-Org-Id
               - x-org-id
               - X-Org-Id
             allowCredentials: false
@@ -212,8 +200,6 @@ functions:
               - X-Api-Key
               - x-org-id
               - X-Org-Id
-              - x-org-id
-              - X-Org-Id
             allowCredentials: false
 
   getDocument:
@@ -230,8 +216,6 @@ functions:
               - Authorization
               - x-api-key
               - X-Api-Key
-              - x-org-id
-              - X-Org-Id
               - x-org-id
               - X-Org-Id
             allowCredentials: false
@@ -252,8 +236,6 @@ functions:
               - X-Api-Key
               - x-org-id
               - X-Org-Id
-              - x-org-id
-              - X-Org-Id
             allowCredentials: false
 
   getDownloadUrl:
@@ -270,8 +252,6 @@ functions:
               - Authorization
               - x-api-key
               - X-Api-Key
-              - x-org-id
-              - X-Org-Id
               - x-org-id
               - X-Org-Id
             allowCredentials: false
@@ -293,8 +273,6 @@ functions:
               - X-Api-Key
               - x-org-id
               - X-Org-Id
-              - x-org-id
-              - X-Org-Id
             allowCredentials: false
 
   listPatientDocuments:
@@ -311,8 +289,6 @@ functions:
               - Authorization
               - x-api-key
               - X-Api-Key
-              - x-org-id
-              - X-Org-Id
               - x-org-id
               - X-Org-Id
             allowCredentials: false
@@ -334,8 +310,6 @@ functions:
               - X-Api-Key
               - x-org-id
               - X-Org-Id
-              - x-org-id
-              - X-Org-Id
             allowCredentials: false
 
   getSummary:
@@ -352,8 +326,6 @@ functions:
               - Authorization
               - x-api-key
               - X-Api-Key
-              - x-org-id
-              - X-Org-Id
               - x-org-id
               - X-Org-Id
             allowCredentials: false
@@ -374,8 +346,6 @@ functions:
               - X-Api-Key
               - x-org-id
               - X-Org-Id
-              - x-org-id
-              - X-Org-Id
             allowCredentials: false
 
   deleteSummary:
@@ -392,8 +362,6 @@ functions:
               - Authorization
               - x-api-key
               - X-Api-Key
-              - x-org-id
-              - X-Org-Id
               - x-org-id
               - X-Org-Id
             allowCredentials: false
