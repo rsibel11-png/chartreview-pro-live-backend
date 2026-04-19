@@ -403,11 +403,11 @@ const processWorker = async (aws_document_id, assessOnly = false, pageOffset = 0
       // naturally -- the outer catch will log it. Do NOT auto-reject clinical-density docs.
       const MAX_BEDROCK_BASE64 = 10 * 1024 * 1024; // 10MB base64
       if (assessPdfBase64.length > MAX_BEDROCK_BASE64) {
-        console.warn('assessRelevance: base64 payload ' + (assessPdfBase64.length/1024/1024).toFixed(1) + 'MB exceeds Bedrock limit for', aws_document_id, '-- skipping assess, leaving relevance_assessed=false');
-        // Do NOT write anything -- leave relevance_assessed false so the UI shows "not yet assessed"
-        // rather than falsely marking as clinical or non-clinical.
-        return;
-      }
+        console.warn('assessRelevance: base64 payload ' + (assessPdfBase64.length/1024/1024).toFixed(1) + 'MB exceeds Bedrock limit for', aws_document_id, '-- skipping Bedrock assess, Textract will still run');
+        // File too large for Bedrock Vision -- skip assess only, do NOT return early.
+        // Fall through so Textract still extracts text and writes status=processed.
+        // relevance_assessed stays false -- user can re-classify from Library.
+      } else
 
       const assessPrompt = `Analyze this document VERY CAREFULLY and extract the following information:
 
