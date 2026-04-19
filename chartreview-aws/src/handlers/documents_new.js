@@ -501,6 +501,7 @@ Return ONLY a JSON object with these exact fields:
         }],
       };
 
+      if (!assessTooBig) {
       const assessResp = await bedrock.send(new InvokeModelCommand({
         modelId: 'us.anthropic.claude-sonnet-4-6',
         contentType: 'application/json',
@@ -563,6 +564,7 @@ Return ONLY a JSON object with these exact fields:
       } else {
         console.warn('assessRelevance: no parseable result for', aws_document_id, '-- skipping save');
       }
+      } // end !assessTooBig
     } catch (assessErr) {
       console.warn('assessRelevance in processWorker failed (non-fatal):', assessErr.message);
     }
