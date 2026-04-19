@@ -48,9 +48,4 @@ jobs:
         run: |
           FIRST_RID=$(aws apigateway get-resources --rest-api-id 1h4kpspbs6 --region us-east-1 --query 'items[?resourceMethods.OPTIONS!=null] | [0].id' --output text)
           echo "Checking resource $FIRST_RID:"
-          aws apigateway get-integration-response \
-            --rest-api-id 1h4kpspbs6 \
-            --resource-id $FIRST_RID \
-            --http-method OPTIONS \
-            --status-code 200 \
-            --region us-east-1
+          aws apigateway get-integration-response --rest-api-id 1h4kpspbs6 --resource-id $FIRST_RID --http-method OPTIONS --status-code 200 --region us-east-1
