@@ -242,7 +242,7 @@ functions:
     timeout: 30
     events:
       - http:
-          path: /documents/{aws_document_id}/classify
+          path: /documents/{aws_document_id}/classify/start
           method: post
           cors:
             origin: '*'
@@ -257,7 +257,7 @@ functions:
               - X-Org-Id
             allowCredentials: false
       - http:
-          path: /documents/{aws_document_id}/classify
+          path: /documents/{aws_document_id}/classify/start
           method: options
           cors:
             origin: '*'
