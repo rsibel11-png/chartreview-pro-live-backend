@@ -244,7 +244,33 @@ functions:
       - http:
           path: /documents/{aws_document_id}/classify
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
+      - http:
+          path: /documents/{aws_document_id}/classify
+          method: options
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
 
   getJob:
