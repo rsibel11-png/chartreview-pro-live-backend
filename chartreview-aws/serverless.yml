@@ -17,7 +17,6 @@ provider:
     S3_BUCKET: chartreview-pro-files-${self:provider.stage}
     API_KEY: "ChartReview#2026$ProdKey!Rx"
     WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-processWorker
-    CLASSIFY_WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-classifyWorker
     AWS_ACCOUNT_ID: !Ref AWS::AccountId
   iam:
     role:
@@ -247,10 +246,6 @@ functions:
           method: post
           cors: true
 
-  classifyWorker:
-    handler: src/handlers/documents_new.classifyWorker
-    timeout: 900
-    memorySize: 1024
 
   getJob:
     handler: src/handlers/documents_new.getJob
