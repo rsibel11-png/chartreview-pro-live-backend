@@ -997,6 +997,7 @@ PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPEND
    - MAR/pharmacy grid pages, nursing flowsheet pages, vital sign grid pages, ADL log pages, Documentation Survey Report pages, any page that is primarily a table of checkmarks/initials/codes with no physician narrative
    NOTE: Do NOT flag police reports, EMT/EMS reports, or accident reports as low relevance.
    NOTE: PT/OT initial evaluations and discharge summaries ARE clinical -- do not flag those.
+   NOTE: Radiology report addendum pages, continuation pages, and attestation/signature pages that are part of a radiology report ARE clinical -- do not flag them as low relevance.
 
    Return an ARRAY: {page_number: number, reason: "specific description"}
    Only return [] if EVERY page has substantial clinical content. Be VERY aggressive flagging.
