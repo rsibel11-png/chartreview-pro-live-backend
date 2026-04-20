@@ -1236,8 +1236,8 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
     await dynamo.send(new UpdateCommand({
       TableName: JOBS_TABLE,
       Key: { job_id },
-      UpdateExpression: 'SET #s = :s, result = :r, updated_at = :now',
-      ExpressionAttributeNames: { '#s': 'status' },
+      UpdateExpression: 'SET #s = :s, #r = :r, updated_at = :now',
+      ExpressionAttributeNames: { '#s': 'status', '#r': 'result' },
       ExpressionAttributeValues: {
         ':s': 'complete',
         ':r': {
