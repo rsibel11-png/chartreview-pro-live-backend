@@ -454,13 +454,13 @@ PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPEND
    - Pages that are scanned photos of people, vehicles, locations, or objects without any medical context
    NOTE: Do NOT flag pages from police reports, accident reports, or incident reports -- legally relevant to the case.
    NOTE: Do NOT flag radiology report pages, addendum pages, or continuation pages -- even if brief, they are part of an official medical report and are clinically relevant.
-   NOTE: Do NOT flag a page solely because it has a clinic logo or standard report header -- only flag if there is NO substantive clinical content on that page at all.
-   NOTE: Do NOT flag a page as low relevance simply because it has a sidebar with static fields (allergies, medications list, surgical history, social history, family history). If the main body of the page contains an actual clinical visit note, HPI, findings, assessment, or plan -- the page IS clinical. The sidebar alone does not make it non-clinical.
-   NOTE: A page that contains ONLY a physician signature line or electronic attestation with NO other clinical content may be flagged -- but ONLY if truly signature-only.
+   NOTE: IGNORE sidebars entirely. Sidebars (columns on the left or right containing allergies, medications, surgical history, social history, family history, problem lists) are standard EHR formatting -- do NOT use sidebar content when deciding if a page is low relevance. Evaluate ONLY the main body of the page.
+   NOTE: IGNORE headers and footers (clinic name, patient name, date, page number at top/bottom) -- these are standard formatting, not clinical content indicators.
+   NOTE: A page is low relevance ONLY if its MAIN BODY contains no substantive clinical content (no visit note, no HPI, no findings, no assessment, no plan, no clinical narrative).
 
    Return an ARRAY of objects: {page_number: number, reason: "specific description"}
-   Only return empty array [] if EVERY page has substantial clinical content.
-   Be VERY aggressive flagging admin/billing/photo pages, but do NOT flag pages with real clinical content just because they also contain a sidebar or signature line.
+   Only return empty array [] if EVERY page has substantial clinical content in its main body.
+   Be aggressive flagging billing, admin, photo, and blank pages -- but never flag a page based on its sidebar or header/footer alone.
 
 PART 4 - METADATA EXTRACTION:
 6. Extract patient name if this is a medical document
@@ -807,12 +807,13 @@ PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPEND
    - Pages consisting entirely of photographs, surveillance images, or non-medical imagery with no clinical text
    - Pages that are scanned photos of people, vehicles, locations, or objects without any medical context
    NOTE: Do NOT flag pages from police reports, accident reports, or incident reports as low relevance -- these are legally relevant to the case.
-   NOTE: Do NOT flag a page as low relevance simply because it has a sidebar with static fields (allergies, medications list, surgical history, social history, family history). If the main body of the page contains an actual clinical visit note, HPI, findings, assessment, or plan -- the page IS clinical. The sidebar alone does not make it non-clinical.
-   NOTE: A page that contains ONLY a physician signature line, electronic signature attestation, or "electronically signed by" footer with NO other clinical content may be flagged -- but ONLY if the page is truly signature-only with no visit note content.
+   NOTE: IGNORE sidebars entirely. Sidebars (columns on the left or right containing allergies, medications, surgical history, social history, family history, problem lists) are standard EHR formatting -- do NOT use sidebar content when deciding if a page is low relevance. Evaluate ONLY the main body of the page.
+   NOTE: Headers and footers (clinic name, patient name, date, page number at the top or bottom of a page) are also standard formatting -- ignore them when evaluating clinical content.
+   NOTE: A page is low relevance ONLY if its MAIN BODY contains no substantive clinical content (no visit note, no HPI, no findings, no assessment, no plan, no clinical narrative).
 
    Return an ARRAY of objects with format: {page_number: number, reason: "specific description"}
-   Only return an empty array [] if EVERY page has substantial clinical content.
-   Be VERY aggressive flagging admin/billing/photo pages, but do NOT flag pages with real clinical content just because they also contain a sidebar or signature line.
+   Only return an empty array [] if EVERY page has substantial clinical content in its main body.
+   Be aggressive flagging billing, admin, photo, and blank pages -- but never flag a page based on its sidebar or header/footer alone.
 
 PART 4 - METADATA EXTRACTION:
 6. Extract patient name if this is a medical document
