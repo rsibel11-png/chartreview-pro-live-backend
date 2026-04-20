@@ -285,7 +285,18 @@ functions:
       - http:
           path: /jobs/{job_id}
           method: get
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   # ── SUMMARIES ──
   listAllSummaries:
