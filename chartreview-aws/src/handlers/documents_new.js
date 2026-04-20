@@ -1227,8 +1227,28 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
         low_relevance_pages: autoLowPages,
       };
     } else {
+      // Resolve the file_key -- shell records (no file_key) point to parts via original_document_id.
+      // Query GSI to find the first part and use its file_key instead.
+      let fileKey = doc.file_key;
+      let fileDoc = doc;
+      if (!fileKey) {
+        console.log('classifyJobWorker: no file_key on doc, querying for first part via GSI');
+        const partsResult = await dynamo.send(new QueryCommand({
+          TableName: TABLE,
+          IndexName: 'original_document_id-index',
+          KeyConditionExpression: 'original_document_id = :oid',
+          ExpressionAttributeValues: { ':oid': aws_document_id },
+          Limit: 1,
+        }));
+        const firstPart = partsResult.Items && partsResult.Items[0];
+        if (!firstPart || !firstPart.file_key) throw new Error('classify job failed: shell has no file_key and no parts found');
+        fileKey = firstPart.file_key;
+        fileDoc = firstPart;
+        console.log('classifyJobWorker: resolved to part file_key=' + fileKey);
+      }
+
       // Fetch PDF from S3
-      const s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: doc.file_key }));
+      const s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
       const chunks = [];
       for await (const chunk of s3Object.Body) { chunks.push(chunk); }
       const pdfBase64 = Buffer.concat(chunks).toString('base64');
