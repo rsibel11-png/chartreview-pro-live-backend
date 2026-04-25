@@ -14,7 +14,8 @@ provider:
     PATIENTS_TABLE: chartreview-patients-${self:provider.stage}
     DOCUMENTS_TABLE: chartreview-documents-${self:provider.stage}
     SUMMARIES_TABLE: chartreview-summaries-${self:provider.stage}
-    S3_BUCKET: chartreview-pro-files-${self:provider.stage}
+    S3_BUCKET: chartreview-documents-${self:provider.stage}
+    DOCUMENTS_BUCKET: chartreview-documents-${self:provider.stage}
     API_KEY: "ChartReview#2026$ProdKey!Rx"
     WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-processWorker
     AWS_ACCOUNT_ID: !Ref AWS::AccountId
