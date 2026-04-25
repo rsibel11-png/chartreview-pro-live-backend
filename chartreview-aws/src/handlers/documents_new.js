@@ -1250,12 +1250,10 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
       let fileDoc = doc;
       if (!fileKey) {
         console.log('classifyJobWorker: no file_key on doc, querying for first part via GSI');
-        const partsResult = await dynamo.send(new QueryCommand({
+        const partsResult = await dynamo.send(new ScanCommand({
           TableName: TABLE,
-          IndexName: 'original_document_id-index',
-          KeyConditionExpression: 'original_document_id = :oid',
+          FilterExpression: 'original_document_id = :oid',
           ExpressionAttributeValues: { ':oid': aws_document_id },
-          Limit: 1,
         }));
         const firstPart = partsResult.Items && partsResult.Items[0];
         if (!firstPart || !firstPart.file_key) throw new Error('classify job failed: shell has no file_key and no parts found');
