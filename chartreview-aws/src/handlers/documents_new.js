@@ -1286,8 +1286,21 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
         console.log('classifyJobWorker: resolved to part file_key=' + fileKey);
       }
 
-      // Fetch PDF from S3
-      const s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
+      // Fetch PDF from S3 -- with prefix-search fallback for special-char filenames
+      let s3Object;
+      try {
+        s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
+      } catch (s3Err) {
+        if (s3Err.name !== 'NoSuchKey' && s3Err.name !== 'NotFound' && s3Err.$metadata?.httpStatusCode !== 404) throw s3Err;
+        console.log('classifyJobWorker: exact key not found, listing prefix for', fileKey);
+        const prefix = fileKey.substring(0, fileKey.lastIndexOf('/') + 1);
+        const listResult = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: 10 }));
+        const found = (listResult.Contents || []).find(obj => obj.Key.endsWith('.pdf'));
+        if (!found) throw new Error('classify job failed: The specified key does not exist and no PDF found in prefix: ' + prefix);
+        console.log('classifyJobWorker: found file at', found.Key);
+        fileKey = found.Key;
+        s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
+      }
       const chunks = [];
       for await (const chunk of s3Object.Body) { chunks.push(chunk); }
       const pdfBase64 = Buffer.concat(chunks).toString('base64');
