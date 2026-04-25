@@ -1,6 +1,6 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { TextractClient, StartDocumentTextDetectionCommand, GetDocumentTextDetectionCommand, DetectDocumentTextCommand } = require('@aws-sdk/client-textract');
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
@@ -20,7 +20,7 @@ const PROCESSING_QUEUE_URL = process.env.PROCESSING_QUEUE_URL || null;
 
 const TABLE                = process.env.DOCUMENTS_TABLE;
 const SUMMARIES_TABLE      = process.env.SUMMARIES_TABLE;
-const BUCKET               = process.env.S3_BUCKET || 'chartreview-documents-prod';
+const BUCKET               = process.env.S3_BUCKET;
 const BEDROCK_MODEL        = 'us.anthropic.claude-sonnet-4-6'; // PDF vision requires Sonnet
 const WORKER_FUNCTION_NAME = process.env.WORKER_FUNCTION_NAME   || 'chartreview-pro-prod-processWorker';
 
@@ -160,59 +160,35 @@ const getDownloadUrlHandler = async (event) => {
   const orgId = event._orgId;
   if (!orgId) return response(400, { error: 'x-org-id header is required' });
 
-  // Helper: try exact S3 key, then fall back to listing the document folder
-  const resolveSignedUrl = async (fileKey, docId) => {
-    try {
-      await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: fileKey }));
-      const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
-      return await getSignedUrl(s3, cmd, { expiresIn: 3600 });
-    } catch (err) {
-      if (err.name !== 'NotFound' && err.name !== 'NoSuchKey' && err.$metadata?.httpStatusCode !== 404) throw err;
-    }
-    // Exact key not found -- list the document folder
-    const prefix = 'orgs/' + orgId + '/documents/' + docId + '/';
-    console.log('getDownloadUrl: HeadObject miss, listing', prefix);
-    const listResult = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: 20 }));
-    console.log('getDownloadUrl: found', (listResult.Contents || []).length, 'objects under', prefix);
-    const found = (listResult.Contents || []).find(obj => obj.Key.endsWith('.pdf'));
-    if (found) {
-      const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: found.Key });
-      return await getSignedUrl(s3, cmd, { expiresIn: 3600 });
-    }
-    return null;
-  };
-
   try {
     const { aws_document_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!result.Item) return response(404, { error: 'Document not found' });
     if (result.Item.org_id && result.Item.org_id !== orgId) return response(403, { error: 'Access denied' });
 
-    const fileKey = result.Item.file_key;
+    let fileKey = result.Item.file_key;
 
-    // Case 1: record has a file_key (part or single-part doc)
-    if (fileKey) {
-      const url = await resolveSignedUrl(fileKey, aws_document_id);
-      if (url) return response(200, { download_url: url });
+    // Shell records may have no file_key, or a stale file_url-style path (starts with "orgs/").
+    // In either case, resolve to the first part's file_key via GSI.
+    if (!fileKey || fileKey.startsWith('orgs/')) {
+      console.log('getDownloadUrl: resolving shell to first part for doc', aws_document_id);
+      const partsResult = await dynamo.send(new QueryCommand({
+        TableName: TABLE,
+        IndexName: 'original_document_id-index',
+        KeyConditionExpression: 'original_document_id = :oid',
+        ExpressionAttributeValues: { ':oid': aws_document_id },
+        Limit: 1,
+      }));
+      const firstPart = partsResult.Items && partsResult.Items[0];
+      if (!firstPart || !firstPart.file_key) return response(404, { error: 'No file found for document' });
+      fileKey = firstPart.file_key;
+      console.log('getDownloadUrl: resolved to part file_key', fileKey);
     }
 
-    // Case 2: shell record (no file_key) -- find first part
-    console.log('getDownloadUrl: shell or key miss, scanning parts for', aws_document_id);
-    const partsResult = await dynamo.send(new ScanCommand({
-      TableName: TABLE,
-      FilterExpression: 'original_document_id = :oid',
-      ExpressionAttributeValues: { ':oid': aws_document_id },
-    }));
-    const parts = (partsResult.Items || []).filter(p => p.file_key);
-    parts.sort((a, b) => (a.part_index || 0) - (b.part_index || 0));
-    for (const part of parts) {
-      const url = await resolveSignedUrl(part.file_key, part.aws_document_id);
-      if (url) return response(200, { download_url: url });
-    }
-
-    return response(404, { error: 'No file found for document' });
+    const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
+    const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+    return response(200, { download_url });
   } catch (err) {
-    console.error('getDownloadUrl error:', err);
     return response(500, { error: err.message });
   }
 };
@@ -1276,10 +1252,12 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
       let fileDoc = doc;
       if (!fileKey) {
         console.log('classifyJobWorker: no file_key on doc, querying for first part via GSI');
-        const partsResult = await dynamo.send(new ScanCommand({
+        const partsResult = await dynamo.send(new QueryCommand({
           TableName: TABLE,
-          FilterExpression: 'original_document_id = :oid',
+          IndexName: 'original_document_id-index',
+          KeyConditionExpression: 'original_document_id = :oid',
           ExpressionAttributeValues: { ':oid': aws_document_id },
+          Limit: 1,
         }));
         const firstPart = partsResult.Items && partsResult.Items[0];
         if (!firstPart || !firstPart.file_key) throw new Error('classify job failed: shell has no file_key and no parts found');
@@ -1288,21 +1266,8 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
         console.log('classifyJobWorker: resolved to part file_key=' + fileKey);
       }
 
-      // Fetch PDF from S3 -- with prefix-search fallback for special-char filenames
-      let s3Object;
-      try {
-        s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
-      } catch (s3Err) {
-        if (s3Err.name !== 'NoSuchKey' && s3Err.name !== 'NotFound' && s3Err.$metadata?.httpStatusCode !== 404) throw s3Err;
-        console.log('classifyJobWorker: exact key not found, listing prefix for', fileKey);
-        const prefix = fileKey.substring(0, fileKey.lastIndexOf('/') + 1);
-        const listResult = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: 10 }));
-        const found = (listResult.Contents || []).find(obj => obj.Key.endsWith('.pdf'));
-        if (!found) throw new Error('classify job failed: The specified key does not exist and no PDF found in prefix: ' + prefix);
-        console.log('classifyJobWorker: found file at', found.Key);
-        fileKey = found.Key;
-        s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
-      }
+      // Fetch PDF from S3
+      const s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
       const chunks = [];
       for await (const chunk of s3Object.Body) { chunks.push(chunk); }
       const pdfBase64 = Buffer.concat(chunks).toString('base64');
