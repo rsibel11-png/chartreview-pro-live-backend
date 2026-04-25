@@ -168,10 +168,9 @@ const getDownloadUrlHandler = async (event) => {
 
     let fileKey = result.Item.file_key;
 
-    // Shell records may have no file_key, or a stale file_url-style path (starts with "orgs/").
-    // In either case, resolve to the first part's file_key via GSI.
-    if (!fileKey || fileKey.startsWith('orgs/')) {
-      console.log('getDownloadUrl: resolving shell to first part for doc', aws_document_id);
+    // If no file_key at all, try GSI to find a part
+    if (!fileKey) {
+      console.log('getDownloadUrl: no file_key, resolving via GSI for doc', aws_document_id);
       const partsResult = await dynamo.send(new QueryCommand({
         TableName: TABLE,
         IndexName: 'original_document_id-index',
@@ -184,6 +183,7 @@ const getDownloadUrlHandler = async (event) => {
       fileKey = firstPart.file_key;
       console.log('getDownloadUrl: resolved to part file_key', fileKey);
     }
+    // file_key may be a full orgs/... S3 path -- use it directly
 
     const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
     const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
