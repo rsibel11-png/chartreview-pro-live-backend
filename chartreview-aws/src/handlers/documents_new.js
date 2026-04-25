@@ -168,15 +168,32 @@ const getDownloadUrlHandler = async (event) => {
 
     let fileKey = result.Item.file_key;
 
-    // If this record has any valid file_key, use it directly.
-    // This covers original uploads (orgs/ prefix), split parts, and standalone docs.
+    // If this record has any valid file_key, try it directly first.
+    // If the exact key doesn't exist in S3 (e.g. special chars in filename),
+    // fall back to listing objects under the document's prefix folder.
     if (fileKey) {
-      const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
-      const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
-      return response(200, { download_url });
+      try {
+        const headCmd = new HeadObjectCommand({ Bucket: BUCKET, Key: fileKey });
+        await s3.send(headCmd);
+        const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
+        const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+        return response(200, { download_url });
+      } catch (headErr) {
+        if (headErr.name !== 'NotFound' && headErr.$metadata?.httpStatusCode !== 404) throw headErr;
+        console.log('getDownloadUrl: exact key not found, listing prefix for', aws_document_id);
+        const prefix = fileKey.substring(0, fileKey.lastIndexOf('/') + 1);
+        const listCmd = new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: 10 });
+        const listResult = await s3.send(listCmd);
+        const found = (listResult.Contents || []).find(obj => obj.Key.endsWith('.pdf'));
+        if (found) {
+          const command = new GetObjectCommand({ Bucket: BUCKET, Key: found.Key });
+          const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+          return response(200, { download_url });
+        }
+      }
     }
 
-    // Shell records have no file_key -- resolve to first part orgs/ path -- resolve to first part.
+    // Shell records have no file_key -- resolve to first part.
     console.log('getDownloadUrl: shell record, resolving to first part for doc', aws_document_id);
     const partsResult = await dynamo.send(new ScanCommand({
       TableName: TABLE,
