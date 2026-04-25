@@ -168,15 +168,15 @@ const getDownloadUrlHandler = async (event) => {
 
     let fileKey = result.Item.file_key;
 
-    // If this record has a valid file_key (not a legacy orgs/ path), use it directly.
-    // This covers both standalone docs and split parts.
-    if (fileKey && !fileKey.startsWith('orgs/')) {
+    // If this record has any valid file_key, use it directly.
+    // This covers original uploads (orgs/ prefix), split parts, and standalone docs.
+    if (fileKey) {
       const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
       const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
       return response(200, { download_url });
     }
 
-    // Shell records have no file_key or a stale orgs/ path -- resolve to first part.
+    // Shell records have no file_key -- resolve to first part orgs/ path -- resolve to first part.
     console.log('getDownloadUrl: shell record, resolving to first part for doc', aws_document_id);
     const partsResult = await dynamo.send(new ScanCommand({
       TableName: TABLE,
