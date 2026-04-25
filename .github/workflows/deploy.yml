@@ -89,6 +89,34 @@ jobs:
               --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
           done
           echo "All Lambda functions updated!"
+
+          # Also update env vars on key functions to ensure correct bucket
+          echo "Patching S3_BUCKET env vars..."
+          ENV_FUNCS=(
+            "chartreview-pro-prod-getDownloadUrl"
+            "chartreview-pro-prod-listAllDocuments"
+            "chartreview-pro-prod-processDocument"
+            "chartreview-pro-prod-processWorker"
+            "chartreview-pro-prod-assessRelevance"
+            "chartreview-pro-prod-classifyStart"
+            "chartreview-pro-prod-classifyJobWorker"
+            "chartreview-pro-prod-deleteDocument"
+            "chartreview-pro-prod-updateDocument"
+          )
+          for FUNC in "${ENV_FUNCS[@]}"; do
+            CONFIG=$(aws lambda get-function-configuration --function-name "$FUNC" --region us-east-1 2>/dev/null) || continue
+            # Build updated env JSON using python3
+            UPDATED=$(echo "$CONFIG" | python3 -c "
+import sys, json
+cfg = json.load(sys.stdin)
+env = cfg.get('Environment', {}).get('Variables', {})
+env['S3_BUCKET'] = 'chartreview-documents-prod'
+env['DOCUMENTS_BUCKET'] = 'chartreview-documents-prod'
+print(json.dumps({'Variables': env}))
+")
+            aws lambda update-function-configuration --function-name "$FUNC" --environment "$UPDATED" --region us-east-1 > /dev/null && echo "  Env updated: $FUNC"
+          done
+          echo "Env var patch complete!"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
