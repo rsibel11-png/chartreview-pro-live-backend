@@ -218,6 +218,7 @@ const getDownloadUrlHandler = async (event) => {
   }
 };
 
+module.exports = {
   getDownloadUrl:   validateApiKey(getDownloadUrlHandler),
   update:           validateApiKey(updateHandler),
   process:          validateApiKey(processHandler),
