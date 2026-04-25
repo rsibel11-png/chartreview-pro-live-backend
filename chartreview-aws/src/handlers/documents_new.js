@@ -179,7 +179,7 @@ const getDownloadUrlHandler = async (event) => {
         const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
         return response(200, { download_url });
       } catch (headErr) {
-        if (headErr.name !== 'NotFound' && headErr.$metadata?.httpStatusCode !== 404) throw headErr;
+        if (headErr.name !== 'NotFound' && headErr.name !== 'NoSuchKey' && headErr.$metadata?.httpStatusCode !== 404) throw headErr;
         console.log('getDownloadUrl: exact key not found, listing prefix for', aws_document_id);
         const prefix = fileKey.substring(0, fileKey.lastIndexOf('/') + 1);
         const listCmd = new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: 10 });
