@@ -190,6 +190,17 @@ const getDownloadUrlHandler = async (event) => {
           const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
           return response(200, { download_url });
         }
+        // Last resort: search the entire org/documents/ prefix for any PDF under this doc's folder
+        console.log('getDownloadUrl: prefix empty, trying org-wide search for doc', aws_document_id);
+        const orgPrefix = 'orgs/' + orgId + '/documents/' + aws_document_id + '/';
+        const orgList = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: orgPrefix, MaxKeys: 20 }));
+        console.log('getDownloadUrl: org-wide search found', (orgList.Contents || []).length, 'objects under', orgPrefix);
+        const orgFound = (orgList.Contents || []).find(obj => obj.Key.endsWith('.pdf'));
+        if (orgFound) {
+          const command = new GetObjectCommand({ Bucket: BUCKET, Key: orgFound.Key });
+          const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+          return response(200, { download_url });
+        }
       }
     }
 
