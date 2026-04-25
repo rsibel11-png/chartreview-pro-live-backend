@@ -200,7 +200,7 @@ const getDownloadUrlHandler = async (event) => {
       FilterExpression: 'original_document_id = :oid',
       ExpressionAttributeValues: { ':oid': aws_document_id },
     }));
-    const parts = (partsResult.Items || []).filter(p => p.file_key && !p.file_key.startsWith('orgs/'));
+    const parts = (partsResult.Items || []).filter(p => p.file_key);
     parts.sort((a, b) => (a.part_index || 0) - (b.part_index || 0));
     const firstPart = parts[0];
     if (!firstPart) return response(404, { error: 'No file found for document' });
