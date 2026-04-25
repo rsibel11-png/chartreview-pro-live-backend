@@ -168,20 +168,27 @@ const getDownloadUrlHandler = async (event) => {
 
     let fileKey = result.Item.file_key;
 
-    // Shell records may have no file_key, or a stale file_url-style path (starts with "orgs/").
-    // In either case, resolve to the first part's file_key via GSI.
-    if (!fileKey || fileKey.startsWith('orgs/')) {
-      console.log('getDownloadUrl: resolving shell to first part for doc', aws_document_id);
-      const partsResult = await dynamo.send(new ScanCommand({
-        TableName: TABLE,
-        FilterExpression: 'original_document_id = :oid',
-        ExpressionAttributeValues: { ':oid': aws_document_id },
-      }));
-      const firstPart = partsResult.Items && partsResult.Items[0];
-      if (!firstPart || !firstPart.file_key) return response(404, { error: 'No file found for document' });
-      fileKey = firstPart.file_key;
-      console.log('getDownloadUrl: resolved to part file_key', fileKey);
+    // If this record has a valid file_key (not a legacy orgs/ path), use it directly.
+    // This covers both standalone docs and split parts.
+    if (fileKey && !fileKey.startsWith('orgs/')) {
+      const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
+      const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+      return response(200, { download_url });
     }
+
+    // Shell records have no file_key or a stale orgs/ path -- resolve to first part.
+    console.log('getDownloadUrl: shell record, resolving to first part for doc', aws_document_id);
+    const partsResult = await dynamo.send(new ScanCommand({
+      TableName: TABLE,
+      FilterExpression: 'original_document_id = :oid',
+      ExpressionAttributeValues: { ':oid': aws_document_id },
+    }));
+    const parts = (partsResult.Items || []).filter(p => p.file_key && !p.file_key.startsWith('orgs/'));
+    parts.sort((a, b) => (a.part_index || 0) - (b.part_index || 0));
+    const firstPart = parts[0];
+    if (!firstPart) return response(404, { error: 'No file found for document' });
+    fileKey = firstPart.file_key;
+    console.log('getDownloadUrl: resolved to part file_key', fileKey);
 
     const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
     const download_url = await getSignedUrl(s3, command, { expiresIn: 3600 });
