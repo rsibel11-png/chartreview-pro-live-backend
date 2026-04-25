@@ -20,7 +20,7 @@ const PROCESSING_QUEUE_URL = process.env.PROCESSING_QUEUE_URL || null;
 
 const TABLE                = process.env.DOCUMENTS_TABLE;
 const SUMMARIES_TABLE      = process.env.SUMMARIES_TABLE;
-const BUCKET               = process.env.S3_BUCKET;
+const BUCKET               = process.env.S3_BUCKET || 'chartreview-documents-prod';
 const BEDROCK_MODEL        = 'us.anthropic.claude-sonnet-4-6'; // PDF vision requires Sonnet
 const WORKER_FUNCTION_NAME = process.env.WORKER_FUNCTION_NAME   || 'chartreview-pro-prod-processWorker';
 
