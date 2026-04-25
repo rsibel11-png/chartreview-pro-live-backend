@@ -1266,11 +1266,27 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
         console.log('classifyJobWorker: resolved to part file_key=' + fileKey);
       }
 
-      // Fetch PDF from S3
-      const s3Object = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
-      const chunks = [];
-      for await (const chunk of s3Object.Body) { chunks.push(chunk); }
-      const pdfBase64 = Buffer.concat(chunks).toString('base64');
+      // Fetch PDF from S3 -- try primary bucket first, fall back to legacy bucket
+      const CLASSIFY_FALLBACK_BUCKET = 'chartreview-pro-files-prod';
+      let pdfBase64;
+      for (const bucket of [...new Set([BUCKET, CLASSIFY_FALLBACK_BUCKET])]) {
+        try {
+          console.log('classifyJobWorker: fetching from bucket=' + bucket + ' key=' + fileKey);
+          const s3Object = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: fileKey }));
+          const chunks = [];
+          for await (const chunk of s3Object.Body) { chunks.push(chunk); }
+          pdfBase64 = Buffer.concat(chunks).toString('base64');
+          console.log('classifyJobWorker: fetched PDF from bucket=' + bucket);
+          break;
+        } catch (s3Err) {
+          if (s3Err.name === 'NoSuchKey' || s3Err.$metadata?.httpStatusCode === 404) {
+            console.log('classifyJobWorker: key not found in bucket=' + bucket + ', trying next');
+            continue;
+          }
+          throw s3Err;
+        }
+      }
+      if (!pdfBase64) throw new Error('classify job failed: The specified key does not exist in any bucket. key=' + fileKey);
       classifyResult = await runBedrockClassify(pdfBase64, aws_document_id);
     }
 
