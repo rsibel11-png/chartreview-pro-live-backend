@@ -160,24 +160,33 @@ const getDownloadUrlHandler = async (event) => {
   const orgId = event._orgId;
   if (!orgId) return response(400, { error: 'x-org-id header is required' });
 
-  // Helper: try exact S3 key, then fall back to listing the document folder
+  // Helper: try exact S3 key in both buckets, then fall back to listing folder in both
+  const FALLBACK_BUCKET = 'chartreview-pro-files-prod';
+  const bucketsToTry = [...new Set([BUCKET, FALLBACK_BUCKET])];
+
   const resolveSignedUrl = async (fileKey, docId) => {
-    try {
-      await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: fileKey }));
-      const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: fileKey });
-      return await getSignedUrl(s3, cmd, { expiresIn: 3600 });
-    } catch (err) {
-      if (err.name !== 'NotFound' && err.name !== 'NoSuchKey' && err.$metadata?.httpStatusCode !== 404) throw err;
+    // Try exact key in each bucket
+    for (const bucket of bucketsToTry) {
+      try {
+        await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: fileKey }));
+        const cmd = new GetObjectCommand({ Bucket: bucket, Key: fileKey });
+        console.log('getDownloadUrl: found exact key in bucket', bucket);
+        return await getSignedUrl(s3, cmd, { expiresIn: 3600 });
+      } catch (err) {
+        if (err.name !== 'NotFound' && err.name !== 'NoSuchKey' && err.$metadata?.httpStatusCode !== 404) throw err;
+      }
     }
-    // Exact key not found -- list the document folder
+    // Exact key not found in any bucket -- list the document folder in each bucket
     const prefix = 'orgs/' + orgId + '/documents/' + docId + '/';
-    console.log('getDownloadUrl: HeadObject miss, listing', prefix);
-    const listResult = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, MaxKeys: 20 }));
-    console.log('getDownloadUrl: found', (listResult.Contents || []).length, 'objects under', prefix);
-    const found = (listResult.Contents || []).find(obj => obj.Key.endsWith('.pdf'));
-    if (found) {
-      const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: found.Key });
-      return await getSignedUrl(s3, cmd, { expiresIn: 3600 });
+    for (const bucket of bucketsToTry) {
+      console.log('getDownloadUrl: HeadObject miss, listing', prefix, 'in', bucket);
+      const listResult = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, MaxKeys: 20 }));
+      console.log('getDownloadUrl: found', (listResult.Contents || []).length, 'objects under', prefix, 'in', bucket);
+      const found = (listResult.Contents || []).find(obj => obj.Key.endsWith('.pdf'));
+      if (found) {
+        const cmd = new GetObjectCommand({ Bucket: bucket, Key: found.Key });
+        return await getSignedUrl(s3, cmd, { expiresIn: 3600 });
+      }
     }
     return null;
   };
