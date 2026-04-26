@@ -1011,6 +1011,11 @@ PART 2 - OVERALL CLINICAL RELEVANCE:
    - Insurance/auth forms, EOBs, fax cover sheets, emails, billing, scheduling, patient intake forms without clinical content
    - Photo-only documents (surveillance, vehicle, scene photos with no medical text)
    - Hospital/rehab nursing-admin records: MAR grids, nursing flowsheets, vital sign grids, ADL logs, wound care checklists, dietary records, pharmacy printouts (AbacusRX etc.), Documentation Survey Report forms, resident activity logs, staffing tables, facility photo ID pages -- REJECT these even if mixed with some clinical pages, UNLESS a physician order or physician progress note is embedded on that specific page.
+   - Hospital order/workflow pages: order tracking logs, discharge request orders, medication order audit trails, order action/discontinue/acknowledgment records, nursing order review logs -- these are administrative workflow records with no clinical findings even if signed by a physician.
+   - Medical records transmittal cover pages, law firm records request letters, HIPAA authorization forms, affidavits of custodian of records, consent-to-release forms.
+   - Billing/charge summary pages: itemized charges, insurance payment summaries, statement of charges, account balance pages.
+   - Generic patient education handout pages (standardized printouts like "Broken Foot care", "Care after receiving medication in the ER" -- these are not written by the treating provider and contain no clinical findings).
+   - Conditions of Admission forms, financial responsibility forms, patient rights documents, consent-to-treat signature pages.
    If uncertain, lean toward REJECTION.
 
 PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPENDENTLY):
@@ -1019,6 +1024,10 @@ PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPEND
    Always flag as low relevance:
    - Cover/title pages, blank pages, headers/footers only, TOC, fax cover sheets, admin forms, billing pages, signature-only pages, separator pages, photo pages (surveillance, vehicles, people without clinical context)
    - MAR/pharmacy grid pages, nursing flowsheet pages, vital sign grid pages, ADL log pages, Documentation Survey Report pages, any page that is primarily a table of checkmarks/initials/codes with no physician narrative
+   - Hospital order/workflow pages: order tracking logs, discharge request orders, medication order audit trails, order action/discontinue/acknowledgment records
+   - Medical records transmittal pages, law firm letters, HIPAA auth forms, affidavits, consent-to-release pages, Conditions of Admission pages
+   - Generic patient education handout pages (standardized printouts not authored by the treating provider)
+   - Billing charge pages, account balance pages, insurance payment summary pages
    NOTE: Do NOT flag police reports, EMT/EMS reports, or accident reports as low relevance.
    NOTE: PT/OT initial evaluations and discharge summaries ARE clinical -- do not flag those.
    NOTE: Radiology report addendum pages, continuation pages, and attestation/signature pages that are part of a radiology report ARE clinical -- do not flag them as low relevance.
