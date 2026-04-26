@@ -24,7 +24,12 @@ const lambda  = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1'
 const BUCKET        = process.env.S3_BUCKET            || 'chartreview-documents-prod';
 const DOCS_TABLE    = process.env.DOCUMENTS_TABLE       || 'chartreview-documents-prod';
 const JOBS_TABLE    = process.env.JOBS_TABLE            || 'chartreview-jobs-prod';
-const BEDROCK_MODEL = 'us.anthropic.claude-sonnet-4-6';
+// Model fallback chain: try each in order when throttled
+const BEDROCK_MODELS = [
+  'us.anthropic.claude-sonnet-4-6',           // primary: cross-region 4.6
+  'us.anthropic.claude-sonnet-4-5-20251001-v1:0', // fallback 1: cross-region 4.5
+  'anthropic.claude-3-5-sonnet-20241022-v2:0',    // fallback 2: direct 3.5 Sonnet
+];
 const WORKER_FN     = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
 
 const httpResponse = (statusCode, body) => ({
@@ -67,17 +72,33 @@ const callBedrock = async (fileKeys, prompt, schema) => {
     tool_choice: { type: 'tool', name: 'structured_output' },
   };
 
-  const cmd = new InvokeModelCommand({
-    modelId: BEDROCK_MODEL,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body: JSON.stringify(bedrockPayload),
-  });
-  const res = await bedrock.send(cmd);
-  const parsed = JSON.parse(Buffer.from(res.body).toString('utf-8'));
-  const toolUse = parsed.content?.find(b => b.type === 'tool_use');
-  if (!toolUse) throw new Error('Bedrock returned no tool_use block');
-  return toolUse.input;
+  let lastErr;
+  for (const modelId of BEDROCK_MODELS) {
+    try {
+      console.log(`callBedrock: trying model ${modelId}`);
+      const cmd = new InvokeModelCommand({
+        modelId,
+        contentType: 'application/json',
+        accept: 'application/json',
+        body: JSON.stringify(bedrockPayload),
+      });
+      const res = await bedrock.send(cmd);
+      const parsed = JSON.parse(Buffer.from(res.body).toString('utf-8'));
+      const toolUse = parsed.content?.find(b => b.type === 'tool_use');
+      if (!toolUse) throw new Error('Bedrock returned no tool_use block');
+      console.log(`callBedrock: success with model ${modelId}`);
+      return toolUse.input;
+    } catch (err) {
+      const isThrottle = err.message?.includes('Too many tokens') ||
+                         err.name === 'ThrottlingException' ||
+                         err.$metadata?.httpStatusCode === 429;
+      console.warn(`callBedrock: model ${modelId} failed — ${err.message}`);
+      lastErr = err;
+      if (!isThrottle) throw err; // non-throttle errors: don't try other models
+      // throttled: try next model in chain
+    }
+  }
+  throw lastErr; // all models exhausted
 };
 
 // ─── AWS swap #2: replaces awsProxy(/documents/${id}/download-url) ────────────
