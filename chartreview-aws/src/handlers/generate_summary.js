@@ -482,6 +482,7 @@ const generateSummaryWorker = async (event) => {
                 .map(v => ({ ...v, source_doc_id: viPart.id, source_part_label: viPart.label }));
             }
             console.log(`VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
+            console.log(`VI_DEBUG [${viPart.label}] raw visits:`, JSON.stringify((viResults[partIdx] || []).map(v => ({ date: v.date, provider: v.provider, facility: v.facility, type: v.visit_type }))));
           } catch (e) {
             console.warn(`VI pre-pass failed for ${viPart.id}: ${e.message}`);
           }
