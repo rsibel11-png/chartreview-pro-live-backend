@@ -121,6 +121,18 @@ const markJobComplete = async (job_id, result) => {
   }));
 };
 
+const setJobStatus = async (job_id, status_msg) => {
+  try {
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE, Key: { job_id },
+      UpdateExpression: 'SET status_msg = :m, updated_at = :now',
+      ExpressionAttributeValues: { ':m': status_msg, ':now': new Date().toISOString() },
+    }));
+  } catch (e) {
+    console.warn('setJobStatus failed:', e.message);
+  }
+};
+
 // ─── Ported verbatim from v56 MedicalSummaries.jsx ───────────────────────────
 
 const toTitleCase = (str) => {
@@ -380,6 +392,7 @@ const generateSummaryWorker = async (event) => {
     // ── VI pre-pass (v53 parallel, VI_CONCURRENCY=4) ──────────────────────────
     let knownVisits = [];
     try {
+      await setJobStatus(job_id, 'Building visit checklist (pre-pass)...');
       console.log('generateSummaryWorker: starting VI pre-pass (parallel)');
       const VI_CONCURRENCY = 4;
       const viResults = new Array(allParts.length).fill(null);
@@ -555,6 +568,7 @@ const generateSummaryWorker = async (event) => {
       const chunk = batches.slice(i, i + BATCH_CONCURRENCY);
       const chunkEnd = Math.min(i + BATCH_CONCURRENCY, totalBatches);
       console.log(`Main pass: batches ${i + 1}-${chunkEnd} of ${totalBatches}`);
+      await setJobStatus(job_id, `Analyzing batches ${i + 1}–${chunkEnd} of ${totalBatches}...`);
       const chunkResults = await Promise.all(
         chunk.map((batch, j) => runBatch(batch, i + j, knownVisits))
       );
@@ -568,6 +582,7 @@ const generateSummaryWorker = async (event) => {
     }
 
     // ── Dedicated C-4 pass (identical to v56) ─────────────────────────────────
+    await setJobStatus(job_id, 'Running dedicated C-4 form extraction pass...');
     try {
       console.log('generateSummaryWorker: running dedicated C-4 pass');
       const c4FileKeys = allParts.map(p => p.file_key).filter(Boolean);
@@ -681,6 +696,7 @@ If NO C-4 form is present in these documents, set found: false and leave all oth
 
       if (missingVisits.length > 0) {
         console.log(`Recovery pass: ${missingVisits.length} missing visits:`, missingVisits.map(v => v.date));
+        await setJobStatus(job_id, `Recovery pass: searching for ${missingVisits.length} missing visit${missingVisits.length !== 1 ? 's' : ''}...`);
         const recSchema = {
           type: 'object',
           properties: {
@@ -757,6 +773,7 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
     }
 
     console.log(`generateSummaryWorker complete: ${allVisits.length} visits`);
+    await setJobStatus(job_id, `Saving ${allVisits.length} visits...`);
 
     await markJobComplete(job_id, {
       patient_name: patientName || '',
