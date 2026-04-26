@@ -225,6 +225,16 @@ const sanitizeVisits = (visits, patientName) => {
       if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
         clean.practice_setting = '';
       }
+      // Strip street addresses from practice_setting (e.g. "Clinic, 123 Main St, City, ST 12345")
+      if (clean.practice_setting) {
+        // Remove anything after a comma that looks like a street address (number + street word)
+        clean.practice_setting = clean.practice_setting
+          .replace(/,\s*\d+\s+[A-Za-z].*$/, '')  // ", 2800 East Desert Inn..." 
+          .replace(/\s*\d{5}(?:-\d{4})?\s*$/, '') // trailing zip codes
+          .replace(/,\s*(?:Ste|Suite|Floor|Fl|Bldg|Building|Unit|#)\s*[\w-]+\s*$/i, '') // suite/floor
+          .trim()
+          .replace(/,\s*$/, ''); // trailing comma
+      }
       return clean;
     })
     .map((visit, _, arr) => {
@@ -279,8 +289,10 @@ You may encounter different types of documents. Handle each type as follows:
 
 A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
     Extract each visit as a separate entry with all standard fields.
-    CRITICAL: Always extract and include the actual practice setting/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
+    CRITICAL: Always extract and include the actual practice name/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
     - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
+    - practice_setting must be the PRACTICE NAME ONLY — do NOT include street addresses, suite numbers, zip codes, or city/state. Example: "Desert Orthopaedic Center" NOT "Desert Orthopaedic Center, 2800 East Desert Inn Road, Ste 100, Las Vegas, NV"
+    - If the document shows "Facility Name - Branch/Location" format (e.g. "Desert Orthopaedic Center - Desert Inn"), keep that format as the name
 
 B) EXPERT MEDICAL REPORTS / IME / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
    Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize. Examples:
