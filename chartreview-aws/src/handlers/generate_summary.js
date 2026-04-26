@@ -672,6 +672,7 @@ If NO C-4 form is present in these documents, set found: false and leave all oth
     }
 
     // ── Merge + deduplicate + sort (identical to v56) ─────────────────────────
+    await setJobStatus(job_id, 'Merging and deduplicating visits...');
     allVisits = deduplicateVisits(allVisits);
     allVisits.sort((a, b) => {
       if (!a.visit_date) return 1;
