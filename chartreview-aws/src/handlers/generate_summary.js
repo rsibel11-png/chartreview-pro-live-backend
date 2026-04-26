@@ -261,7 +261,7 @@ const buildVisitIndexPrompt = () => {
   return `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter date, provider name, and facility/location.
 
 For each clinical encounter found, extract:
-1. date - the date of service (YYYY-MM-DD format). This is the actual visit date, NOT the date of injury. Look in document headers and note titles.
+1. date - the date of service (YYYY-MM-DD format). PRIMARY SOURCE: the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). NEVER use the injury date or dates mentioned inside the HPI narrative. Vitals table dates confirm the visit date — use them if no header is visible.
 2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
 3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
 4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
@@ -361,7 +361,10 @@ DEDUPLICATION RULE: If same date has BOTH a physician progress report AND an off
 CRITICAL DATE AND TIMELINE ACCURACY:
 - Pay EXTREME attention to dates. Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES — treat each as a separate visit.
 - Match ALL findings, exams, and imaging to the CORRECT visit date. Do not aggregate findings from multiple dates into a single entry.
-- Dates in document headers, note titles, and signature blocks indicate the SERVICE DATE.
+- The PRIMARY source for visit_date is the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). Always prefer this over any other date on the page.
+- Dates in vitals tables (e.g. "11/07/22 10:19") confirm the visit date — use the date portion only (2022-11-07), ignoring the time.
+- Dates in signature blocks, "Medications Obtained and Reviewed [date]", or "Reviewed [date]" also confirm the service date.
+- NEVER use a date from the HPI narrative (e.g. "date of injury 10/31/2022" or "she was seen at Green Valley ER on...") as the visit_date for the current note.
 - The date of injury is NOT a visit date unless the patient was actually seen on that day.
 
 PHYSICAL THERAPY INSTRUCTIONS:
