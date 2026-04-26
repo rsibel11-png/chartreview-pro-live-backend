@@ -1,4 +1,4 @@
-// Updated: 2026-04-26 — v2: port of v56 MedicalSummaries.jsx logic to AWS Lambda
+// Updated: 2026-04-26 — v3: fix DynamoDB reserved keyword 'result' in markJobComplete; add recovery pass warning logs
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -115,8 +115,8 @@ const markJobFailed = async (job_id, msg) => {
 const markJobComplete = async (job_id, result) => {
   await dynamo.send(new UpdateCommand({
     TableName: JOBS_TABLE, Key: { job_id },
-    UpdateExpression: 'SET #s = :s, #r = :r, updated_at = :now',
-    ExpressionAttributeNames: { '#s': 'status', '#r': 'result' },
+    UpdateExpression: 'SET #s = :s, #res = :r, updated_at = :now',
+    ExpressionAttributeNames: { '#s': 'status', '#res': 'result' },
     ExpressionAttributeValues: { ':s': 'complete', ':r': result, ':now': new Date().toISOString() },
   }));
 };
@@ -782,6 +782,8 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
                 const recClean = sanitizeVisits(recResult.visits, patientName);
                 allVisits = allVisits.concat(recClean);
                 console.log(`Recovery: recovered ${recClean.length} visit(s) from ${srcDocId}`);
+              } else {
+                console.warn(`Recovery: Bedrock returned 0 visits for ${srcDocId} (possible throttle/limit) -- keeping existing visits`);
               }
             } catch (recErr) {
               console.warn(`Recovery failed for ${srcDocId}:`, recErr.message);
@@ -800,6 +802,9 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
     } // end if (knownVisits.length > 0)
 
     console.log(`generateSummaryWorker complete: ${allVisits.length} visits`);
+    if (allVisits.length === 0 && knownVisits.length > 0) {
+      console.warn(`generateSummaryWorker: WARNING -- 0 visits written despite ${knownVisits.length} VI entries. Possible Bedrock throttle/timeout on all batches.`);
+    }
     await setJobStatus(job_id, `Saving ${allVisits.length} visits...`);
 
     await markJobComplete(job_id, {
