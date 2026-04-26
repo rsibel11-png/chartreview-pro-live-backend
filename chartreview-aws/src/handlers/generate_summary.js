@@ -782,8 +782,8 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
           if (!b.visit_date) return -1;
           return new Date((a.visit_date || '') + 'T00:00:00') - new Date((b.visit_date || '') + 'T00:00:00');
         });
-      }
-    }
+      } // end else if (missingVisits.length > 0)
+    } // end if (knownVisits.length > 0)
 
     console.log(`generateSummaryWorker complete: ${allVisits.length} visits`);
     await setJobStatus(job_id, `Saving ${allVisits.length} visits...`);
