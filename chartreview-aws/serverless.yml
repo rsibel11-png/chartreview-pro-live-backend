@@ -279,6 +279,36 @@ functions:
             allowCredentials: false
 
 
+
+  generateSummaryStart:
+    handler: src/handlers/generate_summary.generateSummaryStart
+    timeout: 29
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      SUMMARIES_TABLE: chartreview-summaries-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      GENERATE_WORKER_FUNCTION_NAME: chartreview-pro-prod-generateSummaryWorker
+      API_KEY: ${env:API_KEY}
+    events:
+      - http:
+          path: summaries/generate
+          method: post
+          cors: true
+      - http:
+          path: summaries/generate
+          method: options
+          cors: true
+
+  generateSummaryWorker:
+    handler: src/handlers/generate_summary.generateSummaryWorker
+    timeout: 900
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      SUMMARIES_TABLE: chartreview-summaries-prod
+      JOBS_TABLE: chartreview-jobs-prod
+
   getJob:
     handler: src/handlers/documents_new.getJob
     timeout: 30
