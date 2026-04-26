@@ -391,7 +391,10 @@ CRITICAL DATE AND TIMELINE ACCURACY:
 - Dates in signature blocks, "Medications Obtained and Reviewed [date]", or "Reviewed [date]" also confirm the service date.
 - NEVER use a date from the HPI narrative as the visit_date. The HPI often mentions the date of injury (e.g. "Injury occurred 10/31/2022") — this is NOT the visit date. The visit date is in the document header.
 - The date of injury is NEVER the visit date unless the document header explicitly shows the patient was seen on that exact day.
-- KNOWN VISITS CHECKLIST OVERRIDE: If a date appears in the KNOWN VISITS CHECKLIST above, use that exact date as visit_date for the matching visit — even if the document body mentions a different date (e.g. injury date). The checklist dates were extracted from document headers and are authoritative.
+- KNOWN VISITS CHECKLIST OVERRIDE: If a date appears in the KNOWN VISITS CHECKLIST above, you MUST use that exact date as visit_date. This is an absolute rule with no exceptions. Do NOT output any date that is not in the checklist unless you find a visit that is genuinely absent from the checklist.
+- CRITICAL: If the checklist says "2022-11-07" for a Wade Hendershot / Desert Orthopaedic visit, your output visit_date MUST be "2022-11-07" — not "2022-11-01" or any other date. The checklist was built from document headers and is the ground truth.
+- If you are tempted to use a date you found in the HPI or injury narrative (e.g. "10/31/2022", "11/1/2022") but that date does NOT appear in the checklist, do NOT create a visit for it. Discard it.
+- The only valid visit_date values are: (a) dates in the KNOWN VISITS CHECKLIST, or (b) dates from document headers for visits genuinely missing from the checklist.
 
 PHYSICAL THERAPY INSTRUCTIONS:
 - Extract EACH PT session as a separate visit entry — one entry per date.
