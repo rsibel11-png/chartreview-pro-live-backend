@@ -157,10 +157,21 @@ const deduplicateVisits = (visits) => {
     const providerKey = (visit.rendering_provider || '').trim().toLowerCase();
     const settingKey = (visit.practice_setting || '').trim().toLowerCase();
     if (!dateKey && !providerKey) return true;
-    const key = `${dateKey}|${providerKey}|${settingKey}`;
-    if (exactKeys.has(key)) return false;
-    exactKeys.add(key);
-    return true;
+    // Primary key: date + provider + setting
+    const primaryKey = `${dateKey}|${providerKey}|${settingKey}`;
+    if (!exactKeys.has(primaryKey)) {
+      exactKeys.add(primaryKey);
+      return true;
+    }
+    // Same date+provider+setting: check HPI content fingerprint (first 60 chars)
+    // to allow genuinely distinct same-day visits (e.g. two separate office encounters)
+    const hpiSnippet = (visit.hpi_summary || visit.chief_complaint || '').trim().toLowerCase().slice(0, 60);
+    const contentKey = `${primaryKey}|hpi:${hpiSnippet}`;
+    if (hpiSnippet && !exactKeys.has(contentKey)) {
+      exactKeys.add(contentKey);
+      return true;
+    }
+    return false;
   });
   return deduped;
 };
