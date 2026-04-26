@@ -831,23 +831,52 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
       } // end else if (missingVisits.length > 0)
     } // end if (knownVisits.length > 0)
 
-    // ── Checklist enforcement: strip any visit whose date is not in the VI checklist ──
-    // This is a hard post-processing filter that catches LLM hallucinations of injury dates
-    // or referenced dates that were never actual visits in the documents.
+    // ── Checklist enforcement: correct any visit whose date is not in the VI checklist ──
+    // The VI pre-pass is the ground truth for visit dates (built from document headers).
+    // If the main pass returns a date not in the checklist, it is a mislabeled visit --
+    // find the best matching checklist entry by provider/facility and correct the date.
     if (knownVisits.length > 0) {
       const checklistDates = new Set(knownVisits.map(v => v.date));
-      const beforeEnforce = allVisits.length;
-      allVisits = allVisits.filter(v => {
+      allVisits = allVisits.map(v => {
         const d = (v.visit_date || '').trim();
-        if (!d) return true; // keep undated visits (rare edge case)
-        if (checklistDates.has(d)) return true;
-        console.log(`CHECKLIST_ENFORCE: stripped visit with date ${d} -- not in VI checklist`);
-        return false;
+        if (!d || checklistDates.has(d)) return v; // date is correct, no action needed
+
+        // Date is not in checklist -- find best matching checklist entry
+        const provider = (v.provider || '').toLowerCase();
+        const facility = (v.practice_setting || '').toLowerCase();
+
+        // Score each checklist entry by provider/facility similarity
+        let bestMatch = null;
+        let bestScore = 0;
+        for (const cv of knownVisits) {
+          let score = 0;
+          const cvProvider = (cv.provider || '').toLowerCase();
+          const cvFacility = (cv.facility || '').toLowerCase();
+          // Check for word overlap in provider name
+          const providerWords = provider.split(/\s+/).filter(w => w.length > 2);
+          for (const w of providerWords) {
+            if (cvProvider.includes(w)) score += 2;
+          }
+          // Check facility overlap
+          const facilityWords = facility.split(/\s+/).filter(w => w.length > 3);
+          for (const w of facilityWords) {
+            if (cvFacility.includes(w)) score += 1;
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            bestMatch = cv;
+          }
+        }
+
+        if (bestMatch && bestScore > 0) {
+          console.log(`CHECKLIST_CORRECT: corrected visit_date ${d} -> ${bestMatch.date} (provider match score ${bestScore}, provider: ${v.provider})`);
+          return { ...v, visit_date: bestMatch.date };
+        } else {
+          // No provider match -- date is likely a phantom, log and keep original
+          console.log(`CHECKLIST_CORRECT: no match found for date ${d} provider "${v.provider}" -- keeping as-is`);
+          return v;
+        }
       });
-      const stripped = beforeEnforce - allVisits.length;
-      if (stripped > 0) {
-        console.log(`CHECKLIST_ENFORCE: removed ${stripped} visit(s) with dates not in checklist`);
-      }
     }
 
     console.log(`generateSummaryWorker complete: ${allVisits.length} visits`);
