@@ -1,9 +1,16 @@
-// Updated: 2026-04-26 — Parallelized VI pre-pass (concurrency=4) and main pass (concurrency=4)
-// Prompt ported directly from original chartreview-pro MedicalSummaries.jsx (battle-tested)
+// Updated: 2026-04-26 — v2: port of v56 MedicalSummaries.jsx logic to AWS Lambda
+// Surgical swaps only:
+//   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
+//      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
+//   2. awsProxy(`/documents/${id}/download-url`) → resolveFileKey(doc) from DynamoDB
+//   3. Wrap generateSummary logic with job tracking (write status to chartreview-jobs-prod)
+// All other logic (BATCH_SIZE, VI_CONCURRENCY, runBatch, recovery pass, C-4 pass,
+// sanitizeVisits, deduplicateVisits, enforceOneC4, buildPrompt, buildVisitIndexPrompt)
+// is identical to v56 MedicalSummaries.jsx.
 
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { randomUUID } = require('crypto');
@@ -14,13 +21,13 @@ const dynamo  = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const bedrock = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const lambda  = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
 
-const BUCKET          = process.env.S3_BUCKET           || 'chartreview-documents-prod';
-const DOCS_TABLE      = process.env.DOCUMENTS_TABLE      || 'chartreview-documents-prod';
-const JOBS_TABLE      = process.env.JOBS_TABLE           || 'chartreview-jobs-prod';
-const BEDROCK_MODEL   = 'us.anthropic.claude-sonnet-4-6';
-const WORKER_FN       = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
+const BUCKET        = process.env.S3_BUCKET            || 'chartreview-documents-prod';
+const DOCS_TABLE    = process.env.DOCUMENTS_TABLE       || 'chartreview-documents-prod';
+const JOBS_TABLE    = process.env.JOBS_TABLE            || 'chartreview-jobs-prod';
+const BEDROCK_MODEL = 'us.anthropic.claude-sonnet-4-6';
+const WORKER_FN     = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
 
-const response = (statusCode, body) => ({
+const httpResponse = (statusCode, body) => ({
   statusCode,
   headers: {
     'Content-Type': 'application/json',
@@ -30,15 +37,52 @@ const response = (statusCode, body) => ({
   body: JSON.stringify(body),
 });
 
-// ─── Fetch PDF from S3 as base64 ─────────────────────────────────────────────
-const fetchPdfBase64 = async (fileKey) => {
-  const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
-  const chunks = [];
-  for await (const chunk of obj.Body) { chunks.push(chunk); }
-  return Buffer.concat(chunks).toString('base64');
+// ─── AWS swap #1: replaces InvokeLLM ─────────────────────────────────────────
+// Original: base44.integrations.Core.InvokeLLM({ prompt, file_urls, response_json_schema })
+// New: fetch each PDF from S3 as base64, send to Bedrock with same prompt + schema
+const callBedrock = async (fileKeys, prompt, schema) => {
+  // Build content array: one document block per PDF (mirrors file_urls behavior)
+  const contentBlocks = [];
+  for (const fileKey of fileKeys) {
+    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
+    const chunks = [];
+    for await (const chunk of obj.Body) chunks.push(chunk);
+    const pdfBase64 = Buffer.concat(chunks).toString('base64');
+    contentBlocks.push({
+      type: 'document',
+      source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 },
+    });
+  }
+  contentBlocks.push({ type: 'text', text: prompt });
+
+  const bedrockPayload = {
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 8000,
+    messages: [{ role: 'user', content: contentBlocks }],
+    tools: [{
+      name: 'structured_output',
+      description: 'Return structured data',
+      input_schema: schema,
+    }],
+    tool_choice: { type: 'tool', name: 'structured_output' },
+  };
+
+  const cmd = new InvokeModelCommand({
+    modelId: BEDROCK_MODEL,
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: JSON.stringify(bedrockPayload),
+  });
+  const res = await bedrock.send(cmd);
+  const parsed = JSON.parse(Buffer.from(res.body).toString('utf-8'));
+  const toolUse = parsed.content?.find(b => b.type === 'tool_use');
+  if (!toolUse) throw new Error('Bedrock returned no tool_use block');
+  return toolUse.input;
 };
 
-// ─── Resolve file_key for a document ─────────────────────────────────────────
+// ─── AWS swap #2: replaces awsProxy(/documents/${id}/download-url) ────────────
+// Original: awsProxy(`/documents/${id}/download-url`) → { download_url }
+// New: look up DynamoDB record → return file_key for S3 fetch
 const resolveFileKey = (doc) => {
   if (doc.file_key) return doc.file_key;
   if (doc.org_id && doc.aws_document_id && doc.file_name) {
@@ -47,34 +91,56 @@ const resolveFileKey = (doc) => {
   return null;
 };
 
-// ─── Sanitize visits (ported from original app) ───────────────────────────────
-const sanitizeVisits = (visits, patientName) => {
-  const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint',
-    'hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings',
-    'imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
-  const validProgressions = ['improved','same','worse','not_documented'];
-  return (visits || []).map(visit => {
-    const clean = { ...visit };
-    stringFields.forEach(field => {
-      const val = clean[field];
-      if (val === null || val === undefined || val === false) clean[field] = '';
-      else if (typeof val === 'object') clean[field] = JSON.stringify(val);
-      else if (typeof val !== 'string') clean[field] = String(val);
-    });
-    if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
-    if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
-    const patientLower = patientName?.toLowerCase();
-    if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
-      clean.practice_setting = '';
-    }
-    return clean;
+// ─── Fetch all doc records from DynamoDB for given IDs ───────────────────────
+const fetchDocRecords = async (docIds) => {
+  const records = [];
+  for (const id of docIds) {
+    const r = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: id } }));
+    if (r.Item) records.push(r.Item);
+    else console.warn(`fetchDocRecords: not found: ${id}`);
+  }
+  return records;
+};
+
+// ─── Job status helpers ───────────────────────────────────────────────────────
+const markJobFailed = async (job_id, msg) => {
+  await dynamo.send(new UpdateCommand({
+    TableName: JOBS_TABLE, Key: { job_id },
+    UpdateExpression: 'SET #s = :s, error_message = :e, updated_at = :now',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':s': 'failed', ':e': msg, ':now': new Date().toISOString() },
+  }));
+};
+
+const markJobComplete = async (job_id, result) => {
+  await dynamo.send(new UpdateCommand({
+    TableName: JOBS_TABLE, Key: { job_id },
+    UpdateExpression: 'SET #s = :s, result = :r, updated_at = :now',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':s': 'complete', ':r': result, ':now': new Date().toISOString() },
+  }));
+};
+
+// ─── Ported verbatim from v56 MedicalSummaries.jsx ───────────────────────────
+
+const toTitleCase = (str) => {
+  if (!str) return str;
+  const allCaps = str === str.toUpperCase() && /[A-Z]{2}/.test(str);
+  if (!allCaps) return str;
+  const credentialsPattern = /\b(MD|DO|PA|NP|RN|PT|OT|DC|DPT|LCSW|PhD|DDS|DMD|CRNA|CNS|APRN|EMT|RPA|MPH|MBA|JD|Esq|Jr|Sr|II|III|IV)\b/gi;
+  const credentialMatches = {};
+  str.replace(credentialsPattern, (m) => { credentialMatches[m.toUpperCase()] = m; });
+  return str.replace(/\b\w+/g, (word) => {
+    const upper = word.toUpperCase();
+    if (credentialMatches[upper]) return credentialMatches[upper];
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
   });
 };
 
-// ─── Deduplicate visits ───────────────────────────────────────────────────────
 const deduplicateVisits = (visits) => {
+  const visitList = visits || [];
   const exactKeys = new Set();
-  return visits.filter(visit => {
+  const deduped = visitList.filter((visit) => {
     const dateKey = (visit.visit_date || '').trim().toLowerCase();
     const providerKey = (visit.rendering_provider || '').trim().toLowerCase();
     const settingKey = (visit.practice_setting || '').trim().toLowerCase();
@@ -84,15 +150,115 @@ const deduplicateVisits = (visits) => {
     exactKeys.add(key);
     return true;
   });
+  return deduped;
 };
 
-// ─── Build extraction prompt (ported from original app) ───────────────────────
-const buildPrompt = (docCount, totalDocs) => {
-  const multiDocNote = totalDocs > 1
-    ? `CRITICAL: You are analyzing ${docCount} documents (part of a larger set of ${totalDocs}) which may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files and combine them into a single comprehensive summary. Do not stop after the first document.`
+const sanitizeVisits = (visits, patientName) => {
+  const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
+  const validProgressions = ['improved','same','worse','not_documented'];
+
+  const isLikelyMisdatedER = (visit, allVisits) => {
+    if (!/emergency|urgent care|ER|ED/i.test(visit.practice_setting || '')) return false;
+    const injuryDateStr = visit.injury_date || '';
+    const visitDateStr  = visit.visit_date  || '';
+    if (!injuryDateStr || !visitDateStr) return false;
+    if (injuryDateStr === visitDateStr) return false;
+    const injuryDate = new Date(injuryDateStr + 'T00:00:00');
+    const visitDate  = new Date(visitDateStr  + 'T00:00:00');
+    if (isNaN(injuryDate) || isNaN(visitDate)) return false;
+    const daysDiff = Math.abs((visitDate - injuryDate) / (1000 * 60 * 60 * 24));
+    if (daysDiff > 7) return false;
+    const realERExists = allVisits.some(v =>
+      v !== visit &&
+      /emergency|urgent care|ER|ED/i.test(v.practice_setting || '') &&
+      (v.visit_date || '') === injuryDateStr
+    );
+    return !realERExists;
+  };
+
+  const enforceOneC4 = (visitList) => {
+    const isC4 = (v) => {
+      const s = (v.practice_setting || '').toLowerCase();
+      return s.includes('c-4') || s.includes('wcb') || s.includes("workers' compensation report");
+    };
+    const c4Visits = visitList.filter(isC4);
+    if (c4Visits.length <= 1) return visitList;
+    const sorted = [...c4Visits].sort((a, b) => {
+      if (!a.visit_date) return 1;
+      if (!b.visit_date) return -1;
+      return new Date(a.visit_date + 'T00:00:00') - new Date(b.visit_date + 'T00:00:00');
+    });
+    const earliest = sorted[0];
+    const toRemove = new Set(sorted.slice(1).map(v => v));
+    return visitList.filter(v => !toRemove.has(v));
+  };
+
+  return enforceOneC4((visits || [])
+    .filter(visit => {
+      const setting = (visit.practice_setting || '').toLowerCase();
+      return !/(pacu|post.?anesthesia|pre.?op|post.?op|operating room|anesthesia|nursing note|medication administration|intake form|patient registration|appointment reminder|authorization|fax cover)/i.test(setting);
+    })
+    .map(visit => {
+      const clean = { ...visit };
+      clean.rendering_provider = toTitleCase(clean.rendering_provider);
+      stringFields.forEach(field => {
+        const val = clean[field];
+        if (val === null || val === undefined || val === false) clean[field] = '';
+        else if (typeof val === 'object') clean[field] = JSON.stringify(val);
+        else if (typeof val !== 'string') clean[field] = String(val);
+      });
+      if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
+      if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
+      const patientLower = patientName?.toLowerCase();
+      if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
+        clean.practice_setting = '';
+      }
+      return clean;
+    })
+    .map((visit, _, arr) => {
+      if (isLikelyMisdatedER(visit, arr)) {
+        return { ...visit, visit_date: visit.injury_date };
+      }
+      return visit;
+    })
+  );
+};
+
+const buildVisitIndexPrompt = () => {
+  return `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter date, provider name, and facility/location.
+
+For each clinical encounter found, extract:
+1. date - the date of service (YYYY-MM-DD format). This is the actual visit date, NOT the date of injury. Look in document headers and note titles.
+2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
+3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
+4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
+
+RULES:
+- Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
+- Each unique date + provider combination is a separate entry.
+- Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers).
+- Do NOT include the date of injury as a visit date unless the patient was actually seen that day.
+- Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
+- If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
+
+Return all entries in the visits array.`;
+};
+
+const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
+  const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
+  const multiDocNote = docCount > 1
+    ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files in this batch and combine them into a single comprehensive response. Do not stop after the first document.`
+    : '';
+  const checklistSection = knownVisitsChecklist.length > 0
+    ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
+      knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
+      `\n\nCRITICAL: Every date in the checklist above MUST appear in your output visits array unless it is a PT/OT visit being intentionally de-duplicated. If you cannot find clinical details for a checklist date, still include a visit entry with visit_date set to that date and fields set to "Not Documented".`
+    : '';
+  const skipPagesSection = skipPages.length > 0
+    ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from page numbers): ${skipPages.join(', ')}`
     : '';
 
-  return `You are a medical-legal document analyst. Analyze these ${docCount} medical document(s) and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
+  return `You are a medical-legal document analyst. Analyze these ${docCount} medical document(s)${chunkLabel} and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
 
 ${multiDocNote}
 
@@ -159,311 +325,480 @@ DEDUPLICATION RULE: If same date has BOTH a physician progress report AND an off
 
 CRITICAL DATE AND TIMELINE ACCURACY:
 - Pay EXTREME attention to dates. Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES — treat each as a separate visit.
-- Match ALL findings, exams, and imaging to the CORRECT visit date they were documented on.
-- NEVER include information from a future visit in an earlier visit.
-- NEVER reference events that haven't occurred yet chronologically.
-- If a location appears multiple times with different dates, create separate visit entries for each date.
+- Match ALL findings, exams, and imaging to the CORRECT visit date. Do not aggregate findings from multiple dates into a single entry.
+- Dates in document headers, note titles, and signature blocks indicate the SERVICE DATE.
+- The date of injury is NOT a visit date unless the patient was actually seen on that day.
 
-For EACH entry, extract:
-1. visit_date — BE PRECISE, critical for timeline accuracy (YYYY-MM-DD)
-2. rendering_provider — doctor's name only, not patient name
-3. practice_setting — specific facility/practice name AND visit type
-4. chief_complaint — brief statement of visit or report purpose
-5. hpi_summary — SUMMARIZE CONCISELY (3-5 sentences max): key symptoms and onset, injury date if applicable (only on first visit), pain scale, mechanism of injury, symptom progression, relevant PMH only if directly related. For expert reports: summarize expert's history review.
-6. physical_exam_findings — KEY PERTINENT POSITIVES ONLY: pain (location, severity), ROM limitations with measurements, deformity/scarring, neurological findings, swelling/tenderness. Do NOT list normal findings. Keep to 3-5 bullet points. Leave empty for expert reports with no physical exam.
-7. imaging_findings — EXACTLY as written, do NOT summarize, ONLY if performed or reviewed on THIS visit date
-8. lab_findings — ONLY if labs actually performed on THIS visit date, otherwise empty string
-9. impression_diagnosis — diagnoses with ICD-10 codes if provided (do NOT add codes if not in source). For expert reports: expert opinions, causation analysis, conclusions.
-10. treatment_plan — SUMMARIZE CONCISELY (2-4 key points): main interventions, medications, procedures, referrals, activity restrictions, follow-up timeline. For expert reports: recommendations, causation opinions, prognosis.
+PHYSICAL THERAPY INSTRUCTIONS:
+- Extract EACH PT session as a separate visit entry — one entry per date.
+- Include the specific facility name (e.g. "Dignity Health Physical Therapy - Las Vegas") in practice_setting.
+- Do not combine or summarize PT visits.
 
-Be thorough but CONCISE. Focus on clinically significant information only.
-
-CRITICAL FORMATTING RULES:
-- Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
-- If information is not available for a field, return an empty string "".
-- The icd10_codes field must always be an array of strings (can be empty []).
-
-Return ALL entries found across ALL documents as separate entries in the visits array.
-Also extract:
-- patient_name (consistent across documents)
-- case_number (consistent across documents)`;
+${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
+${checklistSection}
+${skipPagesSection}`;
 };
 
-// ─── Build Visit Index prompt ─────────────────────────────────────────────────
-const buildViPrompt = () =>
-  `You are reviewing medical-legal documents. Extract a complete list of every clinical encounter.
-
-For each encounter:
-- date: YYYY-MM-DD (date of service, NOT injury date)
-- provider: treating provider name and credentials
-- facility: facility or practice name
-- visit_type: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
-
-RULES:
-- Include every encounter — office, ER, surgery, PT/OT, radiology, C-4, IME, ambulance.
-- Each unique date + provider = separate entry.
-- Exclude administrative documents (authorization requests, fax covers, appointment reminders).
-- If date visible but no provider identifiable, use "Not Documented".
-Return all entries in the visits array.`;
-
-// ─── Call Bedrock with PDF base64 + prompt ────────────────────────────────────
-const callBedrock = async (pdfBase64, prompt, schema) => {
-  const payload = {
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 8000,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
-        { type: 'text', text: prompt + '\n\nRespond ONLY with valid JSON matching this schema:\n' + JSON.stringify(schema) }
-      ]
-    }]
-  };
-
-  const resp = await bedrock.send(new InvokeModelCommand({
-    modelId: BEDROCK_MODEL,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body: JSON.stringify(payload),
-  }));
-
-  const raw = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
-  const text = raw.content?.[0]?.text || '';
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('Bedrock returned no JSON. Raw: ' + text.slice(0, 300));
-  return JSON.parse(match[0]);
-};
-
-// ─── Response schema ──────────────────────────────────────────────────────────
-const FULL_SCHEMA = {
-  type: 'object',
-  properties: {
-    patient_name: { type: 'string' },
-    case_number: { type: 'string' },
-    visits: { type: 'array', items: { type: 'object', properties: {
-      visit_date: { type: 'string' },
-      rendering_provider: { type: 'string' },
-      practice_setting: { type: 'string' },
-      chief_complaint: { type: 'string' },
-      hpi_summary: { type: 'string' },
-      injury_date: { type: 'string' },
-      pain_scale: { type: 'string' },
-      symptom_progression: { type: 'string', enum: ['improved','same','worse','not_documented'] },
-      physical_exam_findings: { type: 'string' },
-      imaging_findings: { type: 'string' },
-      lab_findings: { type: 'string' },
-      impression_diagnosis: { type: 'string' },
-      icd10_codes: { type: 'array', items: { type: 'string' } },
-      treatment_plan: { type: 'string' }
-    }}}
-  }
-};
-
-const VI_SCHEMA = {
-  type: 'object',
-  properties: {
-    patient_name: { type: 'string' },
-    visits: { type: 'array', items: { type: 'object', properties: {
-      date: { type: 'string' },
-      provider: { type: 'string' },
-      facility: { type: 'string' },
-      visit_type: { type: 'string' }
-    }}}
-  }
-};
-
-// ─── START handler — called by frontend, kicks off async worker ───────────────
-const generateSummaryStartHandler = async (event) => {
-  try {
-    const body = JSON.parse(event.body || '{}');
-    const { doc_ids, patient_name = '', run_vi_prepass = true } = body;
-    const orgId = event._orgId;
-
-    if (!orgId) return response(400, { error: 'x-org-id required' });
-    if (!doc_ids?.length) return response(400, { error: 'doc_ids required' });
-
-    const job_id = randomUUID();
-    const now = new Date().toISOString();
-
-    await dynamo.send(new PutCommand({
-      TableName: JOBS_TABLE,
-      Item: { job_id, job_type: 'generate_summary', status: 'running', org_id: orgId, doc_ids, patient_name, run_vi_prepass, created_at: now, updated_at: now }
-    }));
-
-    await lambda.send(new InvokeCommand({
-      FunctionName: WORKER_FN,
-      InvocationType: 'Event',
-      Payload: JSON.stringify({ job_id, doc_ids, patient_name, org_id: orgId, run_vi_prepass }),
-    }));
-
-    console.log(`generateSummaryStart: job_id=${job_id} docs=${doc_ids.length}`);
-    return response(200, { job_id });
-  } catch (err) {
-    console.error('generateSummaryStart error:', err);
-    return response(500, { error: err.message });
-  }
-};
-
-// ─── WORKER — runs async, 900s timeout, no HTTP timeout ──────────────────────
+// ─── generateSummaryWorker — ported v56 generateSummary logic ────────────────
 const generateSummaryWorker = async (event) => {
-  const { job_id, doc_ids, patient_name = '', org_id, run_vi_prepass = true } = event;
+  const { job_id, doc_ids, patient_name = '', org_id } = event;
   console.log(`generateSummaryWorker start: job_id=${job_id} docs=${doc_ids?.length}`);
 
-  const markFailed = async (msg) => {
-    await dynamo.send(new UpdateCommand({
-      TableName: JOBS_TABLE, Key: { job_id },
-      UpdateExpression: 'SET #s = :s, error_message = :e, updated_at = :now',
-      ExpressionAttributeNames: { '#s': 'status' },
-      ExpressionAttributeValues: { ':s': 'failed', ':e': msg, ':now': new Date().toISOString() }
-    }));
-  };
-
   try {
-    // ── 1. Fetch all document records ──
-    const docRecords = [];
-    for (const id of doc_ids) {
-      const r = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: id } }));
-      if (r.Item) docRecords.push(r.Item);
-      else console.warn(`generateSummaryWorker: doc not found: ${id}`);
-    }
-    if (!docRecords.length) { await markFailed('No documents found in DynamoDB'); return; }
+    // Fetch all doc records from DynamoDB
+    const docRecords = await fetchDocRecords(doc_ids);
+    if (!docRecords.length) { await markJobFailed(job_id, 'No documents found in DynamoDB'); return; }
     console.log(`generateSummaryWorker: loaded ${docRecords.length} doc records`);
 
-    // ── 2. VI pre-pass — collect known visits (PARALLEL, concurrency=4) ──
+    // Build allParts — same logic as v56 but using DynamoDB records instead of frontend doc objects
+    // AWS swap #2: instead of awsProxy download-url, we resolve file_key directly from the record
+    const allParts = [];
+    for (const doc of docRecords) {
+      const partClassif = doc.page_classifications || [];
+      const allNonClinical = partClassif.length > 0 && partClassif.every(p => !p.is_clinical && !p.restored);
+      if (allNonClinical) {
+        console.log(`Skipping fully non-clinical part ${doc.aws_document_id} (${doc.file_name})`);
+        continue;
+      }
+      const fileKey = resolveFileKey(doc);
+      if (!fileKey) { console.warn(`No file_key for ${doc.aws_document_id}`); continue; }
+      allParts.push({
+        id: doc.aws_document_id,
+        label: doc.file_name || doc.aws_document_id,
+        file_key: fileKey,
+        file_size: doc.file_size || 0,
+        page_classifications: partClassif,
+      });
+    }
+
+    if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
+
+    let allVisits = [];
+    let patientName = patient_name;
+    let caseNumber = '';
+
+    // ── VI pre-pass (v53 parallel, VI_CONCURRENCY=4) ──────────────────────────
     let knownVisits = [];
-    if (run_vi_prepass) {
+    try {
       console.log('generateSummaryWorker: starting VI pre-pass (parallel)');
       const VI_CONCURRENCY = 4;
-      const viQueue = [...docRecords];
-      const viResults = new Array(docRecords.length).fill(null);
-
-      const runVIWorker = async () => {
-        while (viQueue.length > 0) {
-          const doc = viQueue.shift();
-          const idx = docRecords.indexOf(doc);
-          try {
-            const fileKey = resolveFileKey(doc);
-            if (!fileKey) { console.warn(`VI: no file_key for ${doc.aws_document_id}`); continue; }
-            const pdfBase64 = await fetchPdfBase64(fileKey);
-            const viResult = await callBedrock(pdfBase64, buildViPrompt(), VI_SCHEMA);
-            const visits = (viResult.visits || []).filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
-            viResults[idx] = visits.map(v => ({ ...v, source_doc_id: doc.aws_document_id }));
-            console.log(`VI: ${doc.file_name} -> ${visits.length} visits`);
-          } catch (e) {
-            console.warn(`VI pre-pass failed for ${doc.aws_document_id}: ${e.message}`);
-            viResults[idx] = [];
-          }
-        }
+      const viResults = new Array(allParts.length).fill(null);
+      const viSchema = {
+        type: 'object',
+        properties: {
+          patient_name: { type: 'string' },
+          visits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                date: { type: 'string' },
+                provider: { type: 'string' },
+                facility: { type: 'string' },
+                visit_type: { type: 'string' },
+                source_doc_id: { type: 'string' },
+                source_part_label: { type: 'string' },
+              },
+            },
+          },
+        },
       };
 
-      await Promise.all(Array.from({ length: Math.min(VI_CONCURRENCY, docRecords.length) }, runVIWorker));
-
-      for (const visits of viResults) {
-        if (visits) knownVisits = knownVisits.concat(visits);
+      for (let vi = 0; vi < allParts.length; vi += VI_CONCURRENCY) {
+        const viChunk = allParts.slice(vi, vi + VI_CONCURRENCY);
+        await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
+          const partIdx = vi + chunkIdx;
+          try {
+            // AWS swap #2: use file_key directly instead of download-url
+            const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema);
+            if (Array.isArray(viResult.visits)) {
+              viResults[partIdx] = viResult.visits
+                .filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date))
+                .map(v => ({ ...v, source_doc_id: viPart.id, source_part_label: viPart.label }));
+            }
+            console.log(`VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
+          } catch (e) {
+            console.warn(`VI pre-pass failed for ${viPart.id}: ${e.message}`);
+          }
+        }));
       }
 
-      // Deduplicate VI results
-      const seen = new Set();
+      for (const tagged of viResults) {
+        if (tagged) knownVisits = knownVisits.concat(tagged);
+      }
+      // Deduplicate knownVisits by date+provider
+      const viSeen = new Set();
       knownVisits = knownVisits.filter(v => {
         const k = `${v.date}|${(v.provider || '').toLowerCase()}`;
-        if (seen.has(k)) return false;
-        seen.add(k); return true;
+        if (viSeen.has(k)) return false;
+        viSeen.add(k);
+        return true;
       });
+      // Exclude administrative visit types
+      knownVisits = knownVisits.filter(v =>
+        !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
+      );
       console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
+    } catch (viErr) {
+      console.warn('VI pre-pass failed (non-fatal):', viErr.message);
+      knownVisits = [];
     }
 
-    // ── 3. Main extraction pass (PARALLEL, concurrency=4) ──
-    let allVisits = [];
-    let detectedPatient = patient_name;
-    let detectedCase = '';
-    const totalDocs = docRecords.length;
-    const MAIN_CONCURRENCY = 4;
-    const mainQueue = docRecords.map((doc, i) => ({ doc, i }));
-    const mainResults = new Array(docRecords.length).fill(null);
-    let detectedPatientRef = { value: patient_name };
-    let detectedCaseRef = { value: '' };
+    // ── Build batches (BATCH_SIZE=2, BATCH_OVERLAP=1) — identical to v56 ──────
+    const BATCH_SIZE = 2;
+    const BATCH_OVERLAP = 1;
+    const batches = [];
+    for (let start = 0; start < allParts.length; start += BATCH_SIZE - BATCH_OVERLAP) {
+      const batchStart = batches.length === 0 ? 0 : start;
+      batches.push(allParts.slice(batchStart, batchStart + BATCH_SIZE));
+      if (batchStart + BATCH_SIZE >= allParts.length) break;
+    }
+    const totalBatches = batches.length;
+    const BATCH_CONCURRENCY = 3;
+    console.log(`generateSummaryWorker: ${totalBatches} batches, concurrency=${BATCH_CONCURRENCY}`);
 
-    const runMainWorker = async () => {
-      while (mainQueue.length > 0) {
-        const { doc, i } = mainQueue.shift();
-        try {
-          const fileKey = resolveFileKey(doc);
-          if (!fileKey) { console.warn(`Main: no file_key for ${doc.aws_document_id}`); continue; }
-
-          // Build skip-pages instruction from page_classifications
-          const skipPages = (doc.page_classifications || [])
-            .filter(p => !p.is_clinical && !p.restored)
-            .map(p => p.page);
-          const skipNote = skipPages.length
-            ? `\nSKIP THESE PAGES (non-clinical/administrative, do not extract visits from them): ${skipPages.join(', ')}`
-            : '';
-
-          // Inject known visits checklist
-          const checklistNote = knownVisits.length
-            ? `\nKNOWN VISITS CHECKLIST (from pre-pass — ensure all are represented):\n` +
-              knownVisits.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n')
-            : '';
-
-          const prompt = buildPrompt(1, totalDocs) + checklistNote + skipNote;
-          console.log(`Main pass [${i+1}/${totalDocs}]: ${doc.file_name} skipPages=${skipPages.length}`);
-
-          const pdfBase64 = await fetchPdfBase64(fileKey);
-          const result = await callBedrock(pdfBase64, prompt, FULL_SCHEMA);
-
-          if (!detectedPatientRef.value && result.patient_name) detectedPatientRef.value = result.patient_name;
-          if (!detectedCaseRef.value && result.case_number) detectedCaseRef.value = result.case_number;
-
-          const visits = Array.isArray(result.visits) ? result.visits : [];
-          mainResults[i] = visits.map(v => ({ ...v, _source_doc: doc.aws_document_id }));
-          console.log(`Main pass [${i+1}/${totalDocs}]: ${visits.length} visits extracted`);
-        } catch (e) {
-          console.error(`Main pass failed for ${doc.aws_document_id}: ${e.message}`);
-          mainResults[i] = [];
-        }
-      }
+    const fullSchema = {
+      type: 'object',
+      properties: {
+        patient_name: { type: 'string' },
+        case_number: { type: 'string' },
+        visits: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              visit_date: { type: 'string' },
+              rendering_provider: { type: 'string' },
+              practice_setting: { type: 'string' },
+              chief_complaint: { type: 'string' },
+              hpi_summary: { type: 'string' },
+              injury_date: { type: 'string' },
+              pain_scale: { type: 'string' },
+              symptom_progression: { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
+              physical_exam_findings: { type: 'string' },
+              imaging_findings: { type: 'string' },
+              lab_findings: { type: 'string' },
+              impression_diagnosis: { type: 'string' },
+              icd10_codes: { type: 'array', items: { type: 'string' } },
+              treatment_plan: { type: 'string' },
+            },
+          },
+        },
+      },
     };
 
-    await Promise.all(Array.from({ length: Math.min(MAIN_CONCURRENCY, docRecords.length) }, runMainWorker));
+    const simpleSchema = {
+      type: 'object',
+      properties: {
+        patient_name: { type: 'string' },
+        case_number: { type: 'string' },
+        visits: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              visit_date: { type: 'string' },
+              rendering_provider: { type: 'string' },
+              practice_setting: { type: 'string' },
+              hpi_summary: { type: 'string' },
+              impression_diagnosis: { type: 'string' },
+              treatment_plan: { type: 'string' },
+              icd10_codes: { type: 'array', items: { type: 'string' } },
+            },
+          },
+        },
+      },
+    };
 
-    for (const visits of mainResults) {
-      if (visits) allVisits = allVisits.concat(visits);
+    // ── runBatch — AWS swap #1: callBedrock instead of InvokeLLM ─────────────
+    const runBatch = async (batch, batchIndex, knownVisitsChecklist = []) => {
+      // AWS swap #2: use file_key instead of download-url
+      const fileKeys = batch.map(p => p.file_key).filter(Boolean);
+      const skipPages = batch.flatMap(p =>
+        (p.page_classifications || []).filter(pc => !pc.is_clinical).map(pc => pc.page)
+      );
+      if (fileKeys.length === 0) {
+        console.warn(`Batch ${batchIndex + 1}: no valid file keys, skipping`);
+        return null;
+      }
+      const batchLabel = totalBatches > 1 ? ` [Batch ${batchIndex + 1} of ${totalBatches}]` : '';
+      let result;
+      try {
+        // AWS swap #1: callBedrock instead of InvokeLLM
+        result = await callBedrock(
+          fileKeys,
+          buildPrompt('', allParts.length, batchLabel, knownVisitsChecklist, skipPages),
+          fullSchema
+        );
+      } catch (llmErr) {
+        if (/invalid json|json|delimiter|expecting/i.test(llmErr.message || '')) {
+          console.warn(`Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`);
+          try {
+            result = await callBedrock(
+              fileKeys,
+              buildPrompt('', allParts.length, batchLabel + ' [retry]', knownVisitsChecklist, skipPages),
+              simpleSchema
+            );
+          } catch (retryErr) {
+            console.error(`Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
+            return null;
+          }
+        } else {
+          throw llmErr;
+        }
+      }
+      return result;
+    };
+
+    // ── Main pass: process batches BATCH_CONCURRENCY at a time (identical to v56) ──
+    for (let i = 0; i < totalBatches; i += BATCH_CONCURRENCY) {
+      const chunk = batches.slice(i, i + BATCH_CONCURRENCY);
+      const chunkEnd = Math.min(i + BATCH_CONCURRENCY, totalBatches);
+      console.log(`Main pass: batches ${i + 1}-${chunkEnd} of ${totalBatches}`);
+      const chunkResults = await Promise.all(
+        chunk.map((batch, j) => runBatch(batch, i + j, knownVisits))
+      );
+      for (const result of chunkResults) {
+        if (!result) continue;
+        if (!patientName && result.patient_name) patientName = result.patient_name;
+        if (!caseNumber && result.case_number) caseNumber = result.case_number;
+        const clean = sanitizeVisits(result.visits, patientName);
+        allVisits = allVisits.concat(clean);
+      }
     }
-    detectedPatient = detectedPatientRef.value;
-    detectedCase = detectedCaseRef.value;
 
-    // ── 4. Sanitize + deduplicate ──
-    const sanitized = sanitizeVisits(allVisits, detectedPatient);
-    const deduped = deduplicateVisits(sanitized);
+    // ── Dedicated C-4 pass (identical to v56) ─────────────────────────────────
+    try {
+      console.log('generateSummaryWorker: running dedicated C-4 pass');
+      const c4FileKeys = allParts.map(p => p.file_key).filter(Boolean);
+      if (c4FileKeys.length > 0) {
+        const C4_BATCH = 3;
+        let c4Entry = null;
+        const c4Schema = {
+          type: 'object',
+          properties: {
+            found: { type: 'boolean' },
+            visit_date: { type: 'string' },
+            rendering_provider: { type: 'string' },
+            facility: { type: 'string' },
+            diagnosis: { type: 'string' },
+            treatment: { type: 'string' },
+            body_part: { type: 'string' },
+          },
+        };
+        const c4Prompt = `You are reviewing medical-legal documents to find a WCB Form C-4 (Workers' Compensation Board Employee's Claim for Compensation / Report of Initial Treatment).
 
-    // ── 5. Sort chronologically ──
-    deduped.sort((a, b) => {
+TASK: Search the provided documents for an actual physical C-4 form. You will know it is a C-4 form if you see ANY of these identifiers in the document text:
+- "FORM C-4" or "Form C-4"
+- "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT"
+- "EMPLOYEE'S CLAIM FOR COMPENSATION" combined with structured form fields
+
+If you find a C-4 form, extract ONLY the following fields directly from the form itself. Do NOT infer or extrapolate from other documents unless a field is physically illegible on the form.
+
+Fields to extract from the C-4 form:
+- found: true (set to false if no C-4 form is present in these documents)
+- visit_date: the date the form was completed or the examination date (from the form's date field, format YYYY-MM-DD)
+- rendering_provider: the name of the treating physician or health care provider who COMPLETED this form and provided the initial treatment (typically found in a "Health Care Provider" or "Treating Physician" field near the top or middle of the form, NOT the orthopedic or follow-up surgeon referenced elsewhere in the record). On Nevada C-4 forms this is usually the ER physician, urgent care doctor, or first-contact provider. If the form was completed at a hospital emergency department, use the ER physician's name.
+- facility: the facility name where treatment was provided (e.g. "Centennial Hills Hospital Emergency Room")
+- diagnosis: the diagnosis or nature of injury as written on the form
+- treatment: the treatment provided as written on the form
+- body_part: the part(s) of body injured as written on the form
+
+If you find a C-4 form but a field is physically illegible or blank on the form, return an empty string for that field -- do NOT fill it in from other documents.
+If NO C-4 form is present in these documents, set found: false and leave all other fields empty.`;
+
+        for (let ci = 0; ci < c4FileKeys.length; ci += C4_BATCH) {
+          const c4Batch = c4FileKeys.slice(ci, ci + C4_BATCH);
+          // AWS swap #1: callBedrock instead of InvokeLLM
+          const c4Result = await callBedrock(c4Batch, c4Prompt, c4Schema);
+          if (c4Result.found === true && c4Result.visit_date) {
+            c4Entry = c4Result;
+            break;
+          }
+        }
+
+        if (c4Entry) {
+          const c4Visit = {
+            visit_date: c4Entry.visit_date || '',
+            rendering_provider: toTitleCase(c4Entry.rendering_provider || ''),
+            practice_setting: c4Entry.facility
+              ? `C-4 Workers' Compensation Report (${c4Entry.facility})`
+              : "C-4 Workers' Compensation Report",
+            chief_complaint: '',
+            hpi_summary: '',
+            injury_date: '',
+            pain_scale: '',
+            symptom_progression: 'not_documented',
+            physical_exam_findings: '',
+            imaging_findings: '',
+            lab_findings: '',
+            impression_diagnosis: [c4Entry.diagnosis, c4Entry.body_part ? `Body part: ${c4Entry.body_part}` : ''].filter(Boolean).join('. '),
+            icd10_codes: [],
+            treatment_plan: c4Entry.treatment || '',
+          };
+          allVisits = allVisits.filter(v => {
+            const s = (v.practice_setting || '').toLowerCase();
+            return !s.includes('c-4') && !s.includes("workers' compensation report") && !s.includes('wcb');
+          });
+          allVisits.push(c4Visit);
+          console.log('C-4 dedicated pass: found at', c4Visit.visit_date);
+        } else {
+          const beforeCount = allVisits.length;
+          allVisits = allVisits.filter(v => {
+            const s = (v.practice_setting || '').toLowerCase();
+            return !s.includes('c-4') && !s.includes("workers' compensation report") && !s.includes('wcb');
+          });
+          const stripped = beforeCount - allVisits.length;
+          if (stripped > 0) console.log(`C-4 pass: no form found -- stripped ${stripped} hallucinated C-4 entries`);
+        }
+      }
+    } catch (c4Err) {
+      console.warn('C-4 dedicated pass failed (non-fatal):', c4Err.message);
+    }
+
+    // ── Merge + deduplicate + sort (identical to v56) ─────────────────────────
+    allVisits = deduplicateVisits(allVisits);
+    allVisits.sort((a, b) => {
       if (!a.visit_date) return 1;
       if (!b.visit_date) return -1;
-      return new Date(a.visit_date + 'T00:00:00') - new Date(b.visit_date + 'T00:00:00');
+      const dateDiff = new Date((a.visit_date || '') + 'T00:00:00') - new Date((b.visit_date || '') + 'T00:00:00');
+      if (dateDiff !== 0) return dateDiff;
+      const aIsC4 = (a.practice_setting || '').toLowerCase().includes('c-4');
+      const bIsC4 = (b.practice_setting || '').toLowerCase().includes('c-4');
+      if (aIsC4 && !bIsC4) return -1;
+      if (!aIsC4 && bIsC4) return 1;
+      return 0;
     });
 
-    console.log(`generateSummaryWorker: ${allVisits.length} raw -> ${deduped.length} after sanitize/dedup`);
+    // ── Recovery pass (identical to v56) ──────────────────────────────────────
+    if (knownVisits.length > 0) {
+      const foundDates = new Set(allVisits.map(v => (v.visit_date || '').trim()).filter(Boolean));
+      const missingVisits = knownVisits.filter(v => {
+        if (!v.date) return false;
+        if (/physical.?therapy|\bPT\b|\bOT\b|occupational.?therapy/i.test(v.visit_type || '')) return false;
+        return !foundDates.has(v.date);
+      });
 
-    // ── 6. Write result ──
-    await dynamo.send(new UpdateCommand({
-      TableName: JOBS_TABLE, Key: { job_id },
-      UpdateExpression: 'SET #s = :s, result = :r, updated_at = :now',
-      ExpressionAttributeNames: { '#s': 'status' },
-      ExpressionAttributeValues: {
-        ':s': 'complete',
-        ':r': { patient_name: detectedPatient, case_number: detectedCase, visits: deduped, doc_count: docRecords.length, visit_count: deduped.length },
-        ':now': new Date().toISOString()
+      if (missingVisits.length > 0) {
+        console.log(`Recovery pass: ${missingVisits.length} missing visits:`, missingVisits.map(v => v.date));
+        const recSchema = {
+          type: 'object',
+          properties: {
+            visits: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  visit_date: { type: 'string' },
+                  rendering_provider: { type: 'string' },
+                  practice_setting: { type: 'string' },
+                  chief_complaint: { type: 'string' },
+                  hpi_summary: { type: 'string' },
+                  injury_date: { type: 'string' },
+                  pain_scale: { type: 'string' },
+                  symptom_progression: { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
+                  physical_exam_findings: { type: 'string' },
+                  imaging_findings: { type: 'string' },
+                  lab_findings: { type: 'string' },
+                  impression_diagnosis: { type: 'string' },
+                  icd10_codes: { type: 'array', items: { type: 'string' } },
+                  treatment_plan: { type: 'string' },
+                },
+              },
+            },
+          },
+        };
+
+        // Group by source_doc_id (v51: target exact part, not positional guess)
+        const bySourceDoc = {};
+        for (const mv of missingVisits) {
+          const srcId = mv.source_doc_id || 'unknown';
+          if (!bySourceDoc[srcId]) bySourceDoc[srcId] = [];
+          bySourceDoc[srcId].push(mv);
+        }
+        const recGroups = Object.entries(bySourceDoc);
+        const REC_CONCURRENCY = 3;
+
+        for (let rg = 0; rg < recGroups.length; rg += REC_CONCURRENCY) {
+          const recChunk = recGroups.slice(rg, rg + REC_CONCURRENCY);
+          await Promise.all(recChunk.map(async ([srcDocId, mvGroup]) => {
+            const srcPart = allParts.find(p => p.id === srcDocId);
+            const recFileKey = srcPart?.file_key || allParts[0]?.file_key;
+            if (!recFileKey) return;
+            const visitList = mvGroup.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''}`).join('\n');
+            const recPrompt = `You are reviewing medical-legal documents. A specific clinical visit is known to exist in these records but was missed in the prior extraction pass.
+
+TARGET VISIT${mvGroup.length > 1 ? 'S' : ''}:
+${visitList}
+
+Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided document and extract full clinical details for ${mvGroup.length > 1 ? 'each one' : 'it'}. If you cannot find it, return an empty visits array. Do not extract any other visits.`;
+            try {
+              // AWS swap #1: callBedrock instead of InvokeLLM
+              const recResult = await callBedrock([recFileKey], recPrompt, recSchema);
+              if (Array.isArray(recResult.visits) && recResult.visits.length > 0) {
+                const recClean = sanitizeVisits(recResult.visits, patientName);
+                allVisits = allVisits.concat(recClean);
+                console.log(`Recovery: recovered ${recClean.length} visit(s) from ${srcDocId}`);
+              }
+            } catch (recErr) {
+              console.warn(`Recovery failed for ${srcDocId}:`, recErr.message);
+            }
+          }));
+        }
+
+        // Final dedup after recovery
+        allVisits = deduplicateVisits(allVisits);
+        allVisits.sort((a, b) => {
+          if (!a.visit_date) return 1;
+          if (!b.visit_date) return -1;
+          return new Date((a.visit_date || '') + 'T00:00:00') - new Date((b.visit_date || '') + 'T00:00:00');
+        });
       }
-    }));
+    }
 
-    console.log(`generateSummaryWorker complete: job_id=${job_id} visits=${deduped.length}`);
+    console.log(`generateSummaryWorker complete: ${allVisits.length} visits`);
+
+    await markJobComplete(job_id, {
+      patient_name: patientName || '',
+      case_number: caseNumber || '',
+      visits: allVisits,
+      doc_count: docRecords.length,
+      visit_count: allVisits.length,
+    });
+
   } catch (err) {
     console.error('generateSummaryWorker fatal:', err);
-    await markFailed(err.message);
+    await markJobFailed(job_id, err.message);
   }
 };
 
-// ─── Entry point (handles both HTTP and direct Lambda invoke) ─────────────────
+// ─── generateSummaryStart — kick off job + invoke worker async ────────────────
+const generateSummaryStartHandler = async (event) => {
+  const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
+  const { doc_ids, patient_name = '', org_id } = body;
+
+  if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
+
+  const job_id = randomUUID();
+  await dynamo.send(new UpdateCommand({
+    TableName: JOBS_TABLE, Key: { job_id },
+    UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':s': 'running', ':now': new Date().toISOString(), ':t': 'generate_summary' },
+  }));
+
+  // Invoke worker asynchronously
+  await lambda.send(new InvokeCommand({
+    FunctionName: WORKER_FN,
+    InvocationType: 'Event',
+    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id })),
+  }));
+
+  console.log(`generateSummaryStart: job_id=${job_id} docs=${doc_ids.length}`);
+  return httpResponse(200, { job_id });
+};
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
 const generateSummaryHandler = async (event) => {
   if (event.job_id && event.doc_ids) {
     await generateSummaryWorker(event);
