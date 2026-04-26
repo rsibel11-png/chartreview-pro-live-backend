@@ -831,6 +831,25 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
       } // end else if (missingVisits.length > 0)
     } // end if (knownVisits.length > 0)
 
+    // ── Checklist enforcement: strip any visit whose date is not in the VI checklist ──
+    // This is a hard post-processing filter that catches LLM hallucinations of injury dates
+    // or referenced dates that were never actual visits in the documents.
+    if (knownVisits.length > 0) {
+      const checklistDates = new Set(knownVisits.map(v => v.date));
+      const beforeEnforce = allVisits.length;
+      allVisits = allVisits.filter(v => {
+        const d = (v.visit_date || '').trim();
+        if (!d) return true; // keep undated visits (rare edge case)
+        if (checklistDates.has(d)) return true;
+        console.log(`CHECKLIST_ENFORCE: stripped visit with date ${d} -- not in VI checklist`);
+        return false;
+      });
+      const stripped = beforeEnforce - allVisits.length;
+      if (stripped > 0) {
+        console.log(`CHECKLIST_ENFORCE: removed ${stripped} visit(s) with dates not in checklist`);
+      }
+    }
+
     console.log(`generateSummaryWorker complete: ${allVisits.length} visits`);
     if (allVisits.length === 0 && knownVisits.length > 0) {
       console.warn(`generateSummaryWorker: WARNING -- 0 visits written despite ${knownVisits.length} VI entries. Possible Bedrock throttle/timeout on all batches.`);
