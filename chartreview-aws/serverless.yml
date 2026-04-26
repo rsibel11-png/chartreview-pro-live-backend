@@ -370,6 +370,37 @@ functions:
           method: delete
           cors: true
 
+
+  buildVisitIndex:
+    handler: src/handlers/build_visit_index.buildVisitIndexHandler
+    timeout: 600
+    memorySize: 1024
+    events:
+      - http:
+          path: /visit-index/build
+          method: post
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
+      - http:
+          path: /visit-index/build
+          method: options
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - x-api-key
+              - x-org-id
+            allowCredentials: false
+    environment:
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      S3_BUCKET: chartreview-documents-prod
+      API_KEY: ${env:API_KEY, 'ChartReview#2026$ProdKey!Rx'}
+
 resources:
   Resources:
     GatewayResponseDefault4XX:
