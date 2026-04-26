@@ -261,7 +261,7 @@ const buildVisitIndexPrompt = () => {
   return `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter date, provider name, and facility/location.
 
 For each clinical encounter found, extract:
-1. date - the date of service (YYYY-MM-DD format). PRIMARY SOURCE: the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). NEVER use the injury date or dates mentioned inside the HPI narrative. Vitals table dates confirm the visit date — use them if no header is visible.
+1. date - the date of service (YYYY-MM-DD format). PRIMARY SOURCE: the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). The vitals table Date column also confirms the visit date. NEVER use the injury date or any date mentioned inside the HPI narrative as the visit date — the HPI often says things like "injury date 10/31/2022" which is NOT the visit date.
 2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
 3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
 4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
@@ -270,7 +270,8 @@ RULES:
 - Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
 - Each unique date + provider combination is a separate entry.
 - Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers).
-- Do NOT include the date of injury as a visit date unless the patient was actually seen that day.
+- CRITICAL: The HPI section often mentions the date of injury (e.g. "injury date 10/31/2022") -- this is NOT the visit date. The visit date is ALWAYS in the document header (e.g. "Visit Note - November 7, 2022") or vitals table.
+- Do NOT include the date of injury as a visit date unless confirmed by a document header on that exact date.
 - Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
 
