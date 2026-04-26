@@ -482,6 +482,7 @@ const generateSummaryWorker = async (event) => {
         !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
       );
       console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
+      console.log('VI checklist dates:', JSON.stringify(knownVisits.map(v => ({ date: v.date, provider: v.provider, type: v.visit_type }))));
     } catch (viErr) {
       console.warn('VI pre-pass failed (non-fatal):', viErr.message);
       knownVisits = [];
