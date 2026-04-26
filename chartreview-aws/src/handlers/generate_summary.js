@@ -28,7 +28,7 @@ const JOBS_TABLE    = process.env.JOBS_TABLE            || 'chartreview-jobs-pro
 const BEDROCK_MODELS = [
   'us.anthropic.claude-sonnet-4-6-20250514-v1:0', // primary: cross-region Sonnet 4.6
   'us.anthropic.claude-sonnet-4-5-20251001-v1:0', // fallback: cross-region Sonnet 4.5
-  'us.anthropic.claude-3-5-sonnet-20241022-v1:0', // final fallback: cross-region 3.5 Sonnet
+  'us.anthropic.claude-haiku-4-5-20251001-v1:0',  // final fallback: cross-region Haiku 4.5
 ];
 const WORKER_FN     = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
 
