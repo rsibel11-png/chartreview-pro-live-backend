@@ -209,7 +209,7 @@ const sanitizeVisits = (visits, patientName) => {
     const sorted = [...c4Visits].sort((a, b) => {
       if (!a.visit_date) return 1;
       if (!b.visit_date) return -1;
-      return new Date(a.visit_date + 'T00:00:00') - new Date(b.visit_date + 'T00:00:00');
+      return (a.visit_date||'').localeCompare(b.visit_date||'');
     });
     const earliest = sorted[0];
     const toRemove = new Set(sorted.slice(1).map(v => v));
@@ -706,7 +706,7 @@ If NO C-4 form is present in these documents, set found: false and leave all oth
     allVisits.sort((a, b) => {
       if (!a.visit_date) return 1;
       if (!b.visit_date) return -1;
-      const dateDiff = new Date((a.visit_date || '') + 'T00:00:00') - new Date((b.visit_date || '') + 'T00:00:00');
+      const dateDiff = (a.visit_date||'').localeCompare(b.visit_date||'');
       if (dateDiff !== 0) return dateDiff;
       const aIsC4 = (a.practice_setting || '').toLowerCase().includes('c-4');
       const bIsC4 = (b.practice_setting || '').toLowerCase().includes('c-4');
@@ -799,7 +799,7 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
         allVisits.sort((a, b) => {
           if (!a.visit_date) return 1;
           if (!b.visit_date) return -1;
-          return new Date((a.visit_date || '') + 'T00:00:00') - new Date((b.visit_date || '') + 'T00:00:00');
+          return (a.visit_date||'').localeCompare(b.visit_date||'');
         });
       } // end else if (missingVisits.length > 0)
     } // end if (knownVisits.length > 0)
