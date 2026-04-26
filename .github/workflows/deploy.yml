@@ -50,6 +50,40 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+
+      - name: Create generateSummaryStart Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-generateSummaryStart --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-generateSummaryStart \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/generate_summary.generateSummaryStart \
+            --timeout 29 \
+            --memory-size 512 \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create generateSummaryWorker Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-generateSummaryWorker --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-generateSummaryWorker \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/generate_summary.generateSummaryWorker \
+            --timeout 900 \
+            --memory-size 1024 \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
       - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
@@ -80,6 +114,8 @@ jobs:
             "chartreview-pro-prod-getSummary"
             "chartreview-pro-prod-updateSummary"
             "chartreview-pro-prod-deleteSummary"
+            "chartreview-pro-prod-generateSummaryStart"
+            "chartreview-pro-prod-generateSummaryWorker"
           )
           for FUNC in "${FUNCTIONS[@]}"; do
             echo "Updating $FUNC..."
