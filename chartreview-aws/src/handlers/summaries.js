@@ -19,7 +19,7 @@ const createHandler = async (event) => {
     const aws_summary_id = crypto.randomUUID();
     const now = new Date().toISOString();
     const item = {
-      aws_summary_id,
+      aws_summary_id: data.aws_summary_id || aws_summary_id, // honour frontend-supplied ID
       created_at: now,
       updated_at: now,
       status: data.status || 'draft',
@@ -136,12 +136,18 @@ const listByPatientHandler = async (event) => {
 const listAllHandler = async (event) => {
   try {
     console.log('[listAll] TABLE:', TABLE);
-    console.log('[listAll] event.headers:', JSON.stringify(event.headers));
-    const result = await dynamo.send(new ScanCommand({ TableName: TABLE }));
-    console.log('[listAll] got', result.Items?.length, 'items');
-    const resp = response(200, { summaries: result.Items || [] });
-    console.log('[listAll] response statusCode:', resp.statusCode);
-    return resp;
+    // Paginate through all items -- DynamoDB scan is limited to 1MB per call
+    let items = [];
+    let lastKey = undefined;
+    do {
+      const params = { TableName: TABLE };
+      if (lastKey) params.ExclusiveStartKey = lastKey;
+      const result = await dynamo.send(new ScanCommand(params));
+      items = items.concat(result.Items || []);
+      lastKey = result.LastEvaluatedKey;
+    } while (lastKey);
+    console.log('[listAll] got', items.length, 'items (paginated)');
+    return response(200, { summaries: items });
   } catch (err) {
     console.error('[listAll] ERROR:', err.message, err.stack);
     return response(500, { error: err.message });
