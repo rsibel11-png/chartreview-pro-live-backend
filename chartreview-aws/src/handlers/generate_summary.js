@@ -1,4 +1,4 @@
-// Updated: 2026-04-25 — Gamma summary generation: pure AWS Bedrock, no Base44 relay
+// Updated: 2026-04-26 — Parallelized VI pre-pass (concurrency=4) and main pass (concurrency=4)
 // Prompt ported directly from original chartreview-pro MedicalSummaries.jsx (battle-tested)
 
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
@@ -329,23 +329,39 @@ const generateSummaryWorker = async (event) => {
     if (!docRecords.length) { await markFailed('No documents found in DynamoDB'); return; }
     console.log(`generateSummaryWorker: loaded ${docRecords.length} doc records`);
 
-    // ── 2. VI pre-pass — collect known visits ──
+    // ── 2. VI pre-pass — collect known visits (PARALLEL, concurrency=4) ──
     let knownVisits = [];
     if (run_vi_prepass) {
-      console.log('generateSummaryWorker: starting VI pre-pass');
-      for (const doc of docRecords) {
-        try {
-          const fileKey = resolveFileKey(doc);
-          if (!fileKey) { console.warn(`VI: no file_key for ${doc.aws_document_id}`); continue; }
-          const pdfBase64 = await fetchPdfBase64(fileKey);
-          const viResult = await callBedrock(pdfBase64, buildViPrompt(), VI_SCHEMA);
-          const visits = (viResult.visits || []).filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
-          knownVisits = knownVisits.concat(visits.map(v => ({ ...v, source_doc_id: doc.aws_document_id })));
-          console.log(`VI: ${doc.file_name} -> ${visits.length} visits`);
-        } catch (e) {
-          console.warn(`VI pre-pass failed for ${doc.aws_document_id}: ${e.message}`);
+      console.log('generateSummaryWorker: starting VI pre-pass (parallel)');
+      const VI_CONCURRENCY = 4;
+      const viQueue = [...docRecords];
+      const viResults = new Array(docRecords.length).fill(null);
+
+      const runVIWorker = async () => {
+        while (viQueue.length > 0) {
+          const doc = viQueue.shift();
+          const idx = docRecords.indexOf(doc);
+          try {
+            const fileKey = resolveFileKey(doc);
+            if (!fileKey) { console.warn(`VI: no file_key for ${doc.aws_document_id}`); continue; }
+            const pdfBase64 = await fetchPdfBase64(fileKey);
+            const viResult = await callBedrock(pdfBase64, buildViPrompt(), VI_SCHEMA);
+            const visits = (viResult.visits || []).filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
+            viResults[idx] = visits.map(v => ({ ...v, source_doc_id: doc.aws_document_id }));
+            console.log(`VI: ${doc.file_name} -> ${visits.length} visits`);
+          } catch (e) {
+            console.warn(`VI pre-pass failed for ${doc.aws_document_id}: ${e.message}`);
+            viResults[idx] = [];
+          }
         }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(VI_CONCURRENCY, docRecords.length) }, runVIWorker));
+
+      for (const visits of viResults) {
+        if (visits) knownVisits = knownVisits.concat(visits);
       }
+
       // Deduplicate VI results
       const seen = new Set();
       knownVisits = knownVisits.filter(v => {
@@ -356,48 +372,64 @@ const generateSummaryWorker = async (event) => {
       console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
     }
 
-    // ── 3. Main extraction pass ──
+    // ── 3. Main extraction pass (PARALLEL, concurrency=4) ──
     let allVisits = [];
     let detectedPatient = patient_name;
     let detectedCase = '';
     const totalDocs = docRecords.length;
+    const MAIN_CONCURRENCY = 4;
+    const mainQueue = docRecords.map((doc, i) => ({ doc, i }));
+    const mainResults = new Array(docRecords.length).fill(null);
+    let detectedPatientRef = { value: patient_name };
+    let detectedCaseRef = { value: '' };
 
-    for (let i = 0; i < docRecords.length; i++) {
-      const doc = docRecords[i];
-      try {
-        const fileKey = resolveFileKey(doc);
-        if (!fileKey) { console.warn(`Main: no file_key for ${doc.aws_document_id}`); continue; }
+    const runMainWorker = async () => {
+      while (mainQueue.length > 0) {
+        const { doc, i } = mainQueue.shift();
+        try {
+          const fileKey = resolveFileKey(doc);
+          if (!fileKey) { console.warn(`Main: no file_key for ${doc.aws_document_id}`); continue; }
 
-        // Build skip-pages instruction from page_classifications
-        const skipPages = (doc.page_classifications || [])
-          .filter(p => !p.is_clinical && !p.restored)
-          .map(p => p.page);
-        const skipNote = skipPages.length
-          ? `\nSKIP THESE PAGES (non-clinical/administrative, do not extract visits from them): ${skipPages.join(', ')}`
-          : '';
+          // Build skip-pages instruction from page_classifications
+          const skipPages = (doc.page_classifications || [])
+            .filter(p => !p.is_clinical && !p.restored)
+            .map(p => p.page);
+          const skipNote = skipPages.length
+            ? `\nSKIP THESE PAGES (non-clinical/administrative, do not extract visits from them): ${skipPages.join(', ')}`
+            : '';
 
-        // Inject known visits checklist
-        const checklistNote = knownVisits.length
-          ? `\nKNOWN VISITS CHECKLIST (from pre-pass — ensure all are represented):\n` +
-            knownVisits.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n')
-          : '';
+          // Inject known visits checklist
+          const checklistNote = knownVisits.length
+            ? `\nKNOWN VISITS CHECKLIST (from pre-pass — ensure all are represented):\n` +
+              knownVisits.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n')
+            : '';
 
-        const prompt = buildPrompt(1, totalDocs) + checklistNote + skipNote;
-        console.log(`Main pass [${i+1}/${totalDocs}]: ${doc.file_name} skipPages=${skipPages.length}`);
+          const prompt = buildPrompt(1, totalDocs) + checklistNote + skipNote;
+          console.log(`Main pass [${i+1}/${totalDocs}]: ${doc.file_name} skipPages=${skipPages.length}`);
 
-        const pdfBase64 = await fetchPdfBase64(fileKey);
-        const result = await callBedrock(pdfBase64, prompt, FULL_SCHEMA);
+          const pdfBase64 = await fetchPdfBase64(fileKey);
+          const result = await callBedrock(pdfBase64, prompt, FULL_SCHEMA);
 
-        if (!detectedPatient && result.patient_name) detectedPatient = result.patient_name;
-        if (!detectedCase && result.case_number) detectedCase = result.case_number;
+          if (!detectedPatientRef.value && result.patient_name) detectedPatientRef.value = result.patient_name;
+          if (!detectedCaseRef.value && result.case_number) detectedCaseRef.value = result.case_number;
 
-        const visits = Array.isArray(result.visits) ? result.visits : [];
-        allVisits = allVisits.concat(visits.map(v => ({ ...v, _source_doc: doc.aws_document_id })));
-        console.log(`Main pass [${i+1}/${totalDocs}]: ${visits.length} visits extracted`);
-      } catch (e) {
-        console.error(`Main pass failed for ${doc.aws_document_id}: ${e.message}`);
+          const visits = Array.isArray(result.visits) ? result.visits : [];
+          mainResults[i] = visits.map(v => ({ ...v, _source_doc: doc.aws_document_id }));
+          console.log(`Main pass [${i+1}/${totalDocs}]: ${visits.length} visits extracted`);
+        } catch (e) {
+          console.error(`Main pass failed for ${doc.aws_document_id}: ${e.message}`);
+          mainResults[i] = [];
+        }
       }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(MAIN_CONCURRENCY, docRecords.length) }, runMainWorker));
+
+    for (const visits of mainResults) {
+      if (visits) allVisits = allVisits.concat(visits);
     }
+    detectedPatient = detectedPatientRef.value;
+    detectedCase = detectedCaseRef.value;
 
     // ── 4. Sanitize + deduplicate ──
     const sanitized = sanitizeVisits(allVisits, detectedPatient);
