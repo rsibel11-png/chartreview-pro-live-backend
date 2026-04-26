@@ -270,8 +270,9 @@ RULES:
 - Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
 - Each unique date + provider combination is a separate entry.
 - Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers).
-- CRITICAL: The HPI section often mentions the date of injury (e.g. "injury date 10/31/2022") -- this is NOT the visit date. The visit date is ALWAYS in the document header (e.g. "Visit Note - November 7, 2022") or vitals table.
-- Do NOT include the date of injury as a visit date unless confirmed by a document header on that exact date.
+- CRITICAL: The HPI section often mentions the date of injury (e.g. "injury date 10/31/2022") -- this is NOT the visit date. The visit date is ALWAYS in the document header (e.g. "Visit Note November 7, 2022" or "Visit Note - November 7, 2022") or vitals table.
+- IMPORTANT: Textract OCR may output page footers and headers from adjacent pages mixed into the text stream. Always look for the pattern "Visit Note [Month] [Day], [Year]" or "Visit Note [Month] [Day] [Year]" (with or without dash/comma) — this is the authoritative visit date. A date in the HPI like "she fell on 10/31/2022 and went to the ER" does NOT make 10/31 or 11/1 a visit date for THIS note.
+- Do NOT include the date of injury as a visit date unless confirmed by a "Visit Note [date]" header on that exact date.
 - Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
 
