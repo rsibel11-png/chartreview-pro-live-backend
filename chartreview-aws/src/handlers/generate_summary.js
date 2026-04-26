@@ -1,4 +1,4 @@
-// Updated: 2026-04-26 — v3: fix DynamoDB reserved keyword 'result' in markJobComplete; add recovery pass warning logs
+// Updated: 2026-04-26 — v4: strengthen date accuracy (checklist overrides HPI dates); fix diagnosis field leakage from treatment plan
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -301,6 +301,7 @@ You may encounter different types of documents. Handle each type as follows:
 A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
     Extract each visit as a separate entry with all standard fields.
     CRITICAL: Always extract and include the actual practice name/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
+    DIAGNOSIS FIELD RULE: impression_diagnosis must contain ONLY diagnosis names and ICD-10 codes from the Impression or Assessment section (e.g. "Foot Pain, Left (M79.672); Hallux Valgus (M20.10)"). Stop at the first line of treatment/plan text. The EHR may show diagnoses in a two-column layout with ICD codes in gray subtext — extract only the diagnosis name + ICD code pairs, NOT the plan or recommendations that follow.
     - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
     - practice_setting must be the PRACTICE NAME ONLY — do NOT include street addresses, suite numbers, zip codes, or city/state. Example: "Desert Orthopaedic Center" NOT "Desert Orthopaedic Center, 2800 East Desert Inn Road, Ste 100, Las Vegas, NV"
     - If the document shows "Facility Name - Branch/Location" format (e.g. "Desert Orthopaedic Center - Desert Inn"), keep that format as the name
@@ -320,9 +321,10 @@ B) EXPERT MEDICAL REPORTS / IME / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPO
    - chief_complaint: the stated purpose of the report
    - hpi_summary: expert's review of history and background
    - physical_exam_findings: examination findings if physically examined, otherwise leave empty
-   - impression_diagnosis: expert's opinions, conclusions, diagnoses
+   - impression_diagnosis: expert's opinions, conclusions, diagnoses (diagnosis names and ICD codes ONLY — do NOT include treatment plan text or recommendations here)
    - treatment_plan: expert's recommendations or causation opinions
    - imaging_findings: any imaging reviewed or interpreted by the expert
+   - impression_diagnosis for ALL document types: list ONLY the diagnosis name(s) and ICD-10 code(s) as written in the Impression/Assessment/Plan section. Format: "Diagnosis Name (ICD-10: X00.0)". Do NOT include treatment recommendations, plan text, follow-up instructions, or clinical observations in this field — those belong in treatment_plan.
    - visit_date: date the report was authored or examination performed
 
 C) POLICE REPORTS:
@@ -361,11 +363,12 @@ DEDUPLICATION RULE: If same date has BOTH a physician progress report AND an off
 CRITICAL DATE AND TIMELINE ACCURACY:
 - Pay EXTREME attention to dates. Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES — treat each as a separate visit.
 - Match ALL findings, exams, and imaging to the CORRECT visit date. Do not aggregate findings from multiple dates into a single entry.
-- The PRIMARY source for visit_date is the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). Always prefer this over any other date on the page.
+- The PRIMARY source for visit_date is the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). ALWAYS use this date — it overrides everything else on the page.
 - Dates in vitals tables (e.g. "11/07/22 10:19") confirm the visit date — use the date portion only (2022-11-07), ignoring the time.
 - Dates in signature blocks, "Medications Obtained and Reviewed [date]", or "Reviewed [date]" also confirm the service date.
-- NEVER use a date from the HPI narrative (e.g. "date of injury 10/31/2022" or "she was seen at Green Valley ER on...") as the visit_date for the current note.
-- The date of injury is NOT a visit date unless the patient was actually seen on that day.
+- NEVER use a date from the HPI narrative as the visit_date. The HPI often mentions the date of injury (e.g. "Injury occurred 10/31/2022") — this is NOT the visit date. The visit date is in the document header.
+- The date of injury is NEVER the visit date unless the document header explicitly shows the patient was seen on that exact day.
+- KNOWN VISITS CHECKLIST OVERRIDE: If a date appears in the KNOWN VISITS CHECKLIST above, use that exact date as visit_date for the matching visit — even if the document body mentions a different date (e.g. injury date). The checklist dates were extracted from document headers and are authoritative.
 
 PHYSICAL THERAPY INSTRUCTIONS:
 - Extract EACH PT session as a separate visit entry — one entry per date.
