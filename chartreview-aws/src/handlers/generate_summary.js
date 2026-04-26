@@ -775,16 +775,17 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
 // ─── generateSummaryStart — kick off job + invoke worker async ────────────────
 const generateSummaryStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
-  const { doc_ids, patient_name = '', org_id } = body;
+  const { doc_ids, patient_name = '' } = body;
+  const org_id = event._orgId || body.org_id || '';
 
   if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
 
   const job_id = randomUUID();
   await dynamo.send(new UpdateCommand({
     TableName: JOBS_TABLE, Key: { job_id },
-    UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t',
+    UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t, org_id = :oid',
     ExpressionAttributeNames: { '#s': 'status' },
-    ExpressionAttributeValues: { ':s': 'running', ':now': new Date().toISOString(), ':t': 'generate_summary' },
+    ExpressionAttributeValues: { ':s': 'running', ':now': new Date().toISOString(), ':t': 'generate_summary', ':oid': org_id },
   }));
 
   // Invoke worker asynchronously
