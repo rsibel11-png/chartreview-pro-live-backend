@@ -26,9 +26,8 @@ const DOCS_TABLE    = process.env.DOCUMENTS_TABLE       || 'chartreview-document
 const JOBS_TABLE    = process.env.JOBS_TABLE            || 'chartreview-jobs-prod';
 // Model fallback chain: try each in order when throttled
 const BEDROCK_MODELS = [
-  'us.anthropic.claude-sonnet-4-6-20250514-v1:0', // primary: cross-region Sonnet 4.6
-  'us.anthropic.claude-sonnet-4-5-20251001-v1:0', // fallback: cross-region Sonnet 4.5
-  'us.anthropic.claude-haiku-4-5-20251001-v1:0',  // final fallback: cross-region Haiku 4.5
+  'us.anthropic.claude-sonnet-4-6',               // primary: cross-region Sonnet 4.6 (no version suffix)
+  'us.anthropic.claude-sonnet-4-5-20250929-v1:0', // fallback: cross-region Sonnet 4.5
 ];
 const WORKER_FN     = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
 
