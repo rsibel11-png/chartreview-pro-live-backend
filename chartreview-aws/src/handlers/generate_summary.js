@@ -1,12 +1,9 @@
 // Updated: 2026-04-25 — Gamma summary generation: pure AWS Bedrock, no Base44 relay
-// Flow:
-//   POST /summaries/generate  -> generateSummaryStart  -> { job_id }
-//   generateSummaryWorker     -> fetches S3 PDFs, calls Bedrock, writes to DynamoDB
-//   GET  /jobs/{job_id}       -> getJobHandler (existing) -> { status, result }
+// Prompt ported directly from original chartreview-pro MedicalSummaries.jsx (battle-tested)
 
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { randomUUID } = require('crypto');
@@ -17,12 +14,11 @@ const dynamo  = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const bedrock = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const lambda  = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
 
-const BUCKET         = process.env.S3_BUCKET          || 'chartreview-documents-prod';
-const DOCS_TABLE     = process.env.DOCUMENTS_TABLE     || 'chartreview-documents-prod';
-const SUMMARIES_TABLE= process.env.SUMMARIES_TABLE     || 'chartreview-summaries-prod';
-const JOBS_TABLE     = process.env.JOBS_TABLE          || 'chartreview-jobs-prod';
-const BEDROCK_MODEL  = 'us.anthropic.claude-sonnet-4-6';
-const WORKER_FN      = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
+const BUCKET          = process.env.S3_BUCKET           || 'chartreview-documents-prod';
+const DOCS_TABLE      = process.env.DOCUMENTS_TABLE      || 'chartreview-documents-prod';
+const JOBS_TABLE      = process.env.JOBS_TABLE           || 'chartreview-jobs-prod';
+const BEDROCK_MODEL   = 'us.anthropic.claude-sonnet-4-6';
+const WORKER_FN       = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
 
 const response = (statusCode, body) => ({
   statusCode,
@@ -42,61 +38,160 @@ const fetchPdfBase64 = async (fileKey) => {
   return Buffer.concat(chunks).toString('base64');
 };
 
-// ─── Get file_key for a document (direct or via parts) ───────────────────────
-const resolveFileKey = async (doc) => {
+// ─── Resolve file_key for a document ─────────────────────────────────────────
+const resolveFileKey = (doc) => {
   if (doc.file_key) return doc.file_key;
-  // No file_key — reconstruct from known pattern
   if (doc.org_id && doc.aws_document_id && doc.file_name) {
     return `orgs/${doc.org_id}/documents/${doc.aws_document_id}/${doc.file_name}`;
   }
   return null;
 };
 
-// ─── Build the main extraction prompt ────────────────────────────────────────
-const buildPrompt = (knownVisitsChecklist = [], skipPages = []) => {
-  const checklistSection = knownVisitsChecklist.length > 0 ? `
-KNOWN VISITS CHECKLIST (from pre-pass):
-${knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n')}
-Make sure every visit on this list is represented in your output. Do not invent visits not in the document.
-` : '';
+// ─── Sanitize visits (ported from original app) ───────────────────────────────
+const sanitizeVisits = (visits, patientName) => {
+  const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint',
+    'hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings',
+    'imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
+  const validProgressions = ['improved','same','worse','not_documented'];
+  return (visits || []).map(visit => {
+    const clean = { ...visit };
+    stringFields.forEach(field => {
+      const val = clean[field];
+      if (val === null || val === undefined || val === false) clean[field] = '';
+      else if (typeof val === 'object') clean[field] = JSON.stringify(val);
+      else if (typeof val !== 'string') clean[field] = String(val);
+    });
+    if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
+    if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
+    const patientLower = patientName?.toLowerCase();
+    if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
+      clean.practice_setting = '';
+    }
+    return clean;
+  });
+};
 
-  const skipSection = skipPages.length > 0 ? `
-SKIP THESE PAGES (non-clinical, administrative): ${skipPages.join(', ')}
-Do not extract visits from these pages.
-` : '';
+// ─── Deduplicate visits ───────────────────────────────────────────────────────
+const deduplicateVisits = (visits) => {
+  const exactKeys = new Set();
+  return visits.filter(visit => {
+    const dateKey = (visit.visit_date || '').trim().toLowerCase();
+    const providerKey = (visit.rendering_provider || '').trim().toLowerCase();
+    const settingKey = (visit.practice_setting || '').trim().toLowerCase();
+    if (!dateKey && !providerKey) return true;
+    const key = `${dateKey}|${providerKey}|${settingKey}`;
+    if (exactKeys.has(key)) return false;
+    exactKeys.add(key);
+    return true;
+  });
+};
 
-  return `You are a medical-legal document analyst. Extract EVERY clinical encounter from this document.
+// ─── Build extraction prompt (ported from original app) ───────────────────────
+const buildPrompt = (docCount, totalDocs) => {
+  const multiDocNote = totalDocs > 1
+    ? `CRITICAL: You are analyzing ${docCount} documents (part of a larger set of ${totalDocs}) which may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files and combine them into a single comprehensive summary. Do not stop after the first document.`
+    : '';
 
-Include: ER visits, office visits, surgery, physical therapy, occupational therapy, radiology, IME, chiropractic, C-4 forms, ambulance, specialist consults.
-Exclude: billing pages, authorization forms, HIPAA forms, fax covers, appointment reminders, records request letters.
-${checklistSection}${skipSection}
-For each clinical encounter extract:
-- visit_date: YYYY-MM-DD format. This is the DATE OF SERVICE, not injury date. Look in document headers and note titles.
-- rendering_provider: Full name and credentials (e.g. "Arthur J. Taylor, MD")
-- practice_setting: Facility or practice name AND visit type (e.g. "Nevada Orthopedic & Spine Center — Office Visit", "Centennial Hills Hospital — Emergency Department", "C-4 Workers Compensation Report")
-- chief_complaint: Primary complaint documented
-- hpi_summary: History of present illness, mechanism of injury, symptom description
-- injury_date: YYYY-MM-DD if documented
-- pain_scale: Numeric pain score if documented (e.g. "7/10")
-- symptom_progression: One of: improved, same, worse, not_documented
-- physical_exam_findings: All physical exam findings documented
-- imaging_findings: Any imaging results (X-ray, MRI, CT) referenced or reported
-- lab_findings: Any lab results documented
-- impression_diagnosis: Diagnoses and ICD-10 codes if present
-- icd10_codes: Array of ICD-10 codes if documented (e.g. ["S13.4XXA", "M54.2"])
-- treatment_plan: Treatment prescribed, medications, referrals, follow-up plan
+  return `You are a medical-legal document analyst. Analyze these ${docCount} medical document(s) and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
 
-RULES:
-- Each unique date + provider = separate visit entry.
-- If a date appears without a provider, use "Not Documented" for rendering_provider.
-- Do NOT use the injury date as a visit date unless the patient was actually seen that day.
-- C-4 forms: practice_setting must include "C-4 Workers Compensation Report". visit_date = date of injury (this is intentional for C-4 only).
-- PT/OT: include every session as a separate visit if documented. If only a date range is given, use the first and last dates.
-- Return ALL visits — do not summarize or collapse multiple visits into one.`;
+${multiDocNote}
+
+DOCUMENT TYPE HANDLING:
+You may encounter different types of documents. Handle each type as follows:
+
+A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
+    Extract each visit as a separate entry with all standard fields.
+    CRITICAL: Always extract and include the actual practice setting/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
+    - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
+
+B) EXPERT MEDICAL REPORTS / IME / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
+   Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize. Examples:
+   - "Independent Medical Examination" or "IME" → practice_setting: "Independent Medical Examination"
+   - "Consultation Report" → practice_setting: "Consultation Report"
+   - "Chart Review" or "Record Review" → practice_setting: "Chart Review"
+   - "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "Radiology Report" (or specific modality)
+   - "Narrative Report" → practice_setting: "Narrative Report"
+   - "Agreed Medical Examination" or "AME" → practice_setting: "Agreed Medical Examination"
+   - "Qualified Medical Evaluation" or "QME" → practice_setting: "Qualified Medical Evaluation"
+   NEVER default to "Independent Medical Examination" unless those exact words (or "IME") appear in the document.
+   For all these types:
+   - rendering_provider: the expert/reviewing physician's name
+   - chief_complaint: the stated purpose of the report
+   - hpi_summary: expert's review of history and background
+   - physical_exam_findings: examination findings if physically examined, otherwise leave empty
+   - impression_diagnosis: expert's opinions, conclusions, diagnoses
+   - treatment_plan: expert's recommendations or causation opinions
+   - imaging_findings: any imaging reviewed or interpreted by the expert
+   - visit_date: date the report was authored or examination performed
+
+C) POLICE REPORTS:
+   - rendering_provider: reporting officer's name and badge number
+   - practice_setting: "Police Report"
+   - chief_complaint: incident type (e.g., "Motor Vehicle Collision")
+   - hpi_summary: narrative of incident — how it occurred, parties involved, witnesses, road/weather conditions, citations
+   - physical_exam_findings: officer's observations about injuries at scene
+   - impression_diagnosis: officer's conclusions, fault determination, citations
+   - treatment_plan: emergency services dispatched or recommended at scene
+   - visit_date: date of incident or report
+
+D) AMBULANCE / EMS REPORTS:
+   - rendering_provider: paramedic/EMT name or unit number
+   - practice_setting: "Ambulance / EMS Report"
+   - chief_complaint: patient's chief complaint at scene
+   - hpi_summary: mechanism of injury, scene description, patient condition on arrival, reported symptoms
+   - physical_exam_findings: vital signs (BP, HR, RR, O2 sat, GCS), physical findings, neurological status
+   - impression_diagnosis: EMS impression/working diagnosis
+   - treatment_plan: treatment on scene and during transport (IV, medications, immobilization, O2), destination facility
+   - visit_date: date of incident/transport
+
+E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
+    STRICT IDENTIFICATION: Only treat as C-4 if document EXPLICITLY shows official WCB Form C-4 header, title block, or reference (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits as C-4.
+    For ACTUAL C-4 forms only:
+    - rendering_provider: treating physician's name (signature block or printed name)
+    - practice_setting: "C-4 Workers' Compensation Report"
+    - impression_diagnosis: diagnosis only — ICD codes if present, otherwise written diagnosis
+    - visit_date: date form was completed or examination date — CRITICAL to extract even if rest is illegible
+    - hpi_summary, chief_complaint, physical_exam_findings, treatment_plan: leave empty
+    - CROSS-REFERENCE: If C-4 date matches an office visit in same document set, use that visit's provider/diagnosis to fill illegible C-4 fields. Note when extrapolated.
+    - ORDERING: C-4 entry must use same visit_date as corresponding office visit. Place C-4 entry BEFORE the regular office visit of the same date.
+
+DEDUPLICATION RULE: If same date has BOTH a physician progress report AND an office visit from the SAME provider, ONLY include the office visit. The office visit contains the actual clinical information.
+
+CRITICAL DATE AND TIMELINE ACCURACY:
+- Pay EXTREME attention to dates. Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES — treat each as a separate visit.
+- Match ALL findings, exams, and imaging to the CORRECT visit date they were documented on.
+- NEVER include information from a future visit in an earlier visit.
+- NEVER reference events that haven't occurred yet chronologically.
+- If a location appears multiple times with different dates, create separate visit entries for each date.
+
+For EACH entry, extract:
+1. visit_date — BE PRECISE, critical for timeline accuracy (YYYY-MM-DD)
+2. rendering_provider — doctor's name only, not patient name
+3. practice_setting — specific facility/practice name AND visit type
+4. chief_complaint — brief statement of visit or report purpose
+5. hpi_summary — SUMMARIZE CONCISELY (3-5 sentences max): key symptoms and onset, injury date if applicable (only on first visit), pain scale, mechanism of injury, symptom progression, relevant PMH only if directly related. For expert reports: summarize expert's history review.
+6. physical_exam_findings — KEY PERTINENT POSITIVES ONLY: pain (location, severity), ROM limitations with measurements, deformity/scarring, neurological findings, swelling/tenderness. Do NOT list normal findings. Keep to 3-5 bullet points. Leave empty for expert reports with no physical exam.
+7. imaging_findings — EXACTLY as written, do NOT summarize, ONLY if performed or reviewed on THIS visit date
+8. lab_findings — ONLY if labs actually performed on THIS visit date, otherwise empty string
+9. impression_diagnosis — diagnoses with ICD-10 codes if provided (do NOT add codes if not in source). For expert reports: expert opinions, causation analysis, conclusions.
+10. treatment_plan — SUMMARIZE CONCISELY (2-4 key points): main interventions, medications, procedures, referrals, activity restrictions, follow-up timeline. For expert reports: recommendations, causation opinions, prognosis.
+
+Be thorough but CONCISE. Focus on clinically significant information only.
+
+CRITICAL FORMATTING RULES:
+- Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
+- If information is not available for a field, return an empty string "".
+- The icd10_codes field must always be an array of strings (can be empty []).
+
+Return ALL entries found across ALL documents as separate entries in the visits array.
+Also extract:
+- patient_name (consistent across documents)
+- case_number (consistent across documents)`;
 };
 
 // ─── Build Visit Index prompt ─────────────────────────────────────────────────
-const buildViPrompt = () => `You are reviewing medical-legal documents. Extract a complete list of every clinical encounter.
+const buildViPrompt = () =>
+  `You are reviewing medical-legal documents. Extract a complete list of every clinical encounter.
 
 For each encounter:
 - date: YYYY-MM-DD (date of service, NOT injury date)
@@ -108,11 +203,10 @@ RULES:
 - Include every encounter — office, ER, surgery, PT/OT, radiology, C-4, IME, ambulance.
 - Each unique date + provider = separate entry.
 - Exclude administrative documents (authorization requests, fax covers, appointment reminders).
-- If date visible but no provider, use "Not Documented".
-
+- If date visible but no provider identifiable, use "Not Documented".
 Return all entries in the visits array.`;
 
-// ─── Call Bedrock with PDF + prompt ──────────────────────────────────────────
+// ─── Call Bedrock with PDF base64 + prompt ────────────────────────────────────
 const callBedrock = async (pdfBase64, prompt, schema) => {
   const payload = {
     anthropic_version: 'bedrock-2023-05-31',
@@ -136,40 +230,66 @@ const callBedrock = async (pdfBase64, prompt, schema) => {
   const raw = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
   const text = raw.content?.[0]?.text || '';
   const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('Bedrock returned no JSON: ' + text.slice(0, 200));
+  if (!match) throw new Error('Bedrock returned no JSON. Raw: ' + text.slice(0, 300));
   return JSON.parse(match[0]);
+};
+
+// ─── Response schema ──────────────────────────────────────────────────────────
+const FULL_SCHEMA = {
+  type: 'object',
+  properties: {
+    patient_name: { type: 'string' },
+    case_number: { type: 'string' },
+    visits: { type: 'array', items: { type: 'object', properties: {
+      visit_date: { type: 'string' },
+      rendering_provider: { type: 'string' },
+      practice_setting: { type: 'string' },
+      chief_complaint: { type: 'string' },
+      hpi_summary: { type: 'string' },
+      injury_date: { type: 'string' },
+      pain_scale: { type: 'string' },
+      symptom_progression: { type: 'string', enum: ['improved','same','worse','not_documented'] },
+      physical_exam_findings: { type: 'string' },
+      imaging_findings: { type: 'string' },
+      lab_findings: { type: 'string' },
+      impression_diagnosis: { type: 'string' },
+      icd10_codes: { type: 'array', items: { type: 'string' } },
+      treatment_plan: { type: 'string' }
+    }}}
+  }
+};
+
+const VI_SCHEMA = {
+  type: 'object',
+  properties: {
+    patient_name: { type: 'string' },
+    visits: { type: 'array', items: { type: 'object', properties: {
+      date: { type: 'string' },
+      provider: { type: 'string' },
+      facility: { type: 'string' },
+      visit_type: { type: 'string' }
+    }}}
+  }
 };
 
 // ─── START handler — called by frontend, kicks off async worker ───────────────
 const generateSummaryStartHandler = async (event) => {
   try {
     const body = JSON.parse(event.body || '{}');
-    const { doc_ids, patient_name, org_id: bodyOrgId, run_vi_prepass = true } = body;
-    const orgId = event._orgId || bodyOrgId;
+    const { doc_ids, patient_name = '', run_vi_prepass = true } = body;
+    const orgId = event._orgId;
 
     if (!orgId) return response(400, { error: 'x-org-id required' });
-    if (!doc_ids || !doc_ids.length) return response(400, { error: 'doc_ids required' });
+    if (!doc_ids?.length) return response(400, { error: 'doc_ids required' });
 
     const job_id = randomUUID();
     const now = new Date().toISOString();
 
-    // Write job record
     await dynamo.send(new PutCommand({
       TableName: JOBS_TABLE,
-      Item: {
-        job_id,
-        job_type: 'generate_summary',
-        status: 'running',
-        org_id: orgId,
-        doc_ids,
-        patient_name: patient_name || '',
-        run_vi_prepass,
-        created_at: now,
-        updated_at: now,
-      }
+      Item: { job_id, job_type: 'generate_summary', status: 'running', org_id: orgId, doc_ids, patient_name, run_vi_prepass, created_at: now, updated_at: now }
     }));
 
-    // Fire worker async
     await lambda.send(new InvokeCommand({
       FunctionName: WORKER_FN,
       InvocationType: 'Event',
@@ -184,15 +304,14 @@ const generateSummaryStartHandler = async (event) => {
   }
 };
 
-// ─── WORKER — runs async, no HTTP timeout ─────────────────────────────────────
+// ─── WORKER — runs async, 900s timeout, no HTTP timeout ──────────────────────
 const generateSummaryWorker = async (event) => {
-  const { job_id, doc_ids, patient_name, org_id, run_vi_prepass = true } = event;
+  const { job_id, doc_ids, patient_name = '', org_id, run_vi_prepass = true } = event;
   console.log(`generateSummaryWorker start: job_id=${job_id} docs=${doc_ids?.length}`);
 
   const markFailed = async (msg) => {
     await dynamo.send(new UpdateCommand({
-      TableName: JOBS_TABLE,
-      Key: { job_id },
+      TableName: JOBS_TABLE, Key: { job_id },
       UpdateExpression: 'SET #s = :s, error_message = :e, updated_at = :now',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: { ':s': 'failed', ':e': msg, ':now': new Date().toISOString() }
@@ -200,131 +319,120 @@ const generateSummaryWorker = async (event) => {
   };
 
   try {
-    // ── 1. Fetch all document records from DynamoDB ──
+    // ── 1. Fetch all document records ──
     const docRecords = [];
     for (const id of doc_ids) {
       const r = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: id } }));
       if (r.Item) docRecords.push(r.Item);
+      else console.warn(`generateSummaryWorker: doc not found: ${id}`);
     }
-    if (!docRecords.length) { await markFailed('No documents found'); return; }
-    console.log(`generateSummaryWorker: fetched ${docRecords.length} doc records`);
+    if (!docRecords.length) { await markFailed('No documents found in DynamoDB'); return; }
+    console.log(`generateSummaryWorker: loaded ${docRecords.length} doc records`);
 
-    // ── 2. Optional VI pre-pass — one PDF at a time, collect known visits ──
+    // ── 2. VI pre-pass — collect known visits ──
     let knownVisits = [];
     if (run_vi_prepass) {
       console.log('generateSummaryWorker: starting VI pre-pass');
       for (const doc of docRecords) {
         try {
-          const fileKey = await resolveFileKey(doc);
+          const fileKey = resolveFileKey(doc);
           if (!fileKey) { console.warn(`VI: no file_key for ${doc.aws_document_id}`); continue; }
           const pdfBase64 = await fetchPdfBase64(fileKey);
-          const viSchema = {
-            type: 'object',
-            properties: {
-              patient_name: { type: 'string' },
-              visits: { type: 'array', items: { type: 'object', properties: {
-                date: { type: 'string' }, provider: { type: 'string' },
-                facility: { type: 'string' }, visit_type: { type: 'string' }
-              }}}
-            }
-          };
-          const viResult = await callBedrock(pdfBase64, buildViPrompt(), viSchema);
+          const viResult = await callBedrock(pdfBase64, buildViPrompt(), VI_SCHEMA);
           const visits = (viResult.visits || []).filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
           knownVisits = knownVisits.concat(visits.map(v => ({ ...v, source_doc_id: doc.aws_document_id })));
-          console.log(`VI pre-pass: ${doc.file_name} -> ${visits.length} visits`);
-        } catch (viErr) {
-          console.warn(`VI pre-pass failed for ${doc.aws_document_id}:`, viErr.message);
+          console.log(`VI: ${doc.file_name} -> ${visits.length} visits`);
+        } catch (e) {
+          console.warn(`VI pre-pass failed for ${doc.aws_document_id}: ${e.message}`);
         }
       }
-      // Deduplicate
-      const viSeen = new Set();
+      // Deduplicate VI results
+      const seen = new Set();
       knownVisits = knownVisits.filter(v => {
         const k = `${v.date}|${(v.provider || '').toLowerCase()}`;
-        if (viSeen.has(k)) return false;
-        viSeen.add(k); return true;
+        if (seen.has(k)) return false;
+        seen.add(k); return true;
       });
       console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
     }
 
-    // ── 3. Main extraction pass — one PDF at a time ──
-    const fullSchema = {
-      type: 'object',
-      properties: {
-        patient_name: { type: 'string' },
-        case_number: { type: 'string' },
-        visits: { type: 'array', items: { type: 'object', properties: {
-          visit_date: { type: 'string' }, rendering_provider: { type: 'string' },
-          practice_setting: { type: 'string' }, chief_complaint: { type: 'string' },
-          hpi_summary: { type: 'string' }, injury_date: { type: 'string' },
-          pain_scale: { type: 'string' }, symptom_progression: { type: 'string' },
-          physical_exam_findings: { type: 'string' }, imaging_findings: { type: 'string' },
-          lab_findings: { type: 'string' }, impression_diagnosis: { type: 'string' },
-          icd10_codes: { type: 'array', items: { type: 'string' } },
-          treatment_plan: { type: 'string' }
-        }}}
-      }
-    };
-
+    // ── 3. Main extraction pass ──
     let allVisits = [];
-    let detectedPatientName = patient_name || '';
-    let detectedCaseNumber = '';
+    let detectedPatient = patient_name;
+    let detectedCase = '';
+    const totalDocs = docRecords.length;
 
-    for (const doc of docRecords) {
+    for (let i = 0; i < docRecords.length; i++) {
+      const doc = docRecords[i];
       try {
-        const fileKey = await resolveFileKey(doc);
-        if (!fileKey) { console.warn(`Main pass: no file_key for ${doc.aws_document_id}`); continue; }
+        const fileKey = resolveFileKey(doc);
+        if (!fileKey) { console.warn(`Main: no file_key for ${doc.aws_document_id}`); continue; }
 
-        // Build skip pages from page_classifications
+        // Build skip-pages instruction from page_classifications
         const skipPages = (doc.page_classifications || [])
           .filter(p => !p.is_clinical && !p.restored)
           .map(p => p.page);
+        const skipNote = skipPages.length
+          ? `\nSKIP THESE PAGES (non-clinical/administrative, do not extract visits from them): ${skipPages.join(', ')}`
+          : '';
 
-        console.log(`Main pass: processing ${doc.file_name} (skipPages: ${skipPages.length})`);
+        // Inject known visits checklist
+        const checklistNote = knownVisits.length
+          ? `\nKNOWN VISITS CHECKLIST (from pre-pass — ensure all are represented):\n` +
+            knownVisits.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n')
+          : '';
+
+        const prompt = buildPrompt(1, totalDocs) + checklistNote + skipNote;
+        console.log(`Main pass [${i+1}/${totalDocs}]: ${doc.file_name} skipPages=${skipPages.length}`);
+
         const pdfBase64 = await fetchPdfBase64(fileKey);
-        const result = await callBedrock(pdfBase64, buildPrompt(knownVisits, skipPages), fullSchema);
+        const result = await callBedrock(pdfBase64, prompt, FULL_SCHEMA);
 
-        if (!detectedPatientName && result.patient_name) detectedPatientName = result.patient_name;
-        if (!detectedCaseNumber && result.case_number) detectedCaseNumber = result.case_number;
+        if (!detectedPatient && result.patient_name) detectedPatient = result.patient_name;
+        if (!detectedCase && result.case_number) detectedCase = result.case_number;
 
         const visits = Array.isArray(result.visits) ? result.visits : [];
         allVisits = allVisits.concat(visits.map(v => ({ ...v, _source_doc: doc.aws_document_id })));
-        console.log(`Main pass: ${doc.file_name} -> ${visits.length} visits`);
-      } catch (docErr) {
-        console.error(`Main pass failed for ${doc.aws_document_id}:`, docErr.message);
+        console.log(`Main pass [${i+1}/${totalDocs}]: ${visits.length} visits extracted`);
+      } catch (e) {
+        console.error(`Main pass failed for ${doc.aws_document_id}: ${e.message}`);
       }
     }
 
-    console.log(`generateSummaryWorker: total visits collected = ${allVisits.length}`);
+    // ── 4. Sanitize + deduplicate ──
+    const sanitized = sanitizeVisits(allVisits, detectedPatient);
+    const deduped = deduplicateVisits(sanitized);
 
-    // ── 4. Write completed job result ──
+    // ── 5. Sort chronologically ──
+    deduped.sort((a, b) => {
+      if (!a.visit_date) return 1;
+      if (!b.visit_date) return -1;
+      return new Date(a.visit_date + 'T00:00:00') - new Date(b.visit_date + 'T00:00:00');
+    });
+
+    console.log(`generateSummaryWorker: ${allVisits.length} raw -> ${deduped.length} after sanitize/dedup`);
+
+    // ── 6. Write result ──
     await dynamo.send(new UpdateCommand({
-      TableName: JOBS_TABLE,
-      Key: { job_id },
+      TableName: JOBS_TABLE, Key: { job_id },
       UpdateExpression: 'SET #s = :s, result = :r, updated_at = :now',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
         ':s': 'complete',
-        ':r': {
-          patient_name: detectedPatientName,
-          case_number: detectedCaseNumber,
-          visits: allVisits,
-          doc_count: docRecords.length,
-          visit_count: allVisits.length,
-        },
+        ':r': { patient_name: detectedPatient, case_number: detectedCase, visits: deduped, doc_count: docRecords.length, visit_count: deduped.length },
         ':now': new Date().toISOString()
       }
     }));
 
-    console.log(`generateSummaryWorker complete: job_id=${job_id} visits=${allVisits.length}`);
+    console.log(`generateSummaryWorker complete: job_id=${job_id} visits=${deduped.length}`);
   } catch (err) {
-    console.error('generateSummaryWorker fatal error:', err);
+    console.error('generateSummaryWorker fatal:', err);
     await markFailed(err.message);
   }
 };
 
-// ─── HTTP entry point ──────────────────────────────────────────────────────────
+// ─── Entry point (handles both HTTP and direct Lambda invoke) ─────────────────
 const generateSummaryHandler = async (event) => {
-  // Direct Lambda invoke for worker (no HTTP context)
   if (event.job_id && event.doc_ids) {
     await generateSummaryWorker(event);
     return;
@@ -334,5 +442,5 @@ const generateSummaryHandler = async (event) => {
 
 module.exports = {
   generateSummaryStart:  validateApiKey(generateSummaryStartHandler),
-  generateSummaryWorker: generateSummaryWorker, // no auth — internal Lambda invoke only
+  generateSummaryWorker: generateSummaryWorker,
 };
