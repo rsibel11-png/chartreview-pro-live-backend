@@ -289,7 +289,8 @@ For each clinical encounter found, extract:
 RULES:
 - Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
 - Each unique date + provider combination is a separate entry.
-- Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
+- Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers).
+- ONLY include radiology visits (MRI, X-ray, CT, bone scan, etc.) if the actual radiology report document is present in the text — meaning it has its own document header, date stamp, and impression/findings section. Do NOT create a radiology visit entry simply because a physician's note mentions that an imaging study was ordered or that results were reviewed. A reference to imaging inside another provider's note is NOT a visit.
 - CRITICAL: The HPI section often mentions the date of injury (e.g. "injury date 10/31/2022") -- this is NOT the visit date. The visit date is ALWAYS in the document header (e.g. "Visit Note November 7, 2022" or "Visit Note - November 7, 2022") or vitals table.
 - IMPORTANT: Textract OCR may output page footers and headers from adjacent pages mixed into the text stream. Always look for the pattern "Visit Note [Month] [Day], [Year]" or "Visit Note [Month] [Day] [Year]" (with or without dash/comma) — this is the authoritative visit date. A date in the HPI like "she fell on 10/31/2022 and went to the ER" does NOT make 10/31 or 11/1 a visit date for THIS note.
 - Do NOT include the date of injury as a visit date unless confirmed by a "Visit Note [date]" header on that exact date.
