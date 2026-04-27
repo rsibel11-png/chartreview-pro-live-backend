@@ -69,40 +69,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Create buildVisitIndexStart Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-buildVisitIndexStart --region us-east-1 2>/dev/null || \
-            aws lambda create-function \
-            --function-name chartreview-pro-prod-buildVisitIndexStart \
-            --runtime nodejs18.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/build_visit_index.buildVisitIndexStart \
-            --timeout 30 \
-            --zip-file fileb://function.zip \
-            --region us-east-1 \
-            --environment "Variables={API_KEY=ChartReview#2026\$ProdKey!Rx,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,S3_BUCKET=chartreview-documents-prod}"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create buildVisitIndexWorker Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-buildVisitIndexWorker --region us-east-1 2>/dev/null || \
-            aws lambda create-function \
-            --function-name chartreview-pro-prod-buildVisitIndexWorker \
-            --runtime nodejs18.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/build_visit_index.buildVisitIndexWorker \
-            --timeout 900 \
-            --zip-file fileb://function.zip \
-            --region us-east-1 \
-            --environment "Variables={API_KEY=ChartReview#2026\$ProdKey!Rx,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,S3_BUCKET=chartreview-documents-prod}"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
       - name: Create generateSummaryWorker Lambda if missing
         run: |
           aws lambda get-function --function-name chartreview-pro-prod-generateSummaryWorker --region us-east-1 2>/dev/null || \
@@ -151,8 +117,6 @@ jobs:
             "chartreview-pro-prod-deleteSummary"
             "chartreview-pro-prod-generateSummaryStart"
             "chartreview-pro-prod-generateSummaryWorker"
-            "chartreview-pro-prod-buildVisitIndexStart"
-            "chartreview-pro-prod-buildVisitIndexWorker"
           )
           for FUNC in "${FUNCTIONS[@]}"; do
             echo "Updating $FUNC..."
