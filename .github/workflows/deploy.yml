@@ -23,7 +23,16 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm install
+        run: |
+          npm install --save-exact \
+            @aws-sdk/client-dynamodb@3.598.0 \
+            @aws-sdk/lib-dynamodb@3.598.0 \
+            @aws-sdk/client-s3@3.598.0 \
+            @aws-sdk/s3-request-presigner@3.598.0 \
+            @aws-sdk/client-textract@3.598.0 \
+            @aws-sdk/client-bedrock-runtime@3.598.0 \
+            @aws-sdk/client-lambda@3.598.0 \
+            uuid@9.0.0
 
       - name: Package Lambda functions
         run: |
