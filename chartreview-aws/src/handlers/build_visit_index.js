@@ -1,12 +1,12 @@
 // build_visit_index.js
-// Updated: 2026-04-27 — fix shell record lookup, model IDs, OOM, zero shared code with generateSummaryWorker
+// Updated: 2026-04-26 — standalone Visit Index Lambda, zero shared code with generateSummaryWorker
 // Triggered by POST /visit-index/build
 // Accepts: { doc_ids: string[], org_id: string }
 // Creates a job, invokes self async, returns { job_id }
 // Worker: reads docs from DynamoDB, runs VI pre-pass via Bedrock, writes known_visits to job record
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
@@ -63,34 +63,13 @@ const markJobFailed = async (job_id, msg) => {
   }));
 };
 
-// ─── Fetch doc records (with shell fallback) ─────────────────────────────────
+// ─── Fetch doc records ────────────────────────────────────────────────────────
 const fetchDocRecords = async (docIds) => {
   const records = [];
   for (const id of docIds) {
     const r = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: id } }));
-    if (!r.Item) { console.warn(`fetchDocRecords: not found: ${id}`); continue; }
-    const doc = r.Item;
-
-    // Shell record: has no file_key and no file_name — look up its parts
-    const isShell = !doc.file_key && !doc.file_name;
-    if (isShell) {
-      console.log(`fetchDocRecords: ${id} is a shell — scanning for parts`);
-      const scan = await dynamo.send(new ScanCommand({
-        TableName: DOCS_TABLE,
-        FilterExpression: 'original_document_id = :oid AND aws_document_id <> :oid',
-        ExpressionAttributeValues: { ':oid': id },
-      }));
-      if (scan.Items?.length) {
-        scan.Items.sort((a, b) => (a.part_index ?? 0) - (b.part_index ?? 0));
-        console.log(`fetchDocRecords: shell ${id} -> ${scan.Items.length} parts`);
-        records.push(...scan.Items);
-      } else {
-        // No parts found — try the record itself anyway
-        records.push(doc);
-      }
-    } else {
-      records.push(doc);
-    }
+    if (r.Item) records.push(r.Item);
+    else console.warn(`fetchDocRecords: not found: ${id}`);
   }
   return records;
 };
