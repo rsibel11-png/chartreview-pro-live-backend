@@ -77,7 +77,7 @@ jobs:
             --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
             --handler src/handlers/build_visit_index.buildVisitIndexStart \
             --timeout 30 \
-            --zip-file fileb://lambda.zip \
+            --zip-file fileb://function.zip \
             --region us-east-1 \
             --environment "Variables={API_KEY=ChartReview#2026\$ProdKey!Rx,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,S3_BUCKET=chartreview-documents-prod}"
 
@@ -90,7 +90,7 @@ jobs:
             --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
             --handler src/handlers/build_visit_index.buildVisitIndexWorker \
             --timeout 900 \
-            --zip-file fileb://lambda.zip \
+            --zip-file fileb://function.zip \
             --region us-east-1 \
             --environment "Variables={API_KEY=ChartReview#2026\$ProdKey!Rx,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,S3_BUCKET=chartreview-documents-prod}"
 
