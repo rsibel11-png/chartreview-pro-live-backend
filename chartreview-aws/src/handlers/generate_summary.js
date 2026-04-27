@@ -513,6 +513,17 @@ const generateSummaryWorker = async (event) => {
       knownVisits = [];
     }
 
+    // ── vi_only: return just the visit checklist without running the full summary pass ──
+    if (vi_only) {
+      console.log(`generateSummaryWorker: vi_only=true, returning ${knownVisits.length} visits`);
+      await markJobComplete(job_id, {
+        known_visits: knownVisits,
+        patient_name: patientName || '',
+        vi_only: true,
+      });
+      return;
+    }
+
     // ── Build batches (BATCH_SIZE=2, BATCH_OVERLAP=1) — identical to v56 ──────
     const BATCH_SIZE = 2;
     const BATCH_OVERLAP = 1;
