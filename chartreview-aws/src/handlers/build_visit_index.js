@@ -86,6 +86,7 @@ const resolveFileKey = (doc) => {
 const MODELS = [
   'us.anthropic.claude-sonnet-4-5-20251125-v1:0',
   'us.anthropic.claude-3-5-sonnet-20241022-v2:0',
+  'anthropic.claude-3-5-sonnet-20241022-v2:0',
 ];
 
 const callBedrock = async (fileKeys, prompt, schema) => {
