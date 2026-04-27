@@ -27,6 +27,7 @@ jobs:
 
       - name: Package Lambda functions
         run: |
+          rm -rf node_modules/@nodable
           zip -r function.zip src/ node_modules/ package.json
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
