@@ -10,13 +10,11 @@
     "patch-cors": "bash scripts/patch-cors.sh"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "3.600.0",
-    "@aws-sdk/lib-dynamodb": "3.600.0",
-    "@aws-sdk/client-s3": "3.600.0",
-    "@aws-sdk/s3-request-presigner": "3.600.0",
-    "@aws-sdk/client-textract": "3.600.0",
-    "@aws-sdk/client-bedrock-runtime": "3.600.0",
-    "@aws-sdk/client-lambda": "3.600.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/s3-request-presigner": "^3.0.0",
+    "@aws-sdk/client-textract": "^3.0.0",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
