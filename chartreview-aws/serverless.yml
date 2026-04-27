@@ -309,6 +309,39 @@ functions:
       SUMMARIES_TABLE: chartreview-summaries-prod
       JOBS_TABLE: chartreview-jobs-prod
 
+  buildVisitIndexStart:
+    handler: src/handlers/build_visit_index.buildVisitIndexStart
+    timeout: 30
+    environment:
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      S3_BUCKET: chartreview-documents-prod
+      API_KEY: ${env:API_KEY}
+      VI_WORKER_FUNCTION: chartreview-pro-prod-buildVisitIndexWorker
+    events:
+      - http:
+          path: visit-index/build
+          method: post
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - x-api-key
+              - x-org-id
+          request:
+            headers:
+              x-api-key: true
+              x-org-id: false
+
+  buildVisitIndexWorker:
+    handler: src/handlers/build_visit_index.buildVisitIndexWorker
+    timeout: 900
+    environment:
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      S3_BUCKET: chartreview-documents-prod
+      API_KEY: ${env:API_KEY}
+
   getJob:
     handler: src/handlers/documents_new.getJob
     timeout: 30
