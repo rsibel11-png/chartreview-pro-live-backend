@@ -23,7 +23,12 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm install
+        run: |
+          npm install
+          # Remove any Base44/nodable packages that may have been pulled as transitive deps
+          rm -rf node_modules/@nodable node_modules/@base44
+          echo "Cleaned node_modules"
+          ls node_modules/ | head -20
 
       - name: Package Lambda functions
         run: |
