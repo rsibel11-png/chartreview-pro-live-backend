@@ -80,6 +80,10 @@ jobs:
             --zip-file fileb://function.zip \
             --region us-east-1 \
             --environment "Variables={API_KEY=ChartReview#2026\$ProdKey!Rx,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,S3_BUCKET=chartreview-documents-prod}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
 
       - name: Create buildVisitIndexWorker Lambda if missing
         run: |
@@ -93,6 +97,10 @@ jobs:
             --zip-file fileb://function.zip \
             --region us-east-1 \
             --environment "Variables={API_KEY=ChartReview#2026\$ProdKey!Rx,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,S3_BUCKET=chartreview-documents-prod}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
 
       - name: Create generateSummaryWorker Lambda if missing
         run: |
