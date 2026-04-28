@@ -1,24 +1,30 @@
-// Updated: 2026-04-26 — new standalone buildVisitIndex Lambda handler
-// Mirrors the VI pre-pass from generateSummaryWorker exactly (callBedrock + file_key)
+// Updated: 2026-04-28 — split into true async Start/Worker pattern to avoid API Gateway 29s timeout
+// buildVisitIndexStart: creates job, invokes worker async, returns job_id immediately
+// buildVisitIndexWorker: does all Bedrock/S3 work, writes result back to DynamoDB
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
+const { randomUUID } = require('crypto');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
+const JOBS_TABLE = process.env.JOBS_TABLE || 'chartreview-jobs-prod';
 const BUCKET = process.env.S3_BUCKET || 'chartreview-documents-prod';
 const API_KEY = process.env.API_KEY || '';
+const WORKER_FUNCTION = process.env.VI_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-buildVisitIndexWorker';
 
 const BEDROCK_MODELS = [
-  'us.anthropic.claude-sonnet-4-6',
-  'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+  'us.anthropic.claude-sonnet-4-5-20251125-v1:0',
+  'us.anthropic.claude-3-5-sonnet-20241022-v2:0',
 ];
 
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 const bedrock = new BedrockRuntimeClient({ region: REGION });
 const s3 = new S3Client({ region: REGION });
+const lambdaClient = new LambdaClient({ region: REGION });
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -38,7 +44,7 @@ const authenticate = (event) => {
   return key === API_KEY;
 };
 
-// ── callBedrock: identical to generate_summary.js ────────────────────────────
+// ── callBedrock ───────────────────────────────────────────────────────────────
 const callBedrock = async (fileKeys, prompt, schema) => {
   const contentBlocks = [];
   for (const fileKey of fileKeys) {
@@ -93,7 +99,7 @@ const callBedrock = async (fileKeys, prompt, schema) => {
   throw lastErr;
 };
 
-// ── resolveFileKey: identical to generate_summary.js ─────────────────────────
+// ── resolveFileKey ────────────────────────────────────────────────────────────
 const resolveFileKey = (doc) => {
   if (doc.file_key) return doc.file_key;
   if (doc.org_id && doc.aws_document_id && doc.file_name) {
@@ -102,7 +108,7 @@ const resolveFileKey = (doc) => {
   return null;
 };
 
-// ── VI prompt: identical to generate_summary.js ───────────────────────────────
+// ── VI prompt ─────────────────────────────────────────────────────────────────
 const buildVisitIndexPrompt = () => `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter date found in the document.
 
 For each clinical encounter found, extract:
@@ -143,8 +149,10 @@ const viSchema = {
   },
 };
 
-// ── Handler ───────────────────────────────────────────────────────────────────
-exports.buildVisitIndexHandler = async (event) => {
+// ═══════════════════════════════════════════════════════════════════════════════
+// START HANDLER — creates job, fires worker async, returns job_id immediately
+// ═══════════════════════════════════════════════════════════════════════════════
+exports.buildVisitIndexStart = async (event) => {
   if (event.httpMethod === 'OPTIONS') return respond(200, {});
   if (!authenticate(event)) return respond(401, { error: 'Unauthorized' });
 
@@ -152,36 +160,94 @@ exports.buildVisitIndexHandler = async (event) => {
   let body;
   try { body = JSON.parse(event.body || '{}'); } catch { return respond(400, { error: 'Invalid JSON' }); }
 
-  const { doc_ids } = body; // array of aws_document_ids (parts, not shells)
+  const { doc_ids } = body;
   if (!Array.isArray(doc_ids) || doc_ids.length === 0) {
     return respond(400, { error: 'doc_ids array required' });
   }
 
-  console.log(`buildVisitIndex: org=${orgId}, doc_ids=${JSON.stringify(doc_ids)}`);
+  const job_id = randomUUID();
+  const now = new Date().toISOString();
+
+  // Write job record to DynamoDB
+  await dynamo.send(new PutCommand({
+    TableName: JOBS_TABLE,
+    Item: {
+      job_id,
+      job_type: 'visit_index',
+      org_id: orgId,
+      doc_ids,
+      status: 'pending',
+      created_at: now,
+      updated_at: now,
+    },
+  }));
+
+  console.log(`buildVisitIndexStart: created job ${job_id} for ${doc_ids.length} docs`);
+
+  // Invoke worker asynchronously (fire-and-forget)
+  await lambdaClient.send(new InvokeCommand({
+    FunctionName: WORKER_FUNCTION,
+    InvocationType: 'Event', // async — does not wait for response
+    Payload: JSON.stringify({ job_id, org_id: orgId, doc_ids }),
+  }));
+
+  console.log(`buildVisitIndexStart: worker invoked async, returning job_id`);
+  return respond(200, { job_id });
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WORKER HANDLER — does all heavy Bedrock/S3 work, writes result to DynamoDB
+// ═══════════════════════════════════════════════════════════════════════════════
+exports.buildVisitIndexWorker = async (event) => {
+  const { job_id, org_id: orgId, doc_ids } = event;
+
+  console.log(`buildVisitIndexWorker: job=${job_id}, docs=${JSON.stringify(doc_ids)}`);
+
+  const updateJob = async (status, extra = {}) => {
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE,
+      Key: { job_id },
+      UpdateExpression: 'SET #s = :s, updated_at = :now' +
+        (extra.result !== undefined ? ', #r = :r' : '') +
+        (extra.error !== undefined ? ', error_message = :e' : ''),
+      ExpressionAttributeNames: {
+        '#s': 'status',
+        ...(extra.result !== undefined ? { '#r': 'result' } : {}),
+      },
+      ExpressionAttributeValues: {
+        ':s': status,
+        ':now': new Date().toISOString(),
+        ...(extra.result !== undefined ? { ':r': extra.result } : {}),
+        ...(extra.error !== undefined ? { ':e': extra.error } : {}),
+      },
+    }));
+  };
 
   try {
+    await updateJob('running');
+
     // Fetch DynamoDB records for all requested IDs
     const docRecords = [];
     for (const id of doc_ids) {
       const r = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: id } }));
       if (r.Item) docRecords.push(r.Item);
-      else console.warn(`buildVisitIndex: not found in DynamoDB: ${id}`);
+      else console.warn(`buildVisitIndexWorker: not found in DynamoDB: ${id}`);
     }
 
     // Build parts list with file_key (skip fully non-clinical)
     const allParts = [];
     for (const doc of docRecords) {
       const fileKey = resolveFileKey(doc);
-      if (!fileKey) { console.warn(`buildVisitIndex: no file_key for ${doc.aws_document_id}`); continue; }
+      if (!fileKey) { console.warn(`buildVisitIndexWorker: no file_key for ${doc.aws_document_id}`); continue; }
       const pc = doc.page_classifications || [];
       const allNonClinical = pc.length > 0 && pc.every(p => !p.is_clinical && !p.restored);
-      if (allNonClinical) { console.log(`buildVisitIndex: skipping non-clinical ${doc.aws_document_id}`); continue; }
+      if (allNonClinical) { console.log(`buildVisitIndexWorker: skipping non-clinical ${doc.aws_document_id}`); continue; }
       allParts.push({ id: doc.aws_document_id, file_key: fileKey, label: doc.file_name || doc.aws_document_id });
     }
 
-    console.log(`buildVisitIndex: ${allParts.length} parts to process`);
+    console.log(`buildVisitIndexWorker: ${allParts.length} parts to process`);
 
-    // VI pre-pass — parallel with concurrency 4 (identical to generateSummaryWorker)
+    // VI pre-pass — parallel with concurrency 4
     const VI_CONCURRENCY = 4;
     const viResults = new Array(allParts.length).fill(null);
 
@@ -203,7 +269,6 @@ exports.buildVisitIndexHandler = async (event) => {
     }
 
     let allEntries = [];
-    let patientName = '';
     for (const tagged of viResults) {
       if (tagged) allEntries = allEntries.concat(tagged);
     }
@@ -225,11 +290,12 @@ exports.buildVisitIndexHandler = async (event) => {
     // Sort chronologically
     allEntries.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
 
-    console.log(`buildVisitIndex: complete, ${allEntries.length} visits`);
-    return respond(200, { visits: allEntries, patient_name: patientName });
+    console.log(`buildVisitIndexWorker: complete, ${allEntries.length} visits`);
+
+    await updateJob('complete', { result: { known_visits: allEntries } });
 
   } catch (err) {
-    console.error('buildVisitIndex error:', err);
-    return respond(500, { error: err.message });
+    console.error('buildVisitIndexWorker error:', err);
+    await updateJob('error', { error: err.message });
   }
 };
