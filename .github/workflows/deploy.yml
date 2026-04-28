@@ -23,7 +23,7 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --omit=dev
 
       - name: Package Lambda functions
         run: |
@@ -50,7 +50,6 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
-
 
       - name: Create generateSummaryStart Lambda if missing
         run: |
@@ -85,6 +84,41 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create buildVisitIndexStart Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-buildVisitIndexStart --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-buildVisitIndexStart \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/generate_summary.buildVisitIndexStart \
+            --timeout 29 \
+            --memory-size 512 \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create buildVisitIndexWorker Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-buildVisitIndexWorker --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-buildVisitIndexWorker \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/generate_summary.buildVisitIndexWorker \
+            --timeout 900 \
+            --memory-size 1024 \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
@@ -117,6 +151,8 @@ jobs:
             "chartreview-pro-prod-deleteSummary"
             "chartreview-pro-prod-generateSummaryStart"
             "chartreview-pro-prod-generateSummaryWorker"
+            "chartreview-pro-prod-buildVisitIndexStart"
+            "chartreview-pro-prod-buildVisitIndexWorker"
           )
           for FUNC in "${FUNCTIONS[@]}"; do
             echo "Updating $FUNC..."
