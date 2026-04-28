@@ -372,7 +372,7 @@ functions:
 
 
   buildVisitIndex:
-    handler: src/handlers/build_visit_index.buildVisitIndexHandler
+    handler: src/handlers/build_visit_index.buildVisitIndexStart
     timeout: 600
     memorySize: 1024
     events:
