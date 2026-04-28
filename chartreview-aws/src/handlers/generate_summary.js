@@ -942,7 +942,7 @@ const generateSummaryHandler = async (event) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const buildVisitIndexWorkerFn = async (event) => {
-  const { job_id, doc_ids, org_id } = event;
+  const { job_id, doc_ids, org_id, patient_name: inputPatientName = '' } = event;
   console.log(`buildVisitIndexWorker start: job_id=${job_id} docs=${doc_ids?.length}`);
 
   try {
@@ -995,6 +995,7 @@ const buildVisitIndexWorkerFn = async (event) => {
     };
 
     const viResults = new Array(allParts.length).fill(null);
+    let extractedPatientName = inputPatientName || '';
     for (let vi = 0; vi < allParts.length; vi += VI_CONCURRENCY) {
       const viChunk = allParts.slice(vi, vi + VI_CONCURRENCY);
       await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
@@ -1004,6 +1005,7 @@ const buildVisitIndexWorkerFn = async (event) => {
           if (Array.isArray(viResult.visits)) {
             viResults[partIdx] = viResult.visits.filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
           }
+          if (viResult.patient_name && !extractedPatientName) extractedPatientName = viResult.patient_name;
           console.log(`VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
         } catch (e) {
           console.warn(`VI failed for ${viPart.id}: ${e.message}`);
@@ -1031,7 +1033,7 @@ const buildVisitIndexWorkerFn = async (event) => {
       TableName: JOBS_TABLE, Key: { job_id },
       UpdateExpression: 'SET #s = :s, #res = :r, updated_at = :now',
       ExpressionAttributeNames: { '#s': 'status', '#res': 'result' },
-      ExpressionAttributeValues: { ':s': 'complete', ':r': { known_visits: knownVisits }, ':now': new Date().toISOString() },
+      ExpressionAttributeValues: { ':s': 'complete', ':r': { known_visits: knownVisits, patient_name: extractedPatientName || inputPatientName || '' }, ':now': new Date().toISOString() },
     }));
 
   } catch (err) {
@@ -1042,7 +1044,7 @@ const buildVisitIndexWorkerFn = async (event) => {
 
 const buildVisitIndexStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
-  const { doc_ids } = body;
+  const { doc_ids, patient_name: bodyPatientName = '' } = body;
   const org_id = event._orgId || body.org_id || '';
 
   if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
@@ -1059,7 +1061,7 @@ const buildVisitIndexStartHandler = async (event) => {
   await lambda.send(new InvokeCommand({
     FunctionName: process.env.VI_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-buildVisitIndexWorker',
     InvocationType: 'Event',
-    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, org_id })),
+    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, org_id, patient_name: bodyPatientName })),
   }));
 
   console.log(`buildVisitIndexStart: job_id=${job_id} docs=${doc_ids.length}`);
