@@ -1,4 +1,5 @@
 // Updated: 2026-04-26 — v4: strengthen date accuracy (checklist overrides HPI dates); fix diagnosis field leakage from treatment plan
+// Updated: 2026-04-29 — C-4 detection merged into VI pre-pass; dedicated C-4 sweep removed (saves 5-10 Bedrock calls per case)
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -296,6 +297,11 @@ RULES:
 - Do NOT include the date of injury as a visit date unless confirmed by a "Visit Note [date]" header on that exact date.
 - Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
+- SPECIAL RULE — C-4 FORMS: If you identify a visit as visit_type "C-4 Form" (i.e. you see "FORM C-4", "Form C-4", or "EMPLOYEE'S CLAIM FOR COMPENSATION" in the document), also populate these three extra fields directly from the form:
+  - c4_diagnosis: the diagnosis or nature of injury as written on the form
+  - c4_body_part: the body part(s) injured as written on the form
+  - c4_treatment: the treatment provided as written on the form
+  For all other visit types, leave c4_diagnosis, c4_body_part, and c4_treatment empty.
 
 Return all entries in the visits array.`;
 };
@@ -465,6 +471,9 @@ const generateSummaryWorker = async (event) => {
                 visit_type: { type: 'string' },
                 source_doc_id: { type: 'string' },
                 source_part_label: { type: 'string' },
+                c4_diagnosis: { type: 'string' },
+                c4_body_part: { type: 'string' },
+                c4_treatment: { type: 'string' },
               },
             },
           },
@@ -508,6 +517,14 @@ const generateSummaryWorker = async (event) => {
       );
       console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
       console.log('VI checklist dates:', JSON.stringify(knownVisits.map(v => ({ date: v.date, provider: v.provider, type: v.visit_type }))));
+
+      // ── Capture C-4 from VI pre-pass (avoids a separate dedicated Bedrock sweep) ──
+      const viC4Entry = knownVisits.find(v =>
+        /c-4|c4 form|workers.*comp/i.test(v.visit_type || '')
+      );
+      if (viC4Entry) {
+        console.log('VI pre-pass found C-4 at', viC4Entry.date, '— dedicated pass will be skipped');
+      }
     } catch (viErr) {
       console.warn('VI pre-pass failed (non-fatal):', viErr.message);
       knownVisits = [];
@@ -637,94 +654,50 @@ const generateSummaryWorker = async (event) => {
       }
     }
 
-    // ── Dedicated C-4 pass (identical to v56) ─────────────────────────────────
-    await setJobStatus(job_id, 'Running dedicated C-4 form extraction pass...');
+    // ── C-4 form handling — sourced from VI pre-pass (no extra Bedrock call needed) ──
+    // Updated: 2026-04-29 — merged C-4 detection into VI pre-pass; dedicated C-4 sweep removed.
+    // The VI pre-pass already sends every PDF to Claude Vision. If it tagged a C-4 Form entry,
+    // we use that data directly. No re-fetching of PDFs, no extra Bedrock calls.
     try {
-      console.log('generateSummaryWorker: running dedicated C-4 pass');
-      const c4FileKeys = allParts.map(p => p.file_key).filter(Boolean);
-      if (c4FileKeys.length > 0) {
-        const C4_BATCH = 3;
-        let c4Entry = null;
-        const c4Schema = {
-          type: 'object',
-          properties: {
-            found: { type: 'boolean' },
-            visit_date: { type: 'string' },
-            rendering_provider: { type: 'string' },
-            facility: { type: 'string' },
-            diagnosis: { type: 'string' },
-            treatment: { type: 'string' },
-            body_part: { type: 'string' },
-          },
+      // Always strip hallucinated C-4 entries from the main LLM pass first
+      const beforeC4Count = allVisits.length;
+      allVisits = allVisits.filter(v => {
+        const s = (v.practice_setting || '').toLowerCase();
+        return !s.includes('c-4') && !s.includes("workers' compensation report") && !s.includes('wcb');
+      });
+      const strippedC4 = beforeC4Count - allVisits.length;
+      if (strippedC4 > 0) console.log(`C-4 merge: stripped ${strippedC4} hallucinated C-4 entries from main pass`);
+
+      if (viC4Entry) {
+        // Build the canonical C-4 visit from VI pre-pass data
+        const c4Visit = {
+          visit_date: viC4Entry.date || '',
+          rendering_provider: toTitleCase(viC4Entry.provider || ''),
+          practice_setting: viC4Entry.facility
+            ? `C-4 Workers' Compensation Report (${viC4Entry.facility})`
+            : "C-4 Workers' Compensation Report",
+          chief_complaint: '',
+          hpi_summary: '',
+          injury_date: '',
+          pain_scale: '',
+          symptom_progression: 'not_documented',
+          physical_exam_findings: '',
+          imaging_findings: '',
+          lab_findings: '',
+          impression_diagnosis: [
+            viC4Entry.c4_diagnosis,
+            viC4Entry.c4_body_part ? `Body part: ${viC4Entry.c4_body_part}` : '',
+          ].filter(Boolean).join('. '),
+          icd10_codes: [],
+          treatment_plan: viC4Entry.c4_treatment || '',
         };
-        const c4Prompt = `You are reviewing medical-legal documents to find a WCB Form C-4 (Workers' Compensation Board Employee's Claim for Compensation / Report of Initial Treatment).
-
-TASK: Search the provided documents for an actual physical C-4 form. You will know it is a C-4 form if you see ANY of these identifiers in the document text:
-- "FORM C-4" or "Form C-4"
-- "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT"
-- "EMPLOYEE'S CLAIM FOR COMPENSATION" combined with structured form fields
-
-If you find a C-4 form, extract ONLY the following fields directly from the form itself. Do NOT infer or extrapolate from other documents unless a field is physically illegible on the form.
-
-Fields to extract from the C-4 form:
-- found: true (set to false if no C-4 form is present in these documents)
-- visit_date: the date the form was completed or the examination date (from the form's date field, format YYYY-MM-DD)
-- rendering_provider: the name of the treating physician or health care provider who COMPLETED this form and provided the initial treatment (typically found in a "Health Care Provider" or "Treating Physician" field near the top or middle of the form, NOT the orthopedic or follow-up surgeon referenced elsewhere in the record). On Nevada C-4 forms this is usually the ER physician, urgent care doctor, or first-contact provider. If the form was completed at a hospital emergency department, use the ER physician's name.
-- facility: the facility name where treatment was provided (e.g. "Centennial Hills Hospital Emergency Room")
-- diagnosis: the diagnosis or nature of injury as written on the form
-- treatment: the treatment provided as written on the form
-- body_part: the part(s) of body injured as written on the form
-
-If you find a C-4 form but a field is physically illegible or blank on the form, return an empty string for that field -- do NOT fill it in from other documents.
-If NO C-4 form is present in these documents, set found: false and leave all other fields empty.`;
-
-        for (let ci = 0; ci < c4FileKeys.length; ci += C4_BATCH) {
-          const c4Batch = c4FileKeys.slice(ci, ci + C4_BATCH);
-          // AWS swap #1: callBedrock instead of InvokeLLM
-          const c4Result = await callBedrock(c4Batch, c4Prompt, c4Schema);
-          if (c4Result.found === true && c4Result.visit_date) {
-            c4Entry = c4Result;
-            break;
-          }
-        }
-
-        if (c4Entry) {
-          const c4Visit = {
-            visit_date: c4Entry.visit_date || '',
-            rendering_provider: toTitleCase(c4Entry.rendering_provider || ''),
-            practice_setting: c4Entry.facility
-              ? `C-4 Workers' Compensation Report (${c4Entry.facility})`
-              : "C-4 Workers' Compensation Report",
-            chief_complaint: '',
-            hpi_summary: '',
-            injury_date: '',
-            pain_scale: '',
-            symptom_progression: 'not_documented',
-            physical_exam_findings: '',
-            imaging_findings: '',
-            lab_findings: '',
-            impression_diagnosis: [c4Entry.diagnosis, c4Entry.body_part ? `Body part: ${c4Entry.body_part}` : ''].filter(Boolean).join('. '),
-            icd10_codes: [],
-            treatment_plan: c4Entry.treatment || '',
-          };
-          allVisits = allVisits.filter(v => {
-            const s = (v.practice_setting || '').toLowerCase();
-            return !s.includes('c-4') && !s.includes("workers' compensation report") && !s.includes('wcb');
-          });
-          allVisits.push(c4Visit);
-          console.log('C-4 dedicated pass: found at', c4Visit.visit_date);
-        } else {
-          const beforeCount = allVisits.length;
-          allVisits = allVisits.filter(v => {
-            const s = (v.practice_setting || '').toLowerCase();
-            return !s.includes('c-4') && !s.includes("workers' compensation report") && !s.includes('wcb');
-          });
-          const stripped = beforeCount - allVisits.length;
-          if (stripped > 0) console.log(`C-4 pass: no form found -- stripped ${stripped} hallucinated C-4 entries`);
-        }
+        allVisits.push(c4Visit);
+        console.log('C-4 from VI pre-pass: found at', c4Visit.visit_date, '— no extra Bedrock call needed');
+      } else {
+        console.log('C-4 from VI pre-pass: no C-4 form detected — skipping');
       }
     } catch (c4Err) {
-      console.warn('C-4 dedicated pass failed (non-fatal):', c4Err.message);
+      console.warn('C-4 merge step failed (non-fatal):', c4Err.message);
     }
 
     // ── Merge + deduplicate + sort (identical to v56) ─────────────────────────
