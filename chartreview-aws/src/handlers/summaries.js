@@ -1,3 +1,4 @@
+// Updated: 2026-04-29 — added visit_index, summary_type, visit_count, generated_date to createHandler
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { validateApiKey } = require('./auth');
@@ -28,6 +29,10 @@ const createHandler = async (event) => {
     if (data.patient_name)    item.patient_name    = data.patient_name;
     if (data.case_number)     item.case_number     = data.case_number;
     if (data.visits)          item.visits          = data.visits;
+    if (data.visit_index)     item.visit_index     = data.visit_index;
+    if (data.summary_type)    item.summary_type    = data.summary_type;
+    if (data.visit_count !== undefined) item.visit_count = data.visit_count;
+    if (data.generated_date)  item.generated_date  = data.generated_date;
     if (data.document_ids)    item.document_ids    = data.document_ids;
     if (data.notes)           item.notes           = data.notes;
     if (data.header_note)     item.header_note     = data.header_note;
