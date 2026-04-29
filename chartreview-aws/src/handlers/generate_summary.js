@@ -1,3 +1,4 @@
+// Updated: 2026-04-29 — Add condense_pt flag: keeps only first+last PT visit per provider when enabled
 // Updated: 2026-04-26 — v4: strengthen date accuracy (checklist overrides HPI dates); fix diagnosis field leakage from treatment plan
 // Updated: 2026-04-29 — C-4 detection merged into VI pre-pass; dedicated C-4 sweep removed (saves 5-10 Bedrock calls per case)
 // Surgical swaps only:
@@ -413,7 +414,7 @@ ${skipPagesSection}`;
 
 // ─── generateSummaryWorker — ported v56 generateSummary logic ────────────────
 const generateSummaryWorker = async (event) => {
-  const { job_id, doc_ids, patient_name = '', org_id } = event;
+  const { job_id, doc_ids, patient_name = '', org_id, condense_pt = false } = event;
   console.log(`generateSummaryWorker start: job_id=${job_id} docs=${doc_ids?.length}`);
 
   try {
@@ -515,6 +516,33 @@ const generateSummaryWorker = async (event) => {
       knownVisits = knownVisits.filter(v =>
         !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
       );
+
+      // ── Condense PT: if requested, keep only first + last PT visit per provider ──
+      if (condense_pt) {
+        const PT_REGEX = /physical.?therapy|\bPT\b|\bOT\b|occupational.?therapy/i;
+        const ptByProvider = {};
+        const nonPt = [];
+        for (const v of knownVisits) {
+          if (PT_REGEX.test(v.visit_type || '')) {
+            const key = (v.provider || 'unknown').toLowerCase().trim();
+            if (!ptByProvider[key]) ptByProvider[key] = [];
+            ptByProvider[key].push(v);
+          } else {
+            nonPt.push(v);
+          }
+        }
+        const ptCondensed = [];
+        for (const [key, visits] of Object.entries(ptByProvider)) {
+          const sorted = visits.slice().sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+          ptCondensed.push(sorted[0]); // first
+          if (sorted.length > 1) ptCondensed.push(sorted[sorted.length - 1]); // last
+          console.log(`condense_pt: provider="${key}" had ${sorted.length} PT visits -> kept first (${sorted[0].date}) + last (${sorted[sorted.length-1]?.date})`);
+        }
+        const beforeCount = knownVisits.length;
+        knownVisits = [...nonPt, ...ptCondensed];
+        console.log(`condense_pt: reduced knownVisits from ${beforeCount} to ${knownVisits.length} (removed ${beforeCount - knownVisits.length} PT visits)`);
+      }
+
       console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
       console.log('VI checklist dates:', JSON.stringify(knownVisits.map(v => ({ date: v.date, provider: v.provider, type: v.visit_type }))));
 
@@ -875,7 +903,7 @@ Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided 
 // ─── generateSummaryStart — kick off job + invoke worker async ────────────────
 const generateSummaryStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
-  const { doc_ids, patient_name = '' } = body;
+  const { doc_ids, patient_name = '', condense_pt = false } = body;
   const org_id = event._orgId || body.org_id || '';
 
   if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
@@ -892,7 +920,7 @@ const generateSummaryStartHandler = async (event) => {
   await lambda.send(new InvokeCommand({
     FunctionName: WORKER_FN,
     InvocationType: 'Event',
-    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id })),
+    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id, condense_pt })),
   }));
 
   console.log(`generateSummaryStart: job_id=${job_id} docs=${doc_ids.length}`);
