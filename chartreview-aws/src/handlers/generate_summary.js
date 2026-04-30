@@ -93,7 +93,7 @@ const callBedrock = async (fileKeys, prompt, schema) => {
                          err.$metadata?.httpStatusCode === 429;
       console.warn(`callBedrock: model ${modelId} failed — ${err.message}`);
       lastErr = err;
-      if (!isThrottle) throw err; // non-throttle errors: don't try other models
+      // try next model on any error (model not found, validation, throttle, etc.)
       // throttled: try next model in chain
     }
   }
