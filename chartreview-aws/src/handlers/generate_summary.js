@@ -1,4 +1,4 @@
-// Updated: 2026-04-29 — Add condense_pt flag: keeps only first+last PT visit per provider when enabled
+// Updated: 2026-04-29 — Add condense_pt flag + 100-page Bedrock guard in runBatch
 // Updated: 2026-04-26 — v4: strengthen date accuracy (checklist overrides HPI dates); fix diagnosis field leakage from treatment plan
 // Updated: 2026-04-29 — C-4 detection merged into VI pre-pass; dedicated C-4 sweep removed (saves 5-10 Bedrock calls per case)
 // Surgical swaps only:
@@ -440,6 +440,7 @@ const generateSummaryWorker = async (event) => {
         label: doc.file_name || doc.aws_document_id,
         file_key: fileKey,
         file_size: doc.file_size || 0,
+        page_count: doc.page_count || 0,
         page_classifications: partClassif,
       });
     }
@@ -626,6 +627,26 @@ const generateSummaryWorker = async (event) => {
 
     // ── runBatch — AWS swap #1: callBedrock instead of InvokeLLM ─────────────
     const runBatch = async (batch, batchIndex, knownVisitsChecklist = []) => {
+      // Guard: Bedrock hard limit is 100 PDF pages per request.
+      // If this batch would exceed 90 pages, split into single-part sub-batches.
+      const BEDROCK_PAGE_LIMIT = 90;
+      const totalPages = batch.reduce((sum, p) => sum + (p.page_count || 50), 0);
+      if (batch.length > 1 && totalPages > BEDROCK_PAGE_LIMIT) {
+        console.log(`Batch ${batchIndex + 1}: ${totalPages} estimated pages > ${BEDROCK_PAGE_LIMIT} limit — splitting into ${batch.length} single-part sub-batches`);
+        const subResults = [];
+        for (let si = 0; si < batch.length; si++) {
+          const sub = await runBatch([batch[si]], batchIndex + (si / 10), knownVisitsChecklist);
+          if (sub) subResults.push(sub);
+        }
+        // Merge sub-results: combine visits arrays, take first patient_name/case_number
+        if (subResults.length === 0) return null;
+        return {
+          patient_name: subResults.find(r => r.patient_name)?.patient_name || '',
+          case_number: subResults.find(r => r.case_number)?.case_number || '',
+          visits: subResults.flatMap(r => r.visits || []),
+        };
+      }
+
       // AWS swap #2: use file_key instead of download-url
       const fileKeys = batch.map(p => p.file_key).filter(Boolean);
       const skipPages = batch.flatMap(p =>
@@ -969,7 +990,7 @@ const buildVisitIndexWorkerFn = async (event) => {
       if (allNonClinical) { console.log(`Skipping non-clinical ${doc.aws_document_id}`); continue; }
       const fileKey = resolveFileKey(doc);
       if (!fileKey) { console.warn(`No file_key for ${doc.aws_document_id}`); continue; }
-      allParts.push({ id: doc.aws_document_id, label: doc.file_name || doc.aws_document_id, file_key: fileKey });
+      allParts.push({ id: doc.aws_document_id, label: doc.file_name || doc.aws_document_id, file_key: fileKey, page_count: doc.page_count || 0 });
     }
 
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
