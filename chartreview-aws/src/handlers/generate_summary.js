@@ -1,4 +1,4 @@
-// Updated: 2026-04-29 — Add condense_pt flag + 100-page Bedrock guard in runBatch
+// Updated: 2026-04-29 — BATCH_SIZE=1 (avoids Bedrock 100-page limit); condense_pt flag; 100-page guard
 // Updated: 2026-04-26 — v4: strengthen date accuracy (checklist overrides HPI dates); fix diagnosis field leakage from treatment plan
 // Updated: 2026-04-29 — C-4 detection merged into VI pre-pass; dedicated C-4 sweep removed (saves 5-10 Bedrock calls per case)
 // Surgical swaps only:
@@ -559,9 +559,9 @@ const generateSummaryWorker = async (event) => {
       knownVisits = [];
     }
 
-    // ── Build batches (BATCH_SIZE=2, BATCH_OVERLAP=1) — identical to v56 ──────
-    const BATCH_SIZE = 2;
-    const BATCH_OVERLAP = 1;
+    // ── Build batches (BATCH_SIZE=1) — one part per call, max 50 pages, never hits Bedrock 100-page limit ──
+    const BATCH_SIZE = 1;
+    const BATCH_OVERLAP = 0;
     const batches = [];
     for (let start = 0; start < allParts.length; start += BATCH_SIZE - BATCH_OVERLAP) {
       const batchStart = batches.length === 0 ? 0 : start;
