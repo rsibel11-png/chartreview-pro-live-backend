@@ -1,4 +1,4 @@
-// Updated: 2026-04-30 — patch: force impression_diagnosis as plain semicolon-separated string, never numbered list
+// Updated: 2026-04-26 — v4: strengthen date accuracy (checklist overrides HPI dates); fix diagnosis field leakage from treatment plan
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -324,7 +324,7 @@ You may encounter different types of documents. Handle each type as follows:
 A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
     Extract each visit as a separate entry with all standard fields.
     CRITICAL: Always extract and include the actual practice name/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
-    DIAGNOSIS FIELD RULE: impression_diagnosis must contain ONLY diagnosis names and ICD-10 codes from the Impression or Assessment section (e.g. "Foot Pain, Left (M79.672); Hallux Valgus (M20.10)"). Stop at the first line of treatment/plan text. The EHR may show diagnoses in a two-column layout with ICD codes in gray subtext — extract only the diagnosis name + ICD code pairs, NOT the plan or recommendations that follow. IMPORTANT: Return impression_diagnosis as a single plain text string only. NEVER use numbered lists, bullet points, or line breaks. If multiple diagnoses exist, separate them with a semicolon and space (e.g. "Diagnosis One (M00.0); Diagnosis Two (M00.1)"). Never split an ICD code across items.
+    DIAGNOSIS FIELD RULE: impression_diagnosis must contain ONLY diagnosis names and ICD-10 codes from the Impression or Assessment section (e.g. "Foot Pain, Left (M79.672); Hallux Valgus (M20.10)"). Stop at the first line of treatment/plan text. The EHR may show diagnoses in a two-column layout with ICD codes in gray subtext — extract only the diagnosis name + ICD code pairs, NOT the plan or recommendations that follow.
     - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
     - practice_setting must be the PRACTICE NAME ONLY — do NOT include street addresses, suite numbers, zip codes, or city/state. Example: "Desert Orthopaedic Center" NOT "Desert Orthopaedic Center, 2800 East Desert Inn Road, Ste 100, Las Vegas, NV"
     - If the document shows "Facility Name - Branch/Location" format (e.g. "Desert Orthopaedic Center - Desert Inn"), keep that format as the name
