@@ -26,8 +26,8 @@ const DOCS_TABLE    = process.env.DOCUMENTS_TABLE       || 'chartreview-document
 const JOBS_TABLE    = process.env.JOBS_TABLE            || 'chartreview-jobs-prod';
 // Model fallback chain: try each in order when throttled
 const BEDROCK_MODELS = [
-  'us.anthropic.claude-3-5-sonnet-20241022-v2:0', // primary: cross-region Sonnet 3.5 v2 (confirmed working)
-  'us.anthropic.claude-3-5-sonnet-20240620-v1:0', // fallback: cross-region Sonnet 3.5 v1
+  'us.anthropic.claude-sonnet-4-6',               // primary: cross-region Sonnet 4.6 (no version suffix)
+  'us.anthropic.claude-sonnet-4-5-20250929-v1:0', // fallback: cross-region Sonnet 4.5
 ];
 const WORKER_FN     = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
 
@@ -93,7 +93,7 @@ const callBedrock = async (fileKeys, prompt, schema) => {
                          err.$metadata?.httpStatusCode === 429;
       console.warn(`callBedrock: model ${modelId} failed — ${err.message}`);
       lastErr = err;
-      // try next model on any error (model not found, validation, throttle, etc.)
+      if (!isThrottle) throw err; // non-throttle errors: don't try other models
       // throttled: try next model in chain
     }
   }
@@ -747,6 +747,7 @@ If NO C-4 form is present in these documents, set found: false and leave all oth
       const foundDates = new Set(allVisits.map(v => (v.visit_date || '').trim()).filter(Boolean));
       const missingVisits = knownVisits.filter(v => {
         if (!v.date) return false;
+        if (/physical.?therapy|\bPT\b|\bOT\b|occupational.?therapy/i.test(v.visit_type || '')) return false;
         return !foundDates.has(v.date);
       });
 
@@ -934,7 +935,144 @@ const generateSummaryHandler = async (event) => {
   return generateSummaryStartHandler(event);
 };
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD VISIT INDEX — reuses all existing infrastructure, stops after VI pre-pass
+// Updated: 2026-04-28 — replaces standalone build_visit_index.js entirely
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const buildVisitIndexWorkerFn = async (event) => {
+  const { job_id, doc_ids, org_id, patient_name: inputPatientName = '' } = event;
+  console.log(`buildVisitIndexWorker start: job_id=${job_id} docs=${doc_ids?.length}`);
+
+  try {
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE, Key: { job_id },
+      UpdateExpression: 'SET #s = :s, updated_at = :now',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':s': 'running', ':now': new Date().toISOString() },
+    }));
+
+    // Fetch doc records — identical to generateSummaryWorker
+    const docRecords = await fetchDocRecords(doc_ids);
+    if (!docRecords.length) {
+      await markJobFailed(job_id, 'No documents found in DynamoDB');
+      return;
+    }
+
+    // Build allParts — identical to generateSummaryWorker
+    const allParts = [];
+    for (const doc of docRecords) {
+      const partClassif = doc.page_classifications || [];
+      const allNonClinical = partClassif.length > 0 && partClassif.every(p => !p.is_clinical && !p.restored);
+      if (allNonClinical) { console.log(`Skipping non-clinical ${doc.aws_document_id}`); continue; }
+      const fileKey = resolveFileKey(doc);
+      if (!fileKey) { console.warn(`No file_key for ${doc.aws_document_id}`); continue; }
+      allParts.push({ id: doc.aws_document_id, label: doc.file_name || doc.aws_document_id, file_key: fileKey });
+    }
+
+    if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
+
+    // VI pre-pass — identical to generateSummaryWorker
+    const VI_CONCURRENCY = 4;
+    const viSchema = {
+      type: 'object',
+      properties: {
+        patient_name: { type: 'string' },
+        visits: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              date: { type: 'string' },
+              provider: { type: 'string' },
+              facility: { type: 'string' },
+              visit_type: { type: 'string' },
+            },
+          },
+        },
+      },
+    };
+
+    const viResults = new Array(allParts.length).fill(null);
+    let extractedPatientName = inputPatientName || '';
+    for (let vi = 0; vi < allParts.length; vi += VI_CONCURRENCY) {
+      const viChunk = allParts.slice(vi, vi + VI_CONCURRENCY);
+      await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
+        const partIdx = vi + chunkIdx;
+        try {
+          const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema);
+          if (Array.isArray(viResult.visits)) {
+            viResults[partIdx] = viResult.visits.filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
+          }
+          if (viResult.patient_name && !extractedPatientName) extractedPatientName = viResult.patient_name;
+          console.log(`VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
+        } catch (e) {
+          console.warn(`VI failed for ${viPart.id}: ${e.message}`);
+        }
+      }));
+    }
+
+    let knownVisits = [];
+    for (const tagged of viResults) { if (tagged) knownVisits = knownVisits.concat(tagged); }
+
+    // Deduplicate
+    const viSeen = new Set();
+    knownVisits = knownVisits.filter(v => {
+      const k = `${v.date}|${(v.provider || '').toLowerCase()}`;
+      if (viSeen.has(k)) return false;
+      viSeen.add(k); return true;
+    });
+    knownVisits = knownVisits.filter(v => !/admin|fax|authorization|reminder|order/i.test(v.visit_type || ''));
+    knownVisits.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+    console.log(`buildVisitIndexWorker complete: ${knownVisits.length} visits`);
+
+    // Write result — same pattern as markJobComplete
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE, Key: { job_id },
+      UpdateExpression: 'SET #s = :s, #res = :r, updated_at = :now',
+      ExpressionAttributeNames: { '#s': 'status', '#res': 'result' },
+      ExpressionAttributeValues: { ':s': 'complete', ':r': { known_visits: knownVisits, patient_name: extractedPatientName || inputPatientName || '' }, ':now': new Date().toISOString() },
+    }));
+
+  } catch (err) {
+    console.error('buildVisitIndexWorker error:', err);
+    await markJobFailed(job_id, err.message);
+  }
+};
+
+const buildVisitIndexStartHandler = async (event) => {
+  const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
+  const { doc_ids, patient_name: bodyPatientName = '' } = body;
+  const org_id = event._orgId || body.org_id || '';
+
+  if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
+
+  const job_id = randomUUID();
+  await dynamo.send(new UpdateCommand({
+    TableName: JOBS_TABLE, Key: { job_id },
+    UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t, org_id = :oid',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':s': 'pending', ':now': new Date().toISOString(), ':t': 'visit_index', ':oid': org_id },
+  }));
+
+  // Invoke worker asynchronously — reuses the same generateSummaryWorker Lambda function pattern
+  await lambda.send(new InvokeCommand({
+    FunctionName: process.env.VI_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-buildVisitIndexWorker',
+    InvocationType: 'Event',
+    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, org_id, patient_name: bodyPatientName })),
+  }));
+
+  console.log(`buildVisitIndexStart: job_id=${job_id} docs=${doc_ids.length}`);
+  return httpResponse(200, { job_id });
+};
+
 module.exports = {
   generateSummaryStart:  validateApiKey(generateSummaryStartHandler),
   generateSummaryWorker: generateSummaryWorker,
+  buildVisitIndexStart:  validateApiKey(buildVisitIndexStartHandler),
+  buildVisitIndexWorker: buildVisitIndexWorkerFn,
 };
+
+
