@@ -413,11 +413,13 @@ PHYSICAL THERAPY INSTRUCTIONS:
 - Extract EACH PT session as a separate visit entry — one entry per date.
 - Include the specific facility name (e.g. "Dignity Health Physical Therapy - Las Vegas") in practice_setting.
 - Do not combine or summarize PT visits.
-- hpi_summary: patient-reported symptoms and functional limitations documented at that session (e.g. pain complaints, difficulty with ADLs, progress notes).
-- pain_scale: extract numeric pain rating if documented (e.g. "6/10"), otherwise "Not Documented".
-- physical_exam_findings: ROM measurements, strength testing, functional assessment, gait observations — extract whatever is present.
-- treatment_plan: exercises performed, modalities used (e.g. ultrasound, TENS, ice/heat, manual therapy), home exercise program assigned.
-- If any of these fields are present in the note, populate them — do not default to "Not Documented" unless the field is genuinely absent from the document.
+- PT notes use specific section headers — map them to fields as follows:
+  - hpi_summary: content from "HISTORY", "Pain Assessment", or "Subjective Examination" sections — include the patient's reported symptoms, functional limitations, activity level, and any progress narrative (e.g. "pt reports foot was hurting more this week").
+  - pain_scale: numeric rating from "Pain Assessment" or "Chief Complaint: Pain Severity" (e.g. "4/10 current, 7/10 worst"). Include both current and worst if documented.
+  - physical_exam_findings: content from "Objective Examination", "Functional Observation", "Range of Motion", "Muscle Testing", "Gait/Locomotion", and "Functional Tests" sections — include ROM values, MMT grades, balance scores, gait observations.
+  - treatment_plan: content from "Treatments", "PT Interventions Consisted of", "Exercise Activities", "Manual Interventions", "Modalities" sections — list exercises performed, manual therapy techniques, modalities used (e.g. cryotherapy, TENS, ultrasound), and home exercise program if assigned.
+  - impression_diagnosis: ICD codes or diagnosis labels from "Diagnoses" section if present.
+- If ANY of these sections are present in the note, populate the corresponding field — do not write "Not Documented" unless the section is genuinely absent from the document.
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
 ${checklistSection}
