@@ -348,26 +348,27 @@ const generateSummaryWorker = async (event) => {
     // Fetch all document parts from DynamoDB
     const allParts = [];
     for (const docId of doc_ids) {
-      const res = await dynamo.send(new QueryCommand({
+      // Direct lookup by primary key first
+      const direct = await dynamo.send(new GetItemCommand({
         TableName: TABLE_NAME,
-        IndexName: 'original_document_id-index',
-        KeyConditionExpression: 'original_document_id = :id',
-        ExpressionAttributeValues: marshall({ ':id': docId }),
+        Key: marshall({ aws_document_id: docId }),
       }));
-      const parts = (res.Items || []).map(unmarshall).filter(p => p.status === 'processed' && p.file_key);
-      if (parts.length > 0) {
-        allParts.push(...parts);
-      } else {
-        // Try direct lookup
-        const direct = await dynamo.send(new GetItemCommand({
-          TableName: TABLE_NAME,
-          Key: marshall({ aws_document_id: docId }),
-        }));
-        if (direct.Item) {
-          const doc = unmarshall(direct.Item);
-          if (doc.status === 'processed' && doc.file_key) allParts.push(doc);
+      if (direct.Item) {
+        const doc = unmarshall(direct.Item);
+        if (doc.status === 'processed' && doc.file_key) {
+          allParts.push(doc);
+          continue;
         }
       }
+      // Fallback: scan for parts with matching original_document_id
+      const scanRes = await dynamo.send(new ScanCommand({
+        TableName: TABLE_NAME,
+        FilterExpression: 'original_document_id = :id AND #s = :processed',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: marshall({ ':id': docId, ':processed': 'processed' }),
+      }));
+      const parts = (scanRes.Items || []).map(unmarshall).filter(p => p.file_key);
+      if (parts.length > 0) allParts.push(...parts);
     }
 
     console.log(`generateSummaryWorker: ${allParts.length} parts fetched`);
@@ -544,25 +545,27 @@ const buildVisitIndexWorkerFn = async (event) => {
 
     const allParts = [];
     for (const docId of doc_ids) {
-      const res = await dynamo.send(new QueryCommand({
+      // Direct lookup by primary key first
+      const direct = await dynamo.send(new GetItemCommand({
         TableName: TABLE_NAME,
-        IndexName: 'original_document_id-index',
-        KeyConditionExpression: 'original_document_id = :id',
-        ExpressionAttributeValues: marshall({ ':id': docId }),
+        Key: marshall({ aws_document_id: docId }),
       }));
-      const parts = (res.Items || []).map(unmarshall).filter(p => p.status === 'processed' && p.file_key);
-      if (parts.length > 0) {
-        allParts.push(...parts);
-      } else {
-        const direct = await dynamo.send(new GetItemCommand({
-          TableName: TABLE_NAME,
-          Key: marshall({ aws_document_id: docId }),
-        }));
-        if (direct.Item) {
-          const doc = unmarshall(direct.Item);
-          if (doc.status === 'processed' && doc.file_key) allParts.push(doc);
+      if (direct.Item) {
+        const doc = unmarshall(direct.Item);
+        if (doc.status === 'processed' && doc.file_key) {
+          allParts.push(doc);
+          continue;
         }
       }
+      // Fallback: scan for parts with matching original_document_id
+      const scanRes = await dynamo.send(new ScanCommand({
+        TableName: TABLE_NAME,
+        FilterExpression: 'original_document_id = :id AND #s = :processed',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: marshall({ ':id': docId, ':processed': 'processed' }),
+      }));
+      const parts = (scanRes.Items || []).map(unmarshall).filter(p => p.file_key);
+      if (parts.length > 0) allParts.push(...parts);
     }
 
     if (allParts.length === 0) throw new Error('No processed document parts found');
