@@ -308,7 +308,7 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
   const checklistSection = knownVisitsChecklist.length > 0
     ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
       knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
-      `\n\nCRITICAL: Every date in the checklist above MUST appear in your output visits array unless it is a PT/OT visit being intentionally de-duplicated. If you cannot find clinical details for a checklist date, still include a visit entry with visit_date set to that date and fields set to "Not Documented".`
+      `\n\nCRITICAL: Every date in the checklist above MUST appear in your output visits array — including PT/OT therapy visits. If you cannot find clinical details for a checklist date, still include a visit entry with visit_date set to that date and fields set to "Not Documented".`
     : '';
   const skipPagesSection = skipPages.length > 0
     ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from page numbers): ${skipPages.join(', ')}`
