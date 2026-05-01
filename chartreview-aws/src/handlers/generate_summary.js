@@ -747,7 +747,7 @@ If NO C-4 form is present in these documents, set found: false and leave all oth
       const foundDates = new Set(allVisits.map(v => (v.visit_date || '').trim()).filter(Boolean));
       const missingVisits = knownVisits.filter(v => {
         if (!v.date) return false;
-        if (/physical.?therapy|\bPT\b|\bOT\b|occupational.?therapy/i.test(v.visit_type || '')) return false;
+        // PT visits are included in recovery pass
         return !foundDates.has(v.date);
       });
 
