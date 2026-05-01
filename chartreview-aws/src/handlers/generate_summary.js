@@ -372,15 +372,28 @@ D) AMBULANCE / EMS REPORTS:
    - visit_date: date of incident/transport
 
 E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as C-4 if document EXPLICITLY shows official WCB Form C-4 header, title block, or reference (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits as C-4.
+    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official
+    WCB Form C-4 header, title block, or reference number (e.g., "Form C-4",
+    "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or
+    injury reports as C-4 unless the actual form is present.
+
     For ACTUAL C-4 forms only:
-    - rendering_provider: treating physician's name (signature block or printed name)
+    - rendering_provider: the treating physician's name (look for signature block or printed
+      name at bottom of form)
     - practice_setting: "C-4 Workers' Compensation Report"
     - impression_diagnosis: diagnosis only — ICD codes if present, otherwise written diagnosis
-    - visit_date: date form was completed or examination date — CRITICAL to extract even if rest is illegible
-    - hpi_summary, chief_complaint, physical_exam_findings, treatment_plan: leave empty
-    - CROSS-REFERENCE: If C-4 date matches an office visit in same document set, use that visit's provider/diagnosis to fill illegible C-4 fields. Note when extrapolated.
-    - ORDERING: C-4 entry must use same visit_date as corresponding office visit. Place C-4 entry BEFORE the regular office visit of the same date.
+    - visit_date: the date the form was completed or examination date — CRITICAL to extract
+      even if the rest of the form is illegible
+    - hpi_summary: leave empty
+    - chief_complaint: leave empty
+    - physical_exam_findings: leave empty
+    - treatment_plan: leave empty
+    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set,
+      use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields.
+      Explicitly note when extrapolated.
+    - ORDERING: The C-4 entry must use the same visit_date as the corresponding office visit
+      so it appears together in chronological order. Place the C-4 entry BEFORE the regular
+      office visit entry of the same date.
 
 DEDUPLICATION RULE: If same date has BOTH a physician progress report AND an office visit from the SAME provider, ONLY include the office visit. The office visit contains the actual clinical information.
 
