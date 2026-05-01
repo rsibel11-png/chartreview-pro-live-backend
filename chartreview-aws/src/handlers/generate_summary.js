@@ -307,9 +307,9 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
     ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files in this batch and combine them into a single comprehensive response. Do not stop after the first document.`
     : '';
   const checklistSection = knownVisitsChecklist.length > 0
-    ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass):\nThe following visits are confirmed to exist across this document set. For each one, search your current batch carefully:\n` +
+    ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
       knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
-      `\n\nRULES:\n- If you find the visit note in your current documents: include it with ALL clinical details extracted. Do NOT write "Not Documented" if content is present.\n- If the visit is NOT present in your current batch: OMIT it entirely. Do not create a placeholder. Do not write "Not documented in this batch". It belongs to a different batch and will be captured there.\n- Do NOT invent visits that are not in the checklist unless you see a complete visit note for that date in your current documents.`
+      `\n\nCRITICAL: Every date in the checklist above MUST appear in your output visits array — including PT/OT therapy visits. If you cannot find clinical details for a checklist date, still include a visit entry with visit_date set to that date and fields set to "Not Documented".`
     : '';
   const skipPagesSection = skipPages.length > 0
     ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from page numbers): ${skipPages.join(', ')}`
@@ -372,28 +372,15 @@ D) AMBULANCE / EMS REPORTS:
    - visit_date: date of incident/transport
 
 E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official
-    WCB Form C-4 header, title block, or reference number (e.g., "Form C-4",
-    "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or
-    injury reports as C-4 unless the actual form is present.
-
+    STRICT IDENTIFICATION: Only treat as C-4 if document EXPLICITLY shows official WCB Form C-4 header, title block, or reference (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits as C-4.
     For ACTUAL C-4 forms only:
-    - rendering_provider: the treating physician's name (look for signature block or printed
-      name at bottom of form)
+    - rendering_provider: treating physician's name (signature block or printed name)
     - practice_setting: "C-4 Workers' Compensation Report"
     - impression_diagnosis: diagnosis only — ICD codes if present, otherwise written diagnosis
-    - visit_date: the date the form was completed or examination date — CRITICAL to extract
-      even if the rest of the form is illegible
-    - hpi_summary: leave empty
-    - chief_complaint: leave empty
-    - physical_exam_findings: leave empty
-    - treatment_plan: leave empty
-    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set,
-      use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields.
-      Explicitly note when extrapolated.
-    - ORDERING: The C-4 entry must use the same visit_date as the corresponding office visit
-      so it appears together in chronological order. Place the C-4 entry BEFORE the regular
-      office visit entry of the same date.
+    - visit_date: date form was completed or examination date — CRITICAL to extract even if rest is illegible
+    - hpi_summary, chief_complaint, physical_exam_findings, treatment_plan: leave empty
+    - CROSS-REFERENCE: If C-4 date matches an office visit in same document set, use that visit's provider/diagnosis to fill illegible C-4 fields. Note when extrapolated.
+    - ORDERING: C-4 entry must use same visit_date as corresponding office visit. Place C-4 entry BEFORE the regular office visit of the same date.
 
 DEDUPLICATION RULE: If same date has BOTH a physician progress report AND an office visit from the SAME provider, ONLY include the office visit. The office visit contains the actual clinical information.
 
@@ -413,13 +400,6 @@ PHYSICAL THERAPY INSTRUCTIONS:
 - Extract EACH PT session as a separate visit entry — one entry per date.
 - Include the specific facility name (e.g. "Dignity Health Physical Therapy - Las Vegas") in practice_setting.
 - Do not combine or summarize PT visits.
-- PT notes use specific section headers — map them to fields as follows:
-  - hpi_summary: content from "HISTORY", "Pain Assessment", or "Subjective Examination" sections — include the patient's reported symptoms, functional limitations, activity level, and any progress narrative (e.g. "pt reports foot was hurting more this week").
-  - pain_scale: numeric rating from "Pain Assessment" or "Chief Complaint: Pain Severity" (e.g. "4/10 current, 7/10 worst"). Include both current and worst if documented.
-  - physical_exam_findings: content from "Objective Examination", "Functional Observation", "Range of Motion", "Muscle Testing", "Gait/Locomotion", and "Functional Tests" sections — include ROM values, MMT grades, balance scores, gait observations.
-  - treatment_plan: content from "Treatments", "PT Interventions Consisted of", "Exercise Activities", "Manual Interventions", "Modalities" sections — list exercises performed, manual therapy techniques, modalities used (e.g. cryotherapy, TENS, ultrasound), and home exercise program if assigned.
-  - impression_diagnosis: ICD codes or diagnosis labels from "Diagnoses" section if present.
-- If ANY of these sections are present in the note, populate the corresponding field — do not write "Not Documented" unless the section is genuinely absent from the document.
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
 ${checklistSection}
@@ -659,7 +639,95 @@ const generateSummaryWorker = async (event) => {
       }
     }
 
-    // C-4 detection handled by main pass prompt (section E) — no dedicated sweep needed
+    // ── Dedicated C-4 pass (identical to v56) ─────────────────────────────────
+    await setJobStatus(job_id, 'Running dedicated C-4 form extraction pass...');
+    try {
+      console.log('generateSummaryWorker: running dedicated C-4 pass');
+      const c4FileKeys = allParts.map(p => p.file_key).filter(Boolean);
+      if (c4FileKeys.length > 0) {
+        const C4_BATCH = 3;
+        let c4Entry = null;
+        const c4Schema = {
+          type: 'object',
+          properties: {
+            found: { type: 'boolean' },
+            visit_date: { type: 'string' },
+            rendering_provider: { type: 'string' },
+            facility: { type: 'string' },
+            diagnosis: { type: 'string' },
+            treatment: { type: 'string' },
+            body_part: { type: 'string' },
+          },
+        };
+        const c4Prompt = `You are reviewing medical-legal documents to find a WCB Form C-4 (Workers' Compensation Board Employee's Claim for Compensation / Report of Initial Treatment).
+
+TASK: Search the provided documents for an actual physical C-4 form. You will know it is a C-4 form if you see ANY of these identifiers in the document text:
+- "FORM C-4" or "Form C-4"
+- "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT"
+- "EMPLOYEE'S CLAIM FOR COMPENSATION" combined with structured form fields
+
+If you find a C-4 form, extract ONLY the following fields directly from the form itself. Do NOT infer or extrapolate from other documents unless a field is physically illegible on the form.
+
+Fields to extract from the C-4 form:
+- found: true (set to false if no C-4 form is present in these documents)
+- visit_date: the date the form was completed or the examination date (from the form's date field, format YYYY-MM-DD)
+- rendering_provider: the name of the treating physician or health care provider who COMPLETED this form and provided the initial treatment (typically found in a "Health Care Provider" or "Treating Physician" field near the top or middle of the form, NOT the orthopedic or follow-up surgeon referenced elsewhere in the record). On Nevada C-4 forms this is usually the ER physician, urgent care doctor, or first-contact provider. If the form was completed at a hospital emergency department, use the ER physician's name.
+- facility: the facility name where treatment was provided (e.g. "Centennial Hills Hospital Emergency Room")
+- diagnosis: the diagnosis or nature of injury as written on the form
+- treatment: the treatment provided as written on the form
+- body_part: the part(s) of body injured as written on the form
+
+If you find a C-4 form but a field is physically illegible or blank on the form, return an empty string for that field -- do NOT fill it in from other documents.
+If NO C-4 form is present in these documents, set found: false and leave all other fields empty.`;
+
+        for (let ci = 0; ci < c4FileKeys.length; ci += C4_BATCH) {
+          const c4Batch = c4FileKeys.slice(ci, ci + C4_BATCH);
+          // AWS swap #1: callBedrock instead of InvokeLLM
+          const c4Result = await callBedrock(c4Batch, c4Prompt, c4Schema);
+          if (c4Result.found === true && c4Result.visit_date) {
+            c4Entry = c4Result;
+            break;
+          }
+        }
+
+        if (c4Entry) {
+          const c4Visit = {
+            visit_date: c4Entry.visit_date || '',
+            rendering_provider: toTitleCase(c4Entry.rendering_provider || ''),
+            practice_setting: c4Entry.facility
+              ? `C-4 Workers' Compensation Report (${c4Entry.facility})`
+              : "C-4 Workers' Compensation Report",
+            chief_complaint: '',
+            hpi_summary: '',
+            injury_date: '',
+            pain_scale: '',
+            symptom_progression: 'not_documented',
+            physical_exam_findings: '',
+            imaging_findings: '',
+            lab_findings: '',
+            impression_diagnosis: [c4Entry.diagnosis, c4Entry.body_part ? `Body part: ${c4Entry.body_part}` : ''].filter(Boolean).join('. '),
+            icd10_codes: [],
+            treatment_plan: c4Entry.treatment || '',
+          };
+          allVisits = allVisits.filter(v => {
+            const s = (v.practice_setting || '').toLowerCase();
+            return !s.includes('c-4') && !s.includes("workers' compensation report") && !s.includes('wcb');
+          });
+          allVisits.push(c4Visit);
+          console.log('C-4 dedicated pass: found at', c4Visit.visit_date);
+        } else {
+          const beforeCount = allVisits.length;
+          allVisits = allVisits.filter(v => {
+            const s = (v.practice_setting || '').toLowerCase();
+            return !s.includes('c-4') && !s.includes("workers' compensation report") && !s.includes('wcb');
+          });
+          const stripped = beforeCount - allVisits.length;
+          if (stripped > 0) console.log(`C-4 pass: no form found -- stripped ${stripped} hallucinated C-4 entries`);
+        }
+      }
+    } catch (c4Err) {
+      console.warn('C-4 dedicated pass failed (non-fatal):', c4Err.message);
+    }
 
     // ── Merge + deduplicate + sort (identical to v56) ─────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
@@ -1008,4 +1076,5 @@ module.exports = {
   buildVisitIndexStart:  validateApiKey(buildVisitIndexStartHandler),
   buildVisitIndexWorker: buildVisitIndexWorkerFn,
 };
+
 
