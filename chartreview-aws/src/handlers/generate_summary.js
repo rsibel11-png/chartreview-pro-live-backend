@@ -393,8 +393,8 @@ CRITICAL DATE AND TIMELINE ACCURACY:
 - NEVER use a date from the HPI narrative as the visit_date. The HPI often mentions the date of injury (e.g. "Injury occurred 10/31/2022") — this is NOT the visit date. The visit date is in the document header.
 - The date of injury is NEVER the visit date unless the document header explicitly shows the patient was seen on that exact day.
 - KNOWN VISITS CHECKLIST OVERRIDE: If a date appears in the KNOWN VISITS CHECKLIST above, you MUST use that exact date as visit_date for the matching visit. This is an absolute rule with no exceptions. Do NOT output a different date for a visit that matches a checklist entry.
-- If you find a date in the document body (e.g. in the HPI, injury narrative, or referral text) that does NOT appear in the KNOWN VISITS CHECKLIST, do NOT create a visit for it. Discard it entirely — it is almost certainly a referenced date (injury date, prior visit, imaging referral) and not an actual visit in this document.
-- The only valid visit_date values are: (a) dates explicitly listed in the KNOWN VISITS CHECKLIST, or (b) dates from document headers for visits that are genuinely absent from the checklist.
+- If you find a date in the document body (e.g. in the HPI, injury narrative, or referral text) that does NOT appear in the KNOWN VISITS CHECKLIST, do NOT create a visit for it UNLESS you can see a complete visit note for that date in the documents you are currently reviewing. If the checklist is present but a date is missing from it, it likely belongs to a different batch — skip it. Do NOT invent or hallucinate visits for dates not supported by an actual note in this batch.
+- Valid visit_date values are: (a) dates explicitly listed in the KNOWN VISITS CHECKLIST that you can find evidence of in THIS batch, or (b) dates from document headers for complete visit notes present in THIS batch that are genuinely absent from the checklist.
 
 PHYSICAL THERAPY INSTRUCTIONS:
 - Extract EACH PT session as a separate visit entry — one entry per date.
