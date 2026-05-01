@@ -86,6 +86,7 @@ const callBedrock = async (fileKeys, prompt, schema) => {
       const toolUse = parsed.content?.find(b => b.type === 'tool_use');
       if (!toolUse) throw new Error('Bedrock returned no tool_use block');
       console.log(`callBedrock: success with model ${modelId}`);
+      console.log('callBedrock input keys: ' + Object.keys(toolUse.input || {}).join(','));
       return toolUse.input;
     } catch (err) {
       const isThrottle = err.message?.includes('Too many tokens') ||
