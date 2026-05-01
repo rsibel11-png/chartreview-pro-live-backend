@@ -514,17 +514,17 @@ const generateSummaryWorker = async (event) => {
       knownVisits = [];
     }
 
-    // ── Build batches (BATCH_SIZE=2, BATCH_OVERLAP=1) — identical to v56 ──────
-    const BATCH_SIZE = 2;
-    const BATCH_OVERLAP = 1;
+    // ── Build batches (BATCH_SIZE=1, BATCH_OVERLAP=0, BATCH_CONCURRENCY=4) ────
+    // Each part gets its own isolated Bedrock call — avoids output token
+    // competition and schema confusion when VI checklist is large (Sonnet 4.6).
+    const BATCH_SIZE = 1;
+    const BATCH_OVERLAP = 0;
     const batches = [];
-    for (let start = 0; start < allParts.length; start += BATCH_SIZE - BATCH_OVERLAP) {
-      const batchStart = batches.length === 0 ? 0 : start;
-      batches.push(allParts.slice(batchStart, batchStart + BATCH_SIZE));
-      if (batchStart + BATCH_SIZE >= allParts.length) break;
+    for (let start = 0; start < allParts.length; start += BATCH_SIZE) {
+      batches.push(allParts.slice(start, start + BATCH_SIZE));
     }
     const totalBatches = batches.length;
-    const BATCH_CONCURRENCY = 3;
+    const BATCH_CONCURRENCY = 4;
     console.log(`generateSummaryWorker: ${totalBatches} batches, concurrency=${BATCH_CONCURRENCY}`);
 
     const fullSchema = {
