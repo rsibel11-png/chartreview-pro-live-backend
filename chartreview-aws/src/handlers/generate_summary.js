@@ -307,9 +307,9 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
     ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files in this batch and combine them into a single comprehensive response. Do not stop after the first document.`
     : '';
   const checklistSection = knownVisitsChecklist.length > 0
-    ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
+    ? `\n\nKNOWN VISIT CHECKLIST (pre-pass):\nThe following clinical encounters are known to exist in this document set. Scan carefully for each and ensure it appears in your output IF you can see evidence of it in the documents you are currently reviewing.\n` +
       knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
-      `\n\nCRITICAL: Every date in the checklist above MUST appear in your output visits array — including PT/OT therapy visits. Extract all available clinical details from the document for each listed visit. Only leave fields empty if that information is genuinely absent from the document — do NOT default to "Not Documented" if the note contains clinical content.`
+      `\n\nIf a listed visit IS found in your current documents, extract ALL available clinical details — do not leave fields empty if the note contains content.\nIf a listed visit is NOT found in the documents you are currently reviewing, OMIT IT ENTIRELY — do not create a placeholder entry, do not write "Not documented", do not fabricate any content. It will be found in another batch.`
     : '';
   const skipPagesSection = skipPages.length > 0
     ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from page numbers): ${skipPages.join(', ')}`
