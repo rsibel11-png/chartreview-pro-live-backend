@@ -58,33 +58,51 @@ const getHandler = async (event) => {
 };
 
 // ─── Update ───────────────────────────────────────────────────────────────────
+// Updated: 2026-05-01 — alias DynamoDB reserved words in UpdateExpression; add document_id + summary_content fields
 const updateHandler = async (event) => {
   try {
     const { aws_summary_id } = event.pathParameters;
     const data = JSON.parse(event.body || '{}');
     const now = new Date().toISOString();
 
-    // Build dynamic update expression
-    const sets   = ['updated_at = :u'];
-    const names  = {};
-    const vals   = { ':u': now };
+    // DynamoDB reserved words must use ExpressionAttributeNames aliases
+    const RESERVED = new Set(['status', 'name', 'date', 'comment', 'type', 'notes', 'data']);
 
-    const fields = ['patient_name','case_number','visits','notes','status','header_note','footer_note','ime_note','chart_review_note','discussion_note','physical_examination_note','document_ids'];
+    const sets  = ['updated_at = :u'];
+    const names = {};
+    const vals  = { ':u': now };
+
+    const fields = [
+      'patient_name','case_number','visits','notes','status',
+      'header_note','footer_note','ime_note','chart_review_note',
+      'discussion_note','physical_examination_note',
+      'document_ids','document_id','summary_content','include_document_list',
+    ];
+
     fields.forEach(f => {
       if (data[f] !== undefined) {
-        sets.push(`${f} = :${f}`);
+        if (RESERVED.has(f)) {
+          sets.push(`#${f} = :${f}`);
+          names[`#${f}`] = f;
+        } else {
+          sets.push(`${f} = :${f}`);
+        }
         vals[`:${f}`] = data[f];
       }
     });
 
-    await dynamo.send(new UpdateCommand({
+    const params = {
       TableName: TABLE,
       Key: { aws_summary_id },
       UpdateExpression: 'SET ' + sets.join(', '),
       ExpressionAttributeValues: vals,
-    }));
+    };
+    if (Object.keys(names).length > 0) params.ExpressionAttributeNames = names;
+
+    await dynamo.send(new UpdateCommand(params));
     return response(200, { message: 'Summary updated', aws_summary_id });
   } catch (err) {
+    console.error('updateSummary error:', err);
     return response(500, { error: err.message });
   }
 };
