@@ -304,106 +304,143 @@ Return all entries in the visits array.`;
 const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
   const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
   const multiDocNote = docCount > 1
-    ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files in this batch and combine them into a single comprehensive response. Do not stop after the first document.`
-    : '';
-  const checklistSection = knownVisitsChecklist.length > 0
-    ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
-      knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
-      `\n\nCRITICAL: Every date in the checklist above MUST appear in your output visits array — including PT/OT therapy visits. If you cannot find clinical details for a checklist date, still include a visit entry with visit_date set to that date and fields set to "Not Documented".`
-    : '';
-  const skipPagesSection = skipPages.length > 0
-    ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from page numbers): ${skipPages.join(', ')}`
+    ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single patient record. Extract every encounter found in THIS batch only.`
     : '';
 
-  return `You are a medical-legal document analyst. Analyze these ${docCount} medical document(s)${chunkLabel} and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
+  return `You are a medical-legal document analyst. Your job is to extract EVERY clinical encounter from this document   including but not limited to:
+- Emergency Room (ER) visits
+- Urgent Care visits  
+- Private or group physician office visits (orthopedic, neurology, pain management, primary care, etc.)
+- Surgical visits and operative reports
+- Radiology center visits (MRI, CT, X-ray, ultrasound reports)
+- Physical Therapy / Occupational Therapy sessions
+- Chiropractic visits
+- Ambulance / EMS reports
+- C-4 Workers' Compensation forms
+- IME / Expert reports / Chart reviews
+- Hospital admissions and discharge summaries
+- Any other clinical or medical-legal encounter
 
-${multiDocNote}
+${skipPages.length > 0 ? `SKIP PAGES: The following page numbers in this PDF contain non-clinical photographs or surveillance images -- do NOT extract visits from pages: ${skipPages.join(', ')}.\n` : ''}
+DO NOT skip any encounter type. Every date with a provider interaction is a separate entry.
 
-DOCUMENT TYPE HANDLING:
+${chunkText ? `DOCUMENT TEXT${chunkLabel}:\n${chunkText}\n` : ''}DOCUMENT TYPE HANDLING:
 You may encounter different types of documents. Handle each type as follows:
 
 A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
     Extract each visit as a separate entry with all standard fields.
-    CRITICAL: Always extract and include the actual practice name/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
-    DIAGNOSIS FIELD RULE: impression_diagnosis must contain ONLY diagnosis names and ICD-10 codes from the Impression or Assessment section (e.g. "Foot Pain, Left (M79.672); Hallux Valgus (M20.10)"). Stop at the first line of treatment/plan text. The EHR may show diagnoses in a two-column layout with ICD codes in gray subtext — extract only the diagnosis name + ICD code pairs, NOT the plan or recommendations that follow.
-    - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
-    - practice_setting must be the PRACTICE NAME ONLY — do NOT include street addresses, suite numbers, zip codes, or city/state. Example: "Desert Orthopaedic Center" NOT "Desert Orthopaedic Center, 2800 East Desert Inn Road, Ste 100, Las Vegas, NV"
-    - If the document shows "Facility Name - Branch/Location" format (e.g. "Desert Orthopaedic Center - Desert Inn"), keep that format as the name
+    CRITICAL: Always extract and include the actual practice setting/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
+    Examples of what to extract:
+    - If document says "Smith Family Medical Group", use "Smith Family Medical Group" as practice_setting
+    - If from "XYZ Orthopedic Associates", use "XYZ Orthopedic Associates" 
+    - If from "Community Hospital Emergency Department", use "Community Hospital Emergency Department"
+    - NEVER label as simply "Office Visit" or "Clinic" -- always include the specific facility/provider name from the document header, letterhead, or provider information section
+    IMPORTANT: Visit type labels are NOT facility names. "Follow-up Consultation", "New Patient Visit", "Follow-up", "Initial Consultation", "Progress Note" -- these describe the TYPE of visit, NOT the facility. Look past these labels to find the actual practice or facility name in the letterhead, header, or footer. If you cannot find a facility name, use the rendering provider's name + "Office" (e.g., "James Dettling, M.D. Office").
 
-B) EXPERT MEDICAL REPORTS / IME / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
-   Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize. Examples:
-   - "Independent Medical Examination" or "IME" → practice_setting: "Independent Medical Examination"
-   - "Consultation Report" → practice_setting: "Consultation Report"
-   - "Chart Review" or "Record Review" → practice_setting: "Chart Review"
-   - "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "Radiology Report" (or specific modality)
-   - "Narrative Report" → practice_setting: "Narrative Report"
-   - "Agreed Medical Examination" or "AME" → practice_setting: "Agreed Medical Examination"
-   - "Qualified Medical Evaluation" or "QME" → practice_setting: "Qualified Medical Evaluation"
+B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
+   Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize   use the specific type stated. Examples:
+   - If the document says "Independent Medical Examination" or "IME"   practice_setting: "Independent Medical Examination"
+   - If the document says "Consultation Report" or "Consultative Evaluation"   practice_setting: "Consultation Report"
+   - If the document says "Chart Review" or "Record Review"   practice_setting: "Chart Review"
+   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report"   practice_setting: use the imaging facility name if present (e.g., "Pueblo Medical Imaging", "Centennial Hills Radiology"), followed by the modality in parentheses if helpful (e.g., "Pueblo Medical Imaging (MRI)"). If no facility name is identifiable, use the modality type (e.g., "MRI Report", "CT Report")
+   - If the document says "Narrative Report" or "Narrative Summary"   practice_setting: "Narrative Report"
+   - If the document says "Agreed Medical Examination" or "AME"   practice_setting: "Agreed Medical Examination"
+   - If the document says "Qualified Medical Evaluation" or "QME"   practice_setting: "Qualified Medical Evaluation"
+   - If none of the above apply, use the most accurate label based on what is stated in the document header or title
    NEVER default to "Independent Medical Examination" unless those exact words (or "IME") appear in the document.
-   For all these types:
+   For all of these types:
    - rendering_provider: the expert/reviewing physician's name
    - chief_complaint: the stated purpose of the report
-   - hpi_summary: expert's review of history and background
-   - physical_exam_findings: examination findings if physically examined, otherwise leave empty
-   - impression_diagnosis: expert's opinions, conclusions, diagnoses (diagnosis names and ICD codes ONLY — do NOT include treatment plan text or recommendations here)
-   - treatment_plan: expert's recommendations or causation opinions
+   - hpi_summary: the expert's review of history and background as summarized in the report
+   - physical_exam_findings: examination findings if the expert physically examined the patient, otherwise leave empty
+   - impression_diagnosis: the expert's opinions, conclusions, and diagnoses
+   - treatment_plan: the expert's recommendations or causation opinions
    - imaging_findings: any imaging reviewed or interpreted by the expert
-   - impression_diagnosis for ALL document types: list ONLY the diagnosis name(s) and ICD-10 code(s) as written in the Impression/Assessment/Plan section. Format: "Diagnosis Name (ICD-10: X00.0)". Do NOT include treatment recommendations, plan text, follow-up instructions, or clinical observations in this field — those belong in treatment_plan.
-   - visit_date: date the report was authored or examination performed
+   - visit_date: the date the report was authored or the examination was performed
 
 C) POLICE REPORTS:
-   - rendering_provider: reporting officer's name and badge number
+   Treat as a single entry with:
+   - rendering_provider: the reporting officer's name and badge number if available
    - practice_setting: "Police Report"
-   - chief_complaint: incident type (e.g., "Motor Vehicle Collision")
-   - hpi_summary: narrative of incident — how it occurred, parties involved, witnesses, road/weather conditions, citations
-   - physical_exam_findings: officer's observations about injuries at scene
-   - impression_diagnosis: officer's conclusions, fault determination, citations
-   - treatment_plan: emergency services dispatched or recommended at scene
-   - visit_date: date of incident or report
+   - chief_complaint: the incident type (e.g., "Motor Vehicle Collision", "Incident Report")
+   - hpi_summary: narrative description of the incident
+   - physical_exam_findings: any observations about injuries noted by the officer at the scene
+   - impression_diagnosis: officer's conclusions, fault determination, or citations issued
+   - treatment_plan: any emergency services dispatched or recommended at scene
+   - visit_date: the date of the incident or report
 
-D) AMBULANCE / EMS REPORTS:
-   - rendering_provider: paramedic/EMT name or unit number
+D) AMBULANCE / EMS REPORTS (pre-hospital care records):
+   Treat as a single entry with:
+   - rendering_provider: the paramedic/EMT name or unit number
    - practice_setting: "Ambulance / EMS Report"
-   - chief_complaint: patient's chief complaint at scene
-   - hpi_summary: mechanism of injury, scene description, patient condition on arrival, reported symptoms
-   - physical_exam_findings: vital signs (BP, HR, RR, O2 sat, GCS), physical findings, neurological status
+   - chief_complaint: the patient's chief complaint at the scene
+   - hpi_summary: mechanism of injury, scene description, patient condition on arrival
+   - physical_exam_findings: vital signs, physical findings, and neurological status at scene
    - impression_diagnosis: EMS impression/working diagnosis
-   - treatment_plan: treatment on scene and during transport (IV, medications, immobilization, O2), destination facility
-   - visit_date: date of incident/transport
+   - treatment_plan: treatment administered on scene and during transport, and destination facility
+   - visit_date: the date of the incident/transport
 
 E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as C-4 if document EXPLICITLY shows official WCB Form C-4 header, title block, or reference (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits as C-4.
-    For ACTUAL C-4 forms only:
-    - rendering_provider: treating physician's name (signature block or printed name)
-    - practice_setting: "C-4 Workers' Compensation Report"
-    - impression_diagnosis: diagnosis only — ICD codes if present, otherwise written diagnosis
-    - visit_date: date form was completed or examination date — CRITICAL to extract even if rest is illegible
-    - hpi_summary, chief_complaint, physical_exam_findings, treatment_plan: leave empty
-    - CROSS-REFERENCE: If C-4 date matches an office visit in same document set, use that visit's provider/diagnosis to fill illegible C-4 fields. Note when extrapolated.
-    - ORDERING: C-4 entry must use same visit_date as corresponding office visit. Place C-4 entry BEFORE the regular office visit of the same date.
+    STRICT IDENTIFICATION: Only treat as a C-4 if ALL of the following are true:
+    1. The actual text of the C-4 form is physically present in the document you are reading -- you must see the WCB Form C-4 header, title block, or form fields in the text itself (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report", form field labels like "Date of Injury", "Last Day Worked", "Supervisor Name" in a structured form layout). Do NOT infer or assume a C-4 exists based on the visit being workers' comp related.
+    2. The visit date is at or near the EARLIEST date in the entire document set -- the C-4 is the intake form completed at the FIRST visit for the industrial accident. There is only ONE C-4 per case. It will typically be found embedded within the initial ER or first office visit records, not in follow-up notes.
+    3. Do NOT label any follow-up visits, post-operative visits, or subsequent office visits as C-4, even if those notes reference the workers' comp claim or injury. Only the initial treating visit generates a C-4 form.
 
-DEDUPLICATION RULE: If same date has BOTH a physician progress report AND an office visit from the SAME provider, ONLY include the office visit. The office visit contains the actual clinical information.
+    If you find what appears to be C-4 form text at multiple dates, include ONLY the one with the earliest date and treat all others as regular office visits.
+    If no actual C-4 form text is found anywhere in the documents, do not create a C-4 entry at all.
+
+    For the ONE C-4 entry:
+    - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
+    - practice_setting: "C-4 Workers' Compensation Report"
+    - impression_diagnosis: diagnosis only -- ICD codes if present, otherwise the written diagnosis
+    - visit_date: the date the form was completed or the examination date -- this is CRITICAL to extract even if the rest of the form is illegible
+    - hpi_summary: leave empty
+    - chief_complaint: leave empty
+    - physical_exam_findings: leave empty
+    - treatment_plan: leave empty
+    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set, use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields. Explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit").
+    - ORDERING: Place the C-4 entry BEFORE the regular office visit entry of the same date.
+DEDUPLICATION RULE: If the same date has BOTH a physician progress report AND an office visit from the SAME provider, IGNORE the physician progress report and ONLY include the office visit.
 
 CRITICAL DATE AND TIMELINE ACCURACY:
-- Pay EXTREME attention to dates. Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES — treat each as a separate visit.
-- Match ALL findings, exams, and imaging to the CORRECT visit date. Do not aggregate findings from multiple dates into a single entry.
-- The PRIMARY source for visit_date is the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). ALWAYS use this date — it overrides everything else on the page.
-- Dates in vitals tables (e.g. "11/07/22 10:19") confirm the visit date — use the date portion only (2022-11-07), ignoring the time.
-- Dates in signature blocks, "Medications Obtained and Reviewed [date]", or "Reviewed [date]" also confirm the service date.
-- NEVER use a date from the HPI narrative as the visit_date. The HPI often mentions the date of injury (e.g. "Injury occurred 10/31/2022") — this is NOT the visit date. The visit date is in the document header.
-- The date of injury is NEVER the visit date unless the document header explicitly shows the patient was seen on that exact day.
-- KNOWN VISITS CHECKLIST OVERRIDE: If a date appears in the KNOWN VISITS CHECKLIST above, you MUST use that exact date as visit_date for the matching visit. This is an absolute rule with no exceptions. Do NOT output a different date for a visit that matches a checklist entry.
-- If you find a date in the document body (e.g. in the HPI, injury narrative, or referral text) that does NOT appear in the KNOWN VISITS CHECKLIST, do NOT create a visit for it UNLESS you can see a complete visit note for that date in the documents you are currently reviewing. If the checklist is present but a date is missing from it, it likely belongs to a different batch — skip it. Do NOT invent or hallucinate visits for dates not supported by an actual note in this batch.
-- Valid visit_date values are: (a) dates explicitly listed in the KNOWN VISITS CHECKLIST that you can find evidence of in THIS batch, or (b) dates from document headers for complete visit notes present in THIS batch that are genuinely absent from the checklist.
+- Pay EXTREME attention to dates mentioned in the documents
+- Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES - treat each as a separate visit
+- Match ALL findings, exams, and imaging to the CORRECT visit date
+- NEVER include information from a future visit in an earlier visit
+- NEVER reference events that haven't occurred yet chronologically
+- The visit_date MUST be the DATE OF SERVICE (the date the clinical encounter actually occurred) -- NOT the date of injury, NOT the date the report was typed, NOT the date of dictation
+- "Date of Injury" and "Date of Accident" are NEVER the visit_date unless the patient was seen on that exact day (e.g. same-day ER visit). Even then, use the actual clinical service date from the note header, not the injury date field
+- For ER visits: the service date is typically in the note header or the "Date of Service" / "Encounter Date" field -- it is almost always ONE DAY AFTER the injury date for overnight incidents. Use that date, not the injury date
+- If you see only one date on a document and it matches a known injury date, look harder -- there is almost always a separate service/encounter date elsewhere in the document
+- The visit_date will almost always appear in the DOCUMENT HEADER (top of the note), not in the body narrative (HPI, subjective section). The injury date is commonly mentioned in the HPI/narrative -- do NOT use that date as the visit_date
+- For orthopedic/specialist consultation notes (e.g. "Follow-up Consultation", "Orthopedic Consultation"): the visit date is in the note header or the date the note was authored -- NOT the date of injury mentioned in the HPI. Example: if HPI says "patient injured on 8/12/2024" but the note header says "Date of Service: 3/15/2025", use 3/15/2025.
+- EXCEPTION: Occupational medicine / workers comp facilities (e.g. Concentra, Workcare, Occumed, or any note labeled "Workers Compensation" or "Occupational Medicine") often include BOTH the date of injury AND the date of service in the header -- in that case use the "Date of Service" or "Visit Date" field, not the "Date of Injury" field
 
-PHYSICAL THERAPY INSTRUCTIONS:
-- Extract EACH PT session as a separate visit entry — one entry per date.
-- Include the specific facility name (e.g. "Dignity Health Physical Therapy - Las Vegas") in practice_setting.
-- Do not combine or summarize PT visits.
+For EACH entry found, extract:
+1. Visit date (YYYY-MM-DD)   BE PRECISE
+2. Rendering provider name   doctor's name only, not patient name
+3. Practice/setting   specific facility name or document type
+4. Chief complaint   brief statement of visit purpose
+5. HPI   SUMMARIZE CONCISELY: key symptoms, injury date (first visit only), pain scale, mechanism, symptom progression. 3-5 sentences max.
+6. Physical Examination   key pertinent positives only: pain location/severity, ROM with measurements, neurological findings, swelling. Do NOT list normal findings. 3-5 key findings max.
+7. Imaging findings   include EXACTLY as written, ONLY if performed on THIS visit date
+8. Lab findings   ONLY if labs actually performed on THIS visit date
+9. Impression/diagnosis   with ICD-10 codes if provided (do NOT add codes if not in source)
+10. Treatment Plan   SUMMARIZE: main interventions, expert recommendations, restrictions, follow-up. 2-4 key points.
 
-${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
-${checklistSection}
-${skipPagesSection}`;
+CRITICAL EXTRACTION RULES:
+(1) Extract EVERY clinical encounter   office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
+(2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists anywhere in the text for that encounter. A visit with only date/provider and empty content fields is almost always an error   go back and fill it in.
+(3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
+(4) NEVER hallucinate   only use information explicitly in the text.
+(5) Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
+(6) If information is truly not available, return an empty string "".
+(7) The icd10_codes field must always be an array of strings (can be empty []).
+(8) PHYSICAL/OCCUPATIONAL THERAPY VISITS: Extract EVERY individual PT/OT session as its own separate record. Do NOT collapse multiple PT sessions into one. Do NOT summarize a series of visits as a single entry. Each visit date = one record. PT notes are often brief one-liners (date, therapist initials, modalities, exercise sets) -- each one is a separate visit and must be extracted individually. If a page contains 10 PT visit dates, return 10 separate visit records.
+(9) For PT visits: practice_setting should be the full facility name (e.g. "Dignity Health Physical Therapy", "Nevada Rehabilitation Institute"). Do NOT abbreviate to just "PT" or "Physical Therapy". Consistent facility naming across all records is critical.
+
+Return ALL entries found as separate entries in the visits array.
+Also extract: patient_name, case_number.` + (knownVisitsChecklist.length > 0 ? ('\n\nKNOWN VISIT CHECKLIST (pre-pass):\nThe following clinical encounters are known to exist in this document set. Scan carefully for each and ensure it appears in your output. If a note is present but partially cut off, extract what is available -- do not skip it entirely.\n' + knownVisitsChecklist.map(v => '- ' + v.date + ' | ' + (v.provider||'Unknown') + ' | ' + (v.facility||'') + ' | ' + (v.visit_type||'')).join('\n') + '\n\nIf a listed visit is NOT found in the documents you are currently reviewing, omit it -- it may be in a different batch. Only include visits you can see evidence of in these documents.') : '');
 };
 
 // ─── generateSummaryWorker — ported v56 generateSummary logic ────────────────
@@ -987,5 +1024,4 @@ module.exports = {
   buildVisitIndexStart:  validateApiKey(buildVisitIndexStartHandler),
   buildVisitIndexWorker: buildVisitIndexWorkerFn,
 };
-
 
