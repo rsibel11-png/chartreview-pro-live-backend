@@ -632,7 +632,9 @@ const generateSummaryWorker = async (event) => {
         if (!result) continue;
         if (!patientName && result.patient_name) patientName = result.patient_name;
         if (!caseNumber && result.case_number) caseNumber = result.case_number;
+        console.log('Batch ' + (i+j+1) + ' result: visits=' + (result && Array.isArray(result.visits) ? result.visits.length : typeof result) + ' patient=' + (result ? result.patient_name : 'null'));
         const clean = sanitizeVisits(result.visits, patientName);
+        console.log('Batch ' + (i+j+1) + ' after sanitize: ' + clean.length + ' visits');
         allVisits = allVisits.concat(clean);
       }
     }
