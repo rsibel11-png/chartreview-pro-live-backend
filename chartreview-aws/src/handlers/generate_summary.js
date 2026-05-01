@@ -170,152 +170,84 @@ const toTitleCase = (str) => {
   });
 };
 
+
+// ─── Original app logic (verbatim from chartreview-pro) + Claude 4.x brevity constraints ──
+
 const deduplicateVisits = (visits) => {
   const visitList = visits || [];
+
+  // Step 1: Remove exact duplicates (same date + provider + setting)
   const exactKeys = new Set();
-  const deduped = visitList.filter((visit) => {
+  const deduped = visitList.filter((visit, idx) => {
     const dateKey = (visit.visit_date || '').trim().toLowerCase();
     const providerKey = (visit.rendering_provider || '').trim().toLowerCase();
     const settingKey = (visit.practice_setting || '').trim().toLowerCase();
-    if (!dateKey && !providerKey) return true;
-    // Primary key: date + provider + setting
-    const primaryKey = `${dateKey}|${providerKey}|${settingKey}`;
-    if (!exactKeys.has(primaryKey)) {
-      exactKeys.add(primaryKey);
-      return true;
-    }
-    // Same date+provider+setting: check HPI content fingerprint (first 60 chars)
-    // to allow genuinely distinct same-day visits (e.g. two separate office encounters)
-    const hpiSnippet = (visit.hpi_summary || visit.chief_complaint || '').trim().toLowerCase().slice(0, 60);
-    const contentKey = `${primaryKey}|hpi:${hpiSnippet}`;
-    if (hpiSnippet && !exactKeys.has(contentKey)) {
-      exactKeys.add(contentKey);
-      return true;
-    }
-    return false;
+    if (!dateKey && !providerKey) return true; // no identifying info, keep
+    const key = `${dateKey}|${providerKey}|${settingKey}`;
+    if (exactKeys.has(key)) return false;
+    exactKeys.add(key);
+    return true;
   });
+
   return deduped;
 };
 
 const sanitizeVisits = (visits, patientName) => {
   const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
   const validProgressions = ['improved','same','worse','not_documented'];
-
-  const isLikelyMisdatedER = (visit, allVisits) => {
-    if (!/emergency|urgent care|ER|ED/i.test(visit.practice_setting || '')) return false;
-    const injuryDateStr = visit.injury_date || '';
-    const visitDateStr  = visit.visit_date  || '';
-    if (!injuryDateStr || !visitDateStr) return false;
-    if (injuryDateStr === visitDateStr) return false;
-    const injuryDate = new Date(injuryDateStr + 'T00:00:00');
-    const visitDate  = new Date(visitDateStr  + 'T00:00:00');
-    if (isNaN(injuryDate) || isNaN(visitDate)) return false;
-    const daysDiff = Math.abs((visitDate - injuryDate) / (1000 * 60 * 60 * 24));
-    if (daysDiff > 7) return false;
-    const realERExists = allVisits.some(v =>
-      v !== visit &&
-      /emergency|urgent care|ER|ED/i.test(v.practice_setting || '') &&
-      (v.visit_date || '') === injuryDateStr
-    );
-    return !realERExists;
-  };
-
-  const enforceOneC4 = (visitList) => {
-    const isC4 = (v) => {
-      const s = (v.practice_setting || '').toLowerCase();
-      return s.includes('c-4') || s.includes('wcb') || s.includes("workers' compensation report");
-    };
-    const c4Visits = visitList.filter(isC4);
-    if (c4Visits.length <= 1) return visitList;
-    const sorted = [...c4Visits].sort((a, b) => {
-      if (!a.visit_date) return 1;
-      if (!b.visit_date) return -1;
-      return (a.visit_date||'').localeCompare(b.visit_date||'');
+  return (visits || []).map(visit => {
+    const clean = { ...visit };
+    stringFields.forEach(field => {
+      const val = clean[field];
+      if (val === null || val === undefined || val === false) clean[field] = '';
+      else if (typeof val === 'object') clean[field] = JSON.stringify(val);
+      else if (typeof val !== 'string') clean[field] = String(val);
     });
-    const earliest = sorted[0];
-    const toRemove = new Set(sorted.slice(1).map(v => v));
-    return visitList.filter(v => !toRemove.has(v));
-  };
-
-  return enforceOneC4((visits || [])
-    .filter(visit => {
-      const setting = (visit.practice_setting || '').toLowerCase();
-      return !/(pacu|post.?anesthesia|pre.?op|post.?op|operating room|anesthesia|nursing note|medication administration|intake form|patient registration|appointment reminder|authorization|fax cover)/i.test(setting);
-    })
-    .map(visit => {
-      const clean = { ...visit };
-      clean.rendering_provider = toTitleCase(clean.rendering_provider);
-      stringFields.forEach(field => {
-        const val = clean[field];
-        if (val === null || val === undefined || val === false) clean[field] = '';
-        else if (typeof val === 'object') clean[field] = JSON.stringify(val);
-        else if (typeof val !== 'string') clean[field] = String(val);
-      });
-      if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
-      if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
-      const patientLower = patientName?.toLowerCase();
-      if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
-        clean.practice_setting = '';
-      }
-      // Strip street addresses from practice_setting (e.g. "Clinic, 123 Main St, City, ST 12345")
-      if (clean.practice_setting) {
-        // Remove anything after a comma that looks like a street address (number + street word)
-        clean.practice_setting = clean.practice_setting
-          .replace(/,\s*\d+\s+[A-Za-z].*$/, '')  // ", 2800 East Desert Inn..." 
-          .replace(/\s*\d{5}(?:-\d{4})?\s*$/, '') // trailing zip codes
-          .replace(/,\s*(?:Ste|Suite|Floor|Fl|Bldg|Building|Unit|#)\s*[\w-]+\s*$/i, '') // suite/floor
-          .trim()
-          .replace(/,\s*$/, ''); // trailing comma
-      }
-      return clean;
-    })
-    .map((visit, _, arr) => {
-      if (isLikelyMisdatedER(visit, arr)) {
-        return { ...visit, visit_date: visit.injury_date };
-      }
-      return visit;
-    })
-  );
+    if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
+    if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
+    const patientLower = patientName?.toLowerCase();
+    if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
+      clean.practice_setting = '';
+    }
+    return clean;
+  });
 };
 
-const buildVisitIndexPrompt = () => {
-  return `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter date, provider name, and facility/location.
-
-For each clinical encounter found, extract:
-1. date - the date of service (YYYY-MM-DD format). PRIMARY SOURCE: the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). The vitals table Date column also confirms the visit date. NEVER use the injury date or any date mentioned inside the HPI narrative as the visit date — the HPI often says things like "injury date 10/31/2022" which is NOT the visit date.
-2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
-3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
-4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
-
-RULES:
-- Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
-- Each unique date + provider combination is a separate entry.
-- Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers).
-- ONLY include radiology visits (MRI, X-ray, CT, bone scan, etc.) if the actual radiology report document is present in the text — meaning it has its own document header, date stamp, and impression/findings section. Do NOT create a radiology visit entry simply because a physician's note mentions that an imaging study was ordered or that results were reviewed. A reference to imaging inside another provider's note is NOT a visit.
-- CRITICAL: The HPI section often mentions the date of injury (e.g. "injury date 10/31/2022") -- this is NOT the visit date. The visit date is ALWAYS in the document header (e.g. "Visit Note November 7, 2022" or "Visit Note - November 7, 2022") or vitals table.
-- IMPORTANT: Textract OCR may output page footers and headers from adjacent pages mixed into the text stream. Always look for the pattern "Visit Note [Month] [Day], [Year]" or "Visit Note [Month] [Day] [Year]" (with or without dash/comma) — this is the authoritative visit date. A date in the HPI like "she fell on 10/31/2022 and went to the ER" does NOT make 10/31 or 11/1 a visit date for THIS note.
-- Do NOT include the date of injury as a visit date unless confirmed by a "Visit Note [date]" header on that exact date.
-- Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
-- If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
-
-Return all entries in the visits array.`;
+const enforceOneC4 = (visitList) => {
+  const c4s = visitList.filter(v => (v.practice_setting || '').toLowerCase().includes('c-4'));
+  if (c4s.length <= 1) return visitList;
+  const sorted = [...c4s].sort((a, b) => (a.visit_date || '').localeCompare(b.visit_date || ''));
+  const keepId = sorted[0];
+  return visitList.filter(v => {
+    if ((v.practice_setting || '').toLowerCase().includes('c-4')) return v === keepId;
+    return true;
+  });
 };
 
 const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
   const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
   const multiDocNote = docCount > 1
-    ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files in this batch and combine them into a single comprehensive response. Do not stop after the first document.`
+    ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files and combine them into a single comprehensive summary. Do not stop after the first document.`
     : '';
   const checklistSection = knownVisitsChecklist.length > 0
     ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
       knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
-      `\n\nCRITICAL: Every date in the checklist above MUST appear in your output visits array — including PT/OT therapy visits. If you cannot find clinical details for a checklist date, still include a visit entry with visit_date set to that date and fields set to "Not Documented".`
+      `\n\nCRITICAL: Every date in the checklist above MUST appear in your output visits array — including PT/OT therapy sessions. If you cannot find detail for a visit, still include it with the date and provider populated.`
     : '';
   const skipPagesSection = skipPages.length > 0
-    ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from page numbers): ${skipPages.join(', ')}`
+    ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from pages: ${skipPages.join(', ')})`
     : '';
 
   return `You are a medical-legal document analyst. Analyze these ${docCount} medical document(s)${chunkLabel} and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
+
+CRITICAL OUTPUT RULES — MUST FOLLOW FOR EVERY FIELD:
+- Be concise. Summarize and condense — do NOT transcribe verbatim from the document.
+- Maximum 2-3 sentences per field unless otherwise specified below.
+- Extract PERTINENT POSITIVES ONLY — omit normal/unremarkable findings entirely.
+- ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER in separate lines.
+- visit_date MUST be in YYYY-MM-DD format always (e.g. 2026-01-20). Never return any other date format.
+- Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
+- If information is not available for a field, return an empty string "".
 
 ${multiDocNote}
 
@@ -323,90 +255,99 @@ DOCUMENT TYPE HANDLING:
 You may encounter different types of documents. Handle each type as follows:
 
 A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
-    Extract each visit as a separate entry with all standard fields.
-    CRITICAL: Always extract and include the actual practice name/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
-    DIAGNOSIS FIELD RULE: impression_diagnosis must contain ONLY diagnosis names and ICD-10 codes from the Impression or Assessment section (e.g. "Foot Pain, Left (M79.672); Hallux Valgus (M20.10)"). Stop at the first line of treatment/plan text. The EHR may show diagnoses in a two-column layout with ICD codes in gray subtext — extract only the diagnosis name + ICD code pairs, NOT the plan or recommendations that follow.
-    - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
-    - practice_setting must be the PRACTICE NAME ONLY — do NOT include street addresses, suite numbers, zip codes, or city/state. Example: "Desert Orthopaedic Center" NOT "Desert Orthopaedic Center, 2800 East Desert Inn Road, Ste 100, Las Vegas, NV"
-    - If the document shows "Facility Name - Branch/Location" format (e.g. "Desert Orthopaedic Center - Desert Inn"), keep that format as the name
+   Extract each visit as a separate entry with all standard fields.
+   CRITICAL: Always extract and include the actual practice setting/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
 
 B) EXPERT MEDICAL REPORTS / IME / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
    Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize. Examples:
    - "Independent Medical Examination" or "IME" → practice_setting: "Independent Medical Examination"
    - "Consultation Report" → practice_setting: "Consultation Report"
    - "Chart Review" or "Record Review" → practice_setting: "Chart Review"
-   - "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "Radiology Report" (or specific modality)
-   - "Narrative Report" → practice_setting: "Narrative Report"
+   - "Radiology Report", "MRI Report" → practice_setting: "Radiology Report"
    - "Agreed Medical Examination" or "AME" → practice_setting: "Agreed Medical Examination"
    - "Qualified Medical Evaluation" or "QME" → practice_setting: "Qualified Medical Evaluation"
-   NEVER default to "Independent Medical Examination" unless those exact words (or "IME") appear in the document.
-   For all these types:
-   - rendering_provider: the expert/reviewing physician's name
-   - chief_complaint: the stated purpose of the report
-   - hpi_summary: expert's review of history and background
-   - physical_exam_findings: examination findings if physically examined, otherwise leave empty
-   - impression_diagnosis: expert's opinions, conclusions, diagnoses (diagnosis names and ICD codes ONLY — do NOT include treatment plan text or recommendations here)
-   - treatment_plan: expert's recommendations or causation opinions
-   - imaging_findings: any imaging reviewed or interpreted by the expert
-   - impression_diagnosis for ALL document types: list ONLY the diagnosis name(s) and ICD-10 code(s) as written in the Impression/Assessment/Plan section. Format: "Diagnosis Name (ICD-10: X00.0)". Do NOT include treatment recommendations, plan text, follow-up instructions, or clinical observations in this field — those belong in treatment_plan.
-   - visit_date: date the report was authored or examination performed
+   NEVER default to "Independent Medical Examination" unless those exact words appear in the document.
+   Fields: rendering_provider, chief_complaint (report purpose), hpi_summary (expert's history review),
+   physical_exam_findings (only if expert physically examined patient), impression_diagnosis (expert opinions/conclusions),
+   treatment_plan (expert recommendations), imaging_findings (imaging reviewed), visit_date (report date).
 
 C) POLICE REPORTS:
-   - rendering_provider: reporting officer's name and badge number
    - practice_setting: "Police Report"
-   - chief_complaint: incident type (e.g., "Motor Vehicle Collision")
-   - hpi_summary: narrative of incident — how it occurred, parties involved, witnesses, road/weather conditions, citations
-   - physical_exam_findings: officer's observations about injuries at scene
-   - impression_diagnosis: officer's conclusions, fault determination, citations
-   - treatment_plan: emergency services dispatched or recommended at scene
-   - visit_date: date of incident or report
+   - rendering_provider: officer name and badge number
+   - chief_complaint: incident type (e.g. "Motor Vehicle Collision")
+   - hpi_summary: narrative — mechanism, parties, conditions, citations. Concise.
+   - physical_exam_findings: officer observations about injuries at scene
+   - impression_diagnosis: officer conclusions, fault, citations
+   - treatment_plan: emergency services dispatched
+   - visit_date: date of incident
 
 D) AMBULANCE / EMS REPORTS:
-   - rendering_provider: paramedic/EMT name or unit number
    - practice_setting: "Ambulance / EMS Report"
+   - rendering_provider: paramedic/EMT name or unit
    - chief_complaint: patient's chief complaint at scene
-   - hpi_summary: mechanism of injury, scene description, patient condition on arrival, reported symptoms
-   - physical_exam_findings: vital signs (BP, HR, RR, O2 sat, GCS), physical findings, neurological status
-   - impression_diagnosis: EMS impression/working diagnosis
-   - treatment_plan: treatment on scene and during transport (IV, medications, immobilization, O2), destination facility
-   - visit_date: date of incident/transport
+   - hpi_summary: mechanism, scene, patient condition, reported symptoms. Concise.
+   - physical_exam_findings: vitals (BP, HR, RR, O2 sat, GCS) and key physical findings only
+   - impression_diagnosis: EMS working diagnosis
+   - treatment_plan: treatment on scene and during transport, destination facility
+   - visit_date: date of incident
 
-E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as C-4 if document EXPLICITLY shows official WCB Form C-4 header, title block, or reference (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits as C-4.
-    For ACTUAL C-4 forms only:
-    - rendering_provider: treating physician's name (signature block or printed name)
-    - practice_setting: "C-4 Workers' Compensation Report"
-    - impression_diagnosis: diagnosis only — ICD codes if present, otherwise written diagnosis
-    - visit_date: date form was completed or examination date — CRITICAL to extract even if rest is illegible
-    - hpi_summary, chief_complaint, physical_exam_findings, treatment_plan: leave empty
-    - CROSS-REFERENCE: If C-4 date matches an office visit in same document set, use that visit's provider/diagnosis to fill illegible C-4 fields. Note when extrapolated.
-    - ORDERING: C-4 entry must use same visit_date as corresponding office visit. Place C-4 entry BEFORE the regular office visit of the same date.
+E) C-4 FORMS (Workers' Compensation Board / WCB Form C-4):
+   STRICT IDENTIFICATION: Only treat as C-4 if the document EXPLICITLY shows "Form C-4", "Workers' Compensation Board", or "WCB Report" header.
+   - practice_setting: "C-4 Workers' Compensation Report"
+   - rendering_provider: treating physician name (from signature block)
+   - impression_diagnosis: diagnosis only with ICD codes inline in parentheses
+   - visit_date: form completion date or examination date in YYYY-MM-DD format
+   - hpi_summary, chief_complaint, physical_exam_findings, treatment_plan: leave empty
+   - ORDERING: place C-4 entry BEFORE the regular office visit of the same date
 
-DEDUPLICATION RULE: If same date has BOTH a physician progress report AND an office visit from the SAME provider, ONLY include the office visit. The office visit contains the actual clinical information.
+DEDUPLICATION RULE: If the same date has BOTH a physician progress report AND an office visit from the SAME provider, include the office visit only.
 
-CRITICAL DATE AND TIMELINE ACCURACY:
-- Pay EXTREME attention to dates. Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES — treat each as a separate visit.
-- Match ALL findings, exams, and imaging to the CORRECT visit date. Do not aggregate findings from multiple dates into a single entry.
-- The PRIMARY source for visit_date is the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). ALWAYS use this date — it overrides everything else on the page.
-- Dates in vitals tables (e.g. "11/07/22 10:19") confirm the visit date — use the date portion only (2022-11-07), ignoring the time.
-- Dates in signature blocks, "Medications Obtained and Reviewed [date]", or "Reviewed [date]" also confirm the service date.
-- NEVER use a date from the HPI narrative as the visit_date. The HPI often mentions the date of injury (e.g. "Injury occurred 10/31/2022") — this is NOT the visit date. The visit date is in the document header.
-- The date of injury is NEVER the visit date unless the document header explicitly shows the patient was seen on that exact day.
-- KNOWN VISITS CHECKLIST OVERRIDE: If a date appears in the KNOWN VISITS CHECKLIST above, you MUST use that exact date as visit_date for the matching visit. This is an absolute rule with no exceptions. Do NOT output a different date for a visit that matches a checklist entry.
-- If you find a date in the document body (e.g. in the HPI, injury narrative, or referral text) that does NOT appear in the KNOWN VISITS CHECKLIST, do NOT create a visit for it UNLESS you can see a complete visit note for that date in the documents you are currently reviewing. If the checklist is present but a date is missing from it, it likely belongs to a different batch — skip it. Do NOT invent or hallucinate visits for dates not supported by an actual note in this batch.
-- Valid visit_date values are: (a) dates explicitly listed in the KNOWN VISITS CHECKLIST that you can find evidence of in THIS batch, or (b) dates from document headers for complete visit notes present in THIS batch that are genuinely absent from the checklist.
+CRITICAL: Extract EACH visit as a separate entry. Multiple visits at the same location on different dates = separate entries.
 
-PHYSICAL THERAPY INSTRUCTIONS:
-- Extract EACH PT session as a separate visit entry — one entry per date.
-- Include the specific facility name (e.g. "Dignity Health Physical Therapy - Las Vegas") in practice_setting.
-- Do not combine or summarize PT visits.
+CRITICAL DATE ACCURACY:
+- visit_date MUST be YYYY-MM-DD format (e.g. 2026-01-20). This is mandatory.
+- Match ALL findings to the CORRECT visit date they were documented on.
+- Never include information from a future visit in an earlier visit.
+
+For EACH entry extract:
+
+1. visit_date — YYYY-MM-DD format, mandatory
+2. rendering_provider — doctor name only, not patient name
+3. practice_setting — specific facility name, never generic "Office Visit"
+4. chief_complaint — brief statement of visit purpose
+
+5. hpi_summary — CONCISE, 2-3 sentences max:
+   - Key presenting symptoms and onset
+   - Injury date if applicable (first visit only) — must be before or on visit date
+   - Pain scale if provided (e.g. "7/10")
+   - Whether symptoms improved, same, or worse
+   - Do NOT mention future events
+
+6. physical_exam_findings — PERTINENT POSITIVES ONLY, 3-5 key findings max:
+   - Pain location and severity if significant
+   - Range of motion limitations with measurements
+   - Neurological findings only if present (numbness, tingling)
+   - Swelling/tenderness only if notable
+   - OMIT all normal/unremarkable findings entirely
+   - For expert reports with no physical exam: leave empty
+
+7. imaging_findings — include exactly as written, only if performed or reviewed on THIS visit date
+8. lab_findings — only if labs actually performed on THIS visit date, otherwise empty string
+9. impression_diagnosis — expert opinions and diagnoses; ICD-10 codes inline in parentheses at end only
+10. treatment_plan — CONCISE, 2-4 key points max:
+    - Main interventions (medications, therapy, procedures)
+    - Activity restrictions if any
+    - Follow-up timeline
+    - Omit routine instructions
+
+Return ALL entries found across ALL documents as separate entries in the visits array.
+Also extract: patient_name and case_number (consistent across documents).
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
 ${checklistSection}
 ${skipPagesSection}`;
 };
 
-// ─── generateSummaryWorker — ported v56 generateSummary logic ────────────────
 const generateSummaryWorker = async (event) => {
   const { job_id, doc_ids, patient_name = '', org_id } = event;
   console.log(`generateSummaryWorker start: job_id=${job_id} docs=${doc_ids?.length}`);
@@ -987,5 +928,4 @@ module.exports = {
   buildVisitIndexStart:  validateApiKey(buildVisitIndexStartHandler),
   buildVisitIndexWorker: buildVisitIndexWorkerFn,
 };
-
 
