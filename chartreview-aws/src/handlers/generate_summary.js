@@ -400,6 +400,11 @@ PHYSICAL THERAPY INSTRUCTIONS:
 - Extract EACH PT session as a separate visit entry — one entry per date.
 - Include the specific facility name (e.g. "Dignity Health Physical Therapy - Las Vegas") in practice_setting.
 - Do not combine or summarize PT visits.
+- hpi_summary: patient-reported symptoms and functional limitations documented at that session (e.g. pain complaints, difficulty with ADLs, progress notes).
+- pain_scale: extract numeric pain rating if documented (e.g. "6/10"), otherwise "Not Documented".
+- physical_exam_findings: ROM measurements, strength testing, functional assessment, gait observations — extract whatever is present.
+- treatment_plan: exercises performed, modalities used (e.g. ultrasound, TENS, ice/heat, manual therapy), home exercise program assigned.
+- If any of these fields are present in the note, populate them — do not default to "Not Documented" unless the field is genuinely absent from the document.
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
 ${checklistSection}
