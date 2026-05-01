@@ -602,12 +602,12 @@ const generateSummaryWorker = async (event) => {
         );
       } catch (llmErr) {
         if (/invalid json|json|delimiter|expecting/i.test(llmErr.message || '')) {
-          console.warn(`Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`);
+          console.warn(`Batch ${batchIndex + 1}: JSON error, retrying with fullSchema...`);
           try {
             result = await callBedrock(
               fileKeys,
               buildPrompt('', allParts.length, batchLabel + ' [retry]', knownVisitsChecklist, skipPages),
-              simpleSchema
+              fullSchema
             );
           } catch (retryErr) {
             console.error(`Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
