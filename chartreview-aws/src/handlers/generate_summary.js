@@ -438,6 +438,13 @@ CRITICAL EXTRACTION RULES:
 (7) The icd10_codes field must always be an array of strings (can be empty []).
 (8) PHYSICAL/OCCUPATIONAL THERAPY VISITS: Extract EVERY individual PT/OT session as its own separate record. Do NOT collapse multiple PT sessions into one. Do NOT summarize a series of visits as a single entry. Each visit date = one record. PT notes are often brief one-liners (date, therapist initials, modalities, exercise sets) -- each one is a separate visit and must be extracted individually. If a page contains 10 PT visit dates, return 10 separate visit records.
 (9) For PT visits: practice_setting should be the full facility name (e.g. "Dignity Health Physical Therapy", "Nevada Rehabilitation Institute"). Do NOT abbreviate to just "PT" or "Physical Therapy". Consistent facility naming across all records is critical.
+(10) For PT/OT visits, map document sections to output fields as follows:
+    - SUBJECTIVE / Pain Assessment / Chief Complaint / History → hpi_summary (include pain scale if documented, e.g. "4/10 at best, 8/10 at worst")
+    - OBJECTIVE / Objective Examination / Range of Motion / Strength Testing / Sensory Assessment / Gait / Balance / Palpation / Functional Observations → physical_exam_findings (include specific ROM measurements, MMT grades, sensory findings, gait observations)
+    - ASSESSMENT / Assessment of Complexity / Patient Response → treatment_plan (include response to PT intervention, goals progress, plan)
+    - Diagnoses / Medical DX / ICD codes → impression_diagnosis
+    - Activity Log / PT Interventions / Treatments / Exercise Activities → include key interventions in treatment_plan
+    - NEVER return empty strings for these fields if the PT note contains SUBJECTIVE, OBJECTIVE, or ASSESSMENT sections.
 
 Return ALL entries found as separate entries in the visits array.
 Also extract: patient_name, case_number.` + (knownVisitsChecklist.length > 0 ? ('\n\nKNOWN VISIT CHECKLIST (pre-pass):\nThe following clinical encounters are known to exist in this document set. Scan carefully for each and ensure it appears in your output. If a note is present but partially cut off, extract what is available -- do not skip it entirely.\n' + knownVisitsChecklist.map(v => '- ' + v.date + ' | ' + (v.provider||'Unknown') + ' | ' + (v.facility||'') + ' | ' + (v.visit_type||'')).join('\n') + '\n\nIf a listed visit is NOT found in the documents you are currently reviewing, omit it -- it may be in a different batch. Only include visits you can see evidence of in these documents.') : '');
