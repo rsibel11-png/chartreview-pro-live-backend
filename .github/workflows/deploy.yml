@@ -85,6 +85,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Create generateSummaryChunkWorker Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-generateSummaryChunkWorker --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-generateSummaryChunkWorker \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/generate_summary.generateSummaryChunkWorker \
+            --timeout 900 \
+            --memory-size 1024 \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Create buildVisitIndexStart Lambda if missing
         run: |
           aws lambda get-function --function-name chartreview-pro-prod-buildVisitIndexStart --region us-east-1 2>/dev/null || \
@@ -151,6 +168,7 @@ jobs:
             "chartreview-pro-prod-deleteSummary"
             "chartreview-pro-prod-generateSummaryStart"
             "chartreview-pro-prod-generateSummaryWorker"
+            "chartreview-pro-prod-generateSummaryChunkWorker"
             "chartreview-pro-prod-buildVisitIndexStart"
             "chartreview-pro-prod-buildVisitIndexWorker"
           )
