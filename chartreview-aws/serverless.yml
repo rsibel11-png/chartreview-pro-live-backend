@@ -60,6 +60,8 @@ provider:
             - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
             - "arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-3-5-haiku-20241022-v1:0"
             - "arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+            - "arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-sonnet-4-5-20251125-v1:0"
+            - "arn:aws:bedrock:us-east-1::foundation-model/us.anthropic.claude-sonnet-4-6"
         - Effect: Allow
           Action:
             - lambda:InvokeFunction
