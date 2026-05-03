@@ -23,7 +23,7 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm install --omit=dev
+        run: npm ci --omit=dev
 
       - name: Package Lambda functions
         run: |
