@@ -289,6 +289,7 @@ functions:
       SUMMARIES_TABLE: chartreview-summaries-prod
       JOBS_TABLE: chartreview-jobs-prod
       GENERATE_WORKER_FUNCTION_NAME: chartreview-pro-prod-generateSummaryWorker
+      GENERATE_CHUNK_WORKER_FUNCTION_NAME: chartreview-pro-prod-generateSummaryChunkWorker
       API_KEY: ${env:API_KEY}
     events:
       - http:
@@ -303,10 +304,21 @@ functions:
   generateSummaryWorker:
     handler: src/handlers/generate_summary.generateSummaryWorker
     timeout: 900
+    memorySize: 1024
     environment:
       S3_BUCKET: chartreview-documents-prod
       DOCUMENTS_TABLE: chartreview-documents-prod
       SUMMARIES_TABLE: chartreview-summaries-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      GENERATE_CHUNK_WORKER_FUNCTION_NAME: chartreview-pro-prod-generateSummaryChunkWorker
+
+  generateSummaryChunkWorker:
+    handler: src/handlers/generate_summary.generateSummaryChunkWorker
+    timeout: 900
+    memorySize: 1024
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
       JOBS_TABLE: chartreview-jobs-prod
 
   getJob:
