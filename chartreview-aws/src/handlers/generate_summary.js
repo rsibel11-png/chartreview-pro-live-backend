@@ -989,7 +989,6 @@ const buildVisitIndexStartHandler = async (event) => {
 };
 
 module.exports = {
-module.exports = {
   generateSummaryStart:       validateApiKey(generateSummaryStartHandler),
   generateSummaryWorker:      generateSummaryWorker,
   generateSummaryChunkWorker: generateSummaryChunkWorker,
