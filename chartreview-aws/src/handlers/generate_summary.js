@@ -348,18 +348,193 @@ ${checklistSection}
 ${skipPagesSection}`;
 };
 
-const generateSummaryWorker = async (event) => {
-  const { job_id, doc_ids, patient_name = '', org_id } = event;
-  console.log(`generateSummaryWorker start: job_id=${job_id} docs=${doc_ids?.length}`);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GENERATE SUMMARY — CONCURRENT CHUNK ARCHITECTURE
+// Updated: 2026-05-03
+//
+// Architecture:
+//   generateSummaryWorker (coordinator):
+//     1. Fetches doc records + builds allParts
+//     2. Runs VI pre-pass (VI_CONCURRENCY=4) to build knownVisits checklist
+//     3. Builds batches (BATCH_SIZE=1), splits into CHUNK_SIZE=20 slices
+//     4. Fires all chunk-worker Lambdas simultaneously (Event invocation)
+//     5. Polls DynamoDB for all chunk sub-jobs to complete (or fail)
+//     6. Merges all partial visits, runs recovery pass, deduplicates
+//     7. Marks parent job complete
+//
+//   generateSummaryChunkWorker:
+//     - Receives { job_id, chunk_job_id, batches (serialized), knownVisits,
+//                  patientName, totalBatches, chunkIndex }
+//     - Runs BATCH_CONCURRENCY=4 over its slice of batches
+//     - Writes partial visits + status to chunk sub-job record
+//     - Marks chunk sub-job complete or failed
+//
+// Why: Lambda hard limit is 900s (15 min). 90 batches × ~10s each = 900s exactly.
+// With 5 concurrent chunks of 20, each chunk finishes in ~2-3 min, well under limit.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const CHUNK_SIZE        = 20;   // batches per chunk worker
+const BATCH_SIZE        = 1;    // docs per batch (isolated Bedrock call)
+const BATCH_CONCURRENCY = 4;    // concurrent batches within a chunk
+const CHUNK_FN          = process.env.GENERATE_CHUNK_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryChunkWorker';
+
+// ── generateSummaryChunkWorker ────────────────────────────────────────────────
+// Processes a slice of batches, writes partial results to its chunk sub-job.
+const generateSummaryChunkWorker = async (event) => {
+  const {
+    job_id,         // parent job (for status messages)
+    chunk_job_id,   // this chunk's sub-job record
+    batches,        // array of batch arrays (each batch = array of part objects)
+    knownVisits,    // VI checklist from coordinator
+    patientNameHint,
+    chunkIndex,
+    totalBatches,   // total across ALL chunks (for display)
+    batchOffset,    // index of first batch in this chunk (for display)
+  } = event;
+
+  console.log(`chunkWorker[${chunkIndex}] start: ${batches.length} batches, chunk_job_id=${chunk_job_id}`);
+
+  const chunkVisits = [];
+  let patientName   = patientNameHint || '';
+  let caseNumber    = '';
+
+  const fullSchema = {
+    type: 'object',
+    properties: {
+      patient_name: { type: 'string' },
+      case_number:  { type: 'string' },
+      visits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            visit_date:            { type: 'string' },
+            rendering_provider:    { type: 'string' },
+            practice_setting:      { type: 'string' },
+            chief_complaint:       { type: 'string' },
+            hpi_summary:           { type: 'string' },
+            injury_date:           { type: 'string' },
+            pain_scale:            { type: 'string' },
+            symptom_progression:   { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
+            physical_exam_findings:{ type: 'string' },
+            imaging_findings:      { type: 'string' },
+            lab_findings:          { type: 'string' },
+            impression_diagnosis:  { type: 'string' },
+            icd10_codes:           { type: 'array', items: { type: 'string' } },
+            treatment_plan:        { type: 'string' },
+          },
+        },
+      },
+    },
+  };
+
+  const simplifiedSchema = {
+    type: 'object',
+    properties: {
+      visits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            visit_date:           { type: 'string' },
+            rendering_provider:   { type: 'string' },
+            practice_setting:     { type: 'string' },
+            hpi_summary:          { type: 'string' },
+            impression_diagnosis: { type: 'string' },
+            treatment_plan:       { type: 'string' },
+          },
+        },
+      },
+    },
+  };
+
+  const runBatch = async (batch, batchIndex, knownVisitsChecklist = []) => {
+    const fileKeys = batch.map(p => p.file_key).filter(Boolean);
+    if (!fileKeys.length) {
+      console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: no valid file keys, skipping`);
+      return null;
+    }
+    const globalBatchNum = batchOffset + batchIndex + 1;
+    const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
+    try {
+      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), fullSchema);
+      return result;
+    } catch (err) {
+      console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
+      try {
+        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), simplifiedSchema);
+        return result;
+      } catch (retryErr) {
+        console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
+        return null;
+      }
+    }
+  };
 
   try {
-    // Fetch all doc records from DynamoDB
+    // Process batches BATCH_CONCURRENCY at a time
+    for (let i = 0; i < batches.length; i += BATCH_CONCURRENCY) {
+      const slice = batches.slice(i, i + BATCH_CONCURRENCY);
+      const sliceEnd = Math.min(i + BATCH_CONCURRENCY, batches.length);
+      const globalStart = batchOffset + i + 1;
+      const globalEnd   = batchOffset + sliceEnd;
+      console.log(`Chunk[${chunkIndex}]: processing batches ${globalStart}-${globalEnd} of ${totalBatches}`);
+
+      // Update parent job status so frontend sees progress
+      await setJobStatus(job_id, `Analyzing batches ${globalStart}–${globalEnd} of ${totalBatches}...`);
+
+      const results = await Promise.all(
+        slice.map((batch, j) => runBatch(batch, i + j, knownVisits || []))
+      );
+      for (const result of results) {
+        if (!result) continue;
+        if (!patientName && result.patient_name) patientName = result.patient_name;
+        if (!caseNumber  && result.case_number)  caseNumber  = result.case_number;
+        const clean = sanitizeVisits(result.visits || [], patientName);
+        chunkVisits.push(...clean);
+      }
+    }
+
+    console.log(`chunkWorker[${chunkIndex}] complete: ${chunkVisits.length} visits`);
+
+    // Write partial result to chunk sub-job
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE,
+      Key: { job_id: chunk_job_id },
+      UpdateExpression: 'SET #s = :s, #res = :r, updated_at = :now',
+      ExpressionAttributeNames: { '#s': 'status', '#res': 'result' },
+      ExpressionAttributeValues: {
+        ':s': 'complete',
+        ':r': { visits: chunkVisits, patient_name: patientName, case_number: caseNumber },
+        ':now': new Date().toISOString(),
+      },
+    }));
+
+  } catch (err) {
+    console.error(`chunkWorker[${chunkIndex}] fatal:`, err);
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE,
+      Key: { job_id: chunk_job_id },
+      UpdateExpression: 'SET #s = :s, error_message = :e, updated_at = :now',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':s': 'failed', ':e': err.message, ':now': new Date().toISOString() },
+    }));
+  }
+};
+
+// ── generateSummaryWorker (coordinator) ──────────────────────────────────────
+const generateSummaryWorker = async (event) => {
+  const { job_id, doc_ids, patient_name = '', org_id } = event;
+  console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length}`);
+
+  try {
+    // ── 1. Fetch doc records ──────────────────────────────────────────────────
     const docRecords = await fetchDocRecords(doc_ids);
     if (!docRecords.length) { await markJobFailed(job_id, 'No documents found in DynamoDB'); return; }
-    console.log(`generateSummaryWorker: loaded ${docRecords.length} doc records`);
+    console.log(`coordinator: loaded ${docRecords.length} doc records`);
 
-    // Build allParts — same logic as v56 but using DynamoDB records instead of frontend doc objects
-    // AWS swap #2: instead of awsProxy download-url, we resolve file_key directly from the record
+    // ── 2. Build allParts (filter non-clinical) ───────────────────────────────
     const allParts = [];
     for (const doc of docRecords) {
       const partClassif = doc.page_classifications || [];
@@ -378,18 +553,14 @@ const generateSummaryWorker = async (event) => {
         page_classifications: partClassif,
       });
     }
-
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
 
-    let allVisits = [];
-    let patientName = patient_name;
-    let caseNumber = '';
-
-    // ── VI pre-pass (v53 parallel, VI_CONCURRENCY=4) ──────────────────────────
+    // ── 3. VI pre-pass (VI_CONCURRENCY=4) ────────────────────────────────────
     let knownVisits = [];
+    let patientName = patient_name;
+    let caseNumber  = '';
     try {
       await setJobStatus(job_id, 'Building visit checklist (pre-pass)...');
-      console.log('generateSummaryWorker: starting VI pre-pass (parallel)');
       const VI_CONCURRENCY = 4;
       const viResults = new Array(allParts.length).fill(null);
       const viSchema = {
@@ -401,24 +572,22 @@ const generateSummaryWorker = async (event) => {
             items: {
               type: 'object',
               properties: {
-                date: { type: 'string' },
-                provider: { type: 'string' },
-                facility: { type: 'string' },
-                visit_type: { type: 'string' },
-                source_doc_id: { type: 'string' },
-                source_part_label: { type: 'string' },
+                date:             { type: 'string' },
+                provider:         { type: 'string' },
+                facility:         { type: 'string' },
+                visit_type:       { type: 'string' },
+                source_doc_id:    { type: 'string' },
+                source_part_label:{ type: 'string' },
               },
             },
           },
         },
       };
-
       for (let vi = 0; vi < allParts.length; vi += VI_CONCURRENCY) {
         const viChunk = allParts.slice(vi, vi + VI_CONCURRENCY);
         await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
           const partIdx = vi + chunkIdx;
           try {
-            // AWS swap #2: use file_key directly instead of download-url
             const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema);
             if (Array.isArray(viResult.visits)) {
               viResults[partIdx] = viResult.visits
@@ -426,162 +595,142 @@ const generateSummaryWorker = async (event) => {
                 .map(v => ({ ...v, source_doc_id: viPart.id, source_part_label: viPart.label }));
             }
             console.log(`VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
-            console.log(`VI_DEBUG [${viPart.label}] raw visits:`, JSON.stringify((viResults[partIdx] || []).map(v => ({ date: v.date, provider: v.provider, facility: v.facility, type: v.visit_type }))));
           } catch (e) {
             console.warn(`VI pre-pass failed for ${viPart.id}: ${e.message}`);
           }
         }));
       }
-
       for (const tagged of viResults) {
         if (tagged) knownVisits = knownVisits.concat(tagged);
       }
-      // Deduplicate knownVisits by date+provider
+      // Deduplicate by date+provider
       const viSeen = new Set();
       knownVisits = knownVisits.filter(v => {
         const k = `${v.date}|${(v.provider || '').toLowerCase()}`;
         if (viSeen.has(k)) return false;
-        viSeen.add(k);
-        return true;
+        viSeen.add(k); return true;
       });
-      // Exclude administrative visit types
+      // Filter admin visit types
       knownVisits = knownVisits.filter(v =>
         !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
       );
       console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
-      console.log('VI checklist dates:', JSON.stringify(knownVisits.map(v => ({ date: v.date, provider: v.provider, type: v.visit_type }))));
     } catch (viErr) {
       console.warn('VI pre-pass failed (non-fatal):', viErr.message);
       knownVisits = [];
     }
 
-    // ── Build batches (BATCH_SIZE=1, BATCH_OVERLAP=0, BATCH_CONCURRENCY=4) ────
-    // Each part gets its own isolated Bedrock call — avoids output token
-    // competition and schema confusion when VI checklist is large (Sonnet 4.6).
-    const BATCH_SIZE = 1;
-    const BATCH_OVERLAP = 0;
+    // ── 4. Build batches + split into chunks of CHUNK_SIZE ───────────────────
     const batches = [];
     for (let start = 0; start < allParts.length; start += BATCH_SIZE) {
       batches.push(allParts.slice(start, start + BATCH_SIZE));
     }
     const totalBatches = batches.length;
-    const BATCH_CONCURRENCY = 4;
-    console.log(`generateSummaryWorker: ${totalBatches} batches, concurrency=${BATCH_CONCURRENCY}`);
+    console.log(`coordinator: ${totalBatches} batches → chunks of ${CHUNK_SIZE}`);
+    await setJobStatus(job_id, `Launching ${Math.ceil(totalBatches / CHUNK_SIZE)} parallel workers for ${totalBatches} batches...`);
 
-    const fullSchema = {
-      type: 'object',
-      properties: {
-        patient_name: { type: 'string' },
-        case_number: { type: 'string' },
-        visits: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              visit_date: { type: 'string' },
-              rendering_provider: { type: 'string' },
-              practice_setting: { type: 'string' },
-              chief_complaint: { type: 'string' },
-              hpi_summary: { type: 'string' },
-              injury_date: { type: 'string' },
-              pain_scale: { type: 'string' },
-              symptom_progression: { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
-              physical_exam_findings: { type: 'string' },
-              imaging_findings: { type: 'string' },
-              lab_findings: { type: 'string' },
-              impression_diagnosis: { type: 'string' },
-              icd10_codes: { type: 'array', items: { type: 'string' } },
-              treatment_plan: { type: 'string' },
-            },
-          },
+    // Split into chunks
+    const batchChunks = [];
+    for (let c = 0; c < totalBatches; c += CHUNK_SIZE) {
+      batchChunks.push(batches.slice(c, c + CHUNK_SIZE));
+    }
+    const numChunks = batchChunks.length;
+    console.log(`coordinator: firing ${numChunks} chunk workers`);
+
+    // ── 5. Create chunk sub-jobs + fire all chunk workers simultaneously ─────
+    const chunkJobIds = [];
+    for (let ci = 0; ci < numChunks; ci++) {
+      const chunk_job_id = randomUUID();
+      chunkJobIds.push(chunk_job_id);
+      // Create sub-job record
+      await dynamo.send(new UpdateCommand({
+        TableName: JOBS_TABLE,
+        Key: { job_id: chunk_job_id },
+        UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t, parent_job_id = :p',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':s': 'running',
+          ':now': new Date().toISOString(),
+          ':t': 'generate_summary_chunk',
+          ':p': job_id,
         },
-      },
-    };
+      }));
+    }
 
-    const simpleSchema = {
-      type: 'object',
-      properties: {
-        patient_name: { type: 'string' },
-        case_number: { type: 'string' },
-        visits: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              visit_date: { type: 'string' },
-              rendering_provider: { type: 'string' },
-              practice_setting: { type: 'string' },
-              hpi_summary: { type: 'string' },
-              impression_diagnosis: { type: 'string' },
-              treatment_plan: { type: 'string' },
-              icd10_codes: { type: 'array', items: { type: 'string' } },
-            },
-          },
-        },
-      },
-    };
+    // Fire all chunk workers simultaneously (Event = async, no wait)
+    await Promise.all(batchChunks.map(async (chunkBatches, ci) => {
+      const batchOffset = ci * CHUNK_SIZE;
+      await lambda.send(new InvokeCommand({
+        FunctionName: CHUNK_FN,
+        InvocationType: 'Event',
+        Payload: Buffer.from(JSON.stringify({
+          job_id,
+          chunk_job_id: chunkJobIds[ci],
+          batches: chunkBatches,
+          knownVisits,
+          patientNameHint: patientName,
+          chunkIndex: ci,
+          totalBatches,
+          batchOffset,
+        })),
+      }));
+      console.log(`coordinator: fired chunk worker ${ci} (batches ${batchOffset + 1}-${batchOffset + chunkBatches.length})`);
+    }));
 
-    // ── runBatch — AWS swap #1: callBedrock instead of InvokeLLM ─────────────
-    const runBatch = async (batch, batchIndex, knownVisitsChecklist = []) => {
-      // AWS swap #2: use file_key instead of download-url
-      const fileKeys = batch.map(p => p.file_key).filter(Boolean);
-      const skipPages = batch.flatMap(p =>
-        (p.page_classifications || []).filter(pc => !pc.is_clinical).map(pc => pc.page)
-      );
-      if (fileKeys.length === 0) {
-        console.warn(`Batch ${batchIndex + 1}: no valid file keys, skipping`);
-        return null;
-      }
-      const batchLabel = totalBatches > 1 ? ` [Batch ${batchIndex + 1} of ${totalBatches}]` : '';
-      let result;
-      try {
-        // AWS swap #1: callBedrock instead of InvokeLLM
-        result = await callBedrock(
-          fileKeys,
-          buildPrompt('', allParts.length, batchLabel, knownVisitsChecklist, skipPages),
-          fullSchema
-        );
-      } catch (llmErr) {
-        if (/invalid json|json|delimiter|expecting/i.test(llmErr.message || '')) {
-          console.warn(`Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`);
-          try {
-            result = await callBedrock(
-              fileKeys,
-              buildPrompt('', allParts.length, batchLabel + ' [retry]', knownVisitsChecklist, skipPages),
-              simpleSchema
-            );
-          } catch (retryErr) {
-            console.error(`Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
-            return null;
-          }
-        } else {
-          throw llmErr;
-        }
-      }
-      return result;
-    };
+    // ── 6. Poll for all chunks to complete (max 12 min = 720s / 10s intervals) ─
+    const MAX_WAIT_MS  = 12 * 60 * 1000;
+    const POLL_INTERVAL_MS = 10000;
+    const startTime = Date.now();
+    let allDone = false;
 
-    // ── Main pass: process batches BATCH_CONCURRENCY at a time (identical to v56) ──
-    for (let i = 0; i < totalBatches; i += BATCH_CONCURRENCY) {
-      const chunk = batches.slice(i, i + BATCH_CONCURRENCY);
-      const chunkEnd = Math.min(i + BATCH_CONCURRENCY, totalBatches);
-      console.log(`Main pass: batches ${i + 1}-${chunkEnd} of ${totalBatches}`);
-      await setJobStatus(job_id, `Analyzing batches ${i + 1}–${chunkEnd} of ${totalBatches}...`);
-      const chunkResults = await Promise.all(
-        chunk.map((batch, j) => runBatch(batch, i + j, knownVisits))
-      );
-      for (const result of chunkResults) {
-        if (!result) continue;
-        if (!patientName && result.patient_name) patientName = result.patient_name;
-        if (!caseNumber && result.case_number) caseNumber = result.case_number;
-        const clean = sanitizeVisits(result.visits, patientName);
-        console.log('DIAG result.visits type=' + typeof result.visits + ' isArray=' + Array.isArray(result.visits) + ' len=' + (Array.isArray(result.visits) ? result.visits.length : 'n/a') + ' afterSanitize=' + clean.length);
-        allVisits = allVisits.concat(clean);
+    while (!allDone && (Date.now() - startTime) < MAX_WAIT_MS) {
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+
+      const statusChecks = await Promise.all(chunkJobIds.map(cjid =>
+        dynamo.send(new UpdateCommand({
+          TableName: JOBS_TABLE,
+          Key: { job_id: cjid },
+          UpdateExpression: 'SET updated_at = :now',
+          ExpressionAttributeValues: { ':now': new Date().toISOString() },
+          ReturnValues: 'ALL_NEW',
+        })).then(r => r.Attributes)
+      ));
+
+      const statuses = statusChecks.map(a => a?.status || 'running');
+      const doneCount  = statuses.filter(s => s === 'complete' || s === 'failed').length;
+      const failCount  = statuses.filter(s => s === 'failed').length;
+      console.log(`coordinator poll: ${doneCount}/${numChunks} done (${failCount} failed)`);
+      await setJobStatus(job_id, `Processing... ${doneCount} of ${numChunks} workers complete`);
+
+      if (doneCount === numChunks) allDone = true;
+    }
+
+    if (!allDone) {
+      console.warn('coordinator: timed out waiting for chunk workers — proceeding with available results');
+    }
+
+    // ── 7. Collect all chunk results ──────────────────────────────────────────
+    let allVisits = [];
+    await setJobStatus(job_id, 'Merging results...');
+
+    for (const cjid of chunkJobIds) {
+      const r = await dynamo.send(new UpdateCommand({
+        TableName: JOBS_TABLE,
+        Key: { job_id: cjid },
+        UpdateExpression: 'SET updated_at = :now',
+        ExpressionAttributeValues: { ':now': new Date().toISOString() },
+        ReturnValues: 'ALL_NEW',
+      }));
+      const chunkResult = r.Attributes?.result;
+      if (!patientName && chunkResult?.patient_name) patientName = chunkResult.patient_name;
+      if (!caseNumber  && chunkResult?.case_number)  caseNumber  = chunkResult.case_number;
+      if (Array.isArray(chunkResult?.visits)) {
+        allVisits = allVisits.concat(chunkResult.visits);
+        console.log(`coordinator: merged ${chunkResult.visits.length} visits from chunk ${cjid.slice(0,8)}`);
       }
     }
 
-
-        // ── Merge + deduplicate + sort (identical to v56) ─────────────────────────
+    // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
     allVisits = deduplicateVisits(allVisits);
     allVisits.sort((a, b) => {
@@ -596,14 +745,10 @@ const generateSummaryWorker = async (event) => {
       return 0;
     });
 
-    // ── Recovery pass (identical to v56) ──────────────────────────────────────
+    // ── 9. Recovery pass (same as before) ────────────────────────────────────
     if (knownVisits.length > 0) {
-      const foundDates = new Set(allVisits.map(v => (v.visit_date || '').trim()).filter(Boolean));
-      const missingVisits = knownVisits.filter(v => {
-        if (!v.date) return false;
-        // PT visits are included in recovery pass
-        return !foundDates.has(v.date);
-      });
+      const foundDates   = new Set(allVisits.map(v => (v.visit_date || '').trim()).filter(Boolean));
+      const missingVisits = knownVisits.filter(v => v.date && !foundDates.has(v.date));
 
       if (missingVisits.length > 0) {
         console.log(`Recovery pass: ${missingVisits.length} missing visits:`, missingVisits.map(v => v.date));
@@ -616,27 +761,25 @@ const generateSummaryWorker = async (event) => {
               items: {
                 type: 'object',
                 properties: {
-                  visit_date: { type: 'string' },
-                  rendering_provider: { type: 'string' },
-                  practice_setting: { type: 'string' },
-                  chief_complaint: { type: 'string' },
-                  hpi_summary: { type: 'string' },
-                  injury_date: { type: 'string' },
-                  pain_scale: { type: 'string' },
-                  symptom_progression: { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
+                  visit_date:             { type: 'string' },
+                  rendering_provider:     { type: 'string' },
+                  practice_setting:       { type: 'string' },
+                  chief_complaint:        { type: 'string' },
+                  hpi_summary:            { type: 'string' },
+                  injury_date:            { type: 'string' },
+                  pain_scale:             { type: 'string' },
+                  symptom_progression:    { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
                   physical_exam_findings: { type: 'string' },
-                  imaging_findings: { type: 'string' },
-                  lab_findings: { type: 'string' },
-                  impression_diagnosis: { type: 'string' },
-                  icd10_codes: { type: 'array', items: { type: 'string' } },
-                  treatment_plan: { type: 'string' },
+                  imaging_findings:       { type: 'string' },
+                  lab_findings:           { type: 'string' },
+                  impression_diagnosis:   { type: 'string' },
+                  icd10_codes:            { type: 'array', items: { type: 'string' } },
+                  treatment_plan:         { type: 'string' },
                 },
               },
             },
           },
         };
-
-        // Group by source_doc_id (v51: target exact part, not positional guess)
         const bySourceDoc = {};
         for (const mv of missingVisits) {
           const srcId = mv.source_doc_id || 'unknown';
@@ -645,148 +788,82 @@ const generateSummaryWorker = async (event) => {
         }
         const recGroups = Object.entries(bySourceDoc);
         const REC_CONCURRENCY = 3;
-
         for (let rg = 0; rg < recGroups.length; rg += REC_CONCURRENCY) {
           const recChunk = recGroups.slice(rg, rg + REC_CONCURRENCY);
           await Promise.all(recChunk.map(async ([srcDocId, mvGroup]) => {
-            const srcPart = allParts.find(p => p.id === srcDocId);
+            const srcPart    = allParts.find(p => p.id === srcDocId);
             const recFileKey = srcPart?.file_key || allParts[0]?.file_key;
             if (!recFileKey) return;
-            const visitList = mvGroup.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''}`).join('\n');
-            const recPrompt = `You are reviewing medical-legal documents. A specific clinical visit is known to exist in these records but was missed in the prior extraction pass.
-
-TARGET VISIT${mvGroup.length > 1 ? 'S' : ''}:
-${visitList}
-
-Your task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided document and extract full clinical details for ${mvGroup.length > 1 ? 'each one' : 'it'}. If you cannot find it, return an empty visits array. Do not extract any other visits.`;
+            const visitList  = mvGroup.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''}`).join('\n');
+            const recPrompt  = `You are reviewing medical-legal documents. A specific clinical visit is known to exist in these records but was missed in the prior extraction pass.\n\nTARGET VISIT${mvGroup.length > 1 ? 'S' : ''}:\n${visitList}\n\nYour task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided document and extract full clinical details for ${mvGroup.length > 1 ? 'each one' : 'it'}. If you cannot find it, return an empty visits array. Do not extract any other visits.`;
             try {
-              // AWS swap #1: callBedrock instead of InvokeLLM
               const recResult = await callBedrock([recFileKey], recPrompt, recSchema);
               if (Array.isArray(recResult.visits) && recResult.visits.length > 0) {
                 const recClean = sanitizeVisits(recResult.visits, patientName);
                 allVisits = allVisits.concat(recClean);
                 console.log(`Recovery: recovered ${recClean.length} visit(s) from ${srcDocId}`);
-              } else {
-                console.warn(`Recovery: Bedrock returned 0 visits for ${srcDocId} (possible throttle/limit) -- keeping existing visits`);
               }
             } catch (recErr) {
               console.warn(`Recovery failed for ${srcDocId}:`, recErr.message);
             }
           }));
         }
-
-        // Final dedup after recovery
         allVisits = deduplicateVisits(allVisits);
         allVisits.sort((a, b) => {
           if (!a.visit_date) return 1;
           if (!b.visit_date) return -1;
           return (a.visit_date||'').localeCompare(b.visit_date||'');
         });
-      } // end else if (missingVisits.length > 0)
-    } // end if (knownVisits.length > 0)
+      }
+    }
 
-    // ── Checklist enforcement: correct any visit whose date is not in the VI checklist ──
-    // The VI pre-pass is the ground truth for visit dates (built from document headers).
-    // If the main pass returns a date not in the checklist, it is a mislabeled visit --
-    // find the best matching checklist entry by provider/facility and correct the date.
+    // ── 10. Checklist date correction ─────────────────────────────────────────
     if (knownVisits.length > 0) {
       const checklistDates = new Set(knownVisits.map(v => v.date));
       allVisits = allVisits.map(v => {
         const d = (v.visit_date || '').trim();
-        if (!d || checklistDates.has(d)) return v; // date is correct, no action needed
-
-        // Date is not in checklist -- find best matching checklist entry
-        const provider = (v.provider || '').toLowerCase();
-        const facility = (v.practice_setting || '').toLowerCase();
-
-        // Score each checklist entry by provider/facility similarity
-        let bestMatch = null;
-        let bestScore = 0;
+        if (!d || checklistDates.has(d)) return v;
+        const provider = (v.rendering_provider || '').toLowerCase();
+        const facility = (v.practice_setting   || '').toLowerCase();
+        let bestMatch = null, bestScore = 0;
         for (const cv of knownVisits) {
           let score = 0;
           const cvProvider = (cv.provider || '').toLowerCase();
-          const cvFacility = (cv.facility || '').toLowerCase();
-          // Check for word overlap in provider name
-          const providerWords = provider.split(/\s+/).filter(w => w.length > 2);
-          for (const w of providerWords) {
+          const cvFacility = (cv.facility  || '').toLowerCase();
+          for (const w of provider.split(/\s+/).filter(w => w.length > 2)) {
             if (cvProvider.includes(w)) score += 2;
           }
-          // Check facility overlap
-          const facilityWords = facility.split(/\s+/).filter(w => w.length > 3);
-          for (const w of facilityWords) {
+          for (const w of facility.split(/\s+/).filter(w => w.length > 3)) {
             if (cvFacility.includes(w)) score += 1;
           }
-          if (score > bestScore) {
-            bestScore = score;
-            bestMatch = cv;
-          }
+          if (score > bestScore) { bestScore = score; bestMatch = cv; }
         }
-
         if (bestMatch && bestScore > 0) {
-          console.log(`CHECKLIST_CORRECT: corrected visit_date ${d} -> ${bestMatch.date} (provider match score ${bestScore}, provider: ${v.provider})`);
+          console.log(`CHECKLIST_CORRECT: corrected ${d} -> ${bestMatch.date} (score ${bestScore})`);
           return { ...v, visit_date: bestMatch.date };
-        } else {
-          // No provider match -- date is likely a phantom, log and keep original
-          console.log(`CHECKLIST_CORRECT: no match found for date ${d} provider "${v.provider}" -- keeping as-is`);
-          return v;
         }
+        return v;
       });
     }
 
-    console.log(`generateSummaryWorker complete: ${allVisits.length} visits`);
+    console.log(`coordinator complete: ${allVisits.length} visits`);
     if (allVisits.length === 0 && knownVisits.length > 0) {
-      console.warn(`generateSummaryWorker: WARNING -- 0 visits written despite ${knownVisits.length} VI entries. Possible Bedrock throttle/timeout on all batches.`);
+      console.warn(`coordinator: WARNING — 0 visits despite ${knownVisits.length} VI entries`);
     }
-    await setJobStatus(job_id, `Saving ${allVisits.length} visits...`);
 
+    await setJobStatus(job_id, `Saving ${allVisits.length} visits...`);
     await markJobComplete(job_id, {
       patient_name: patientName || '',
-      case_number: caseNumber || '',
-      visits: allVisits,
-      doc_count: docRecords.length,
-      visit_count: allVisits.length,
+      case_number:  caseNumber  || '',
+      visits:       allVisits,
+      doc_count:    docRecords.length,
+      visit_count:  allVisits.length,
     });
 
   } catch (err) {
-    console.error('generateSummaryWorker fatal:', err);
+    console.error('coordinator fatal:', err);
     await markJobFailed(job_id, err.message);
   }
-};
-
-// ─── generateSummaryStart — kick off job + invoke worker async ────────────────
-const generateSummaryStartHandler = async (event) => {
-  const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
-  const { doc_ids, patient_name = '' } = body;
-  const org_id = event._orgId || body.org_id || '';
-
-  if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
-
-  const job_id = randomUUID();
-  await dynamo.send(new UpdateCommand({
-    TableName: JOBS_TABLE, Key: { job_id },
-    UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t, org_id = :oid',
-    ExpressionAttributeNames: { '#s': 'status' },
-    ExpressionAttributeValues: { ':s': 'running', ':now': new Date().toISOString(), ':t': 'generate_summary', ':oid': org_id },
-  }));
-
-  // Invoke worker asynchronously
-  await lambda.send(new InvokeCommand({
-    FunctionName: WORKER_FN,
-    InvocationType: 'Event',
-    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id })),
-  }));
-
-  console.log(`generateSummaryStart: job_id=${job_id} docs=${doc_ids.length}`);
-  return httpResponse(200, { job_id });
-};
-
-// ─── Entry point ─────────────────────────────────────────────────────────────
-const generateSummaryHandler = async (event) => {
-  if (event.job_id && event.doc_ids) {
-    await generateSummaryWorker(event);
-    return;
-  }
-  return generateSummaryStartHandler(event);
 };
 
 
@@ -923,9 +1000,10 @@ const buildVisitIndexStartHandler = async (event) => {
 };
 
 module.exports = {
-  generateSummaryStart:  validateApiKey(generateSummaryStartHandler),
-  generateSummaryWorker: generateSummaryWorker,
-  buildVisitIndexStart:  validateApiKey(buildVisitIndexStartHandler),
-  buildVisitIndexWorker: buildVisitIndexWorkerFn,
+module.exports = {
+  generateSummaryStart:       validateApiKey(generateSummaryStartHandler),
+  generateSummaryWorker:      generateSummaryWorker,
+  generateSummaryChunkWorker: generateSummaryChunkWorker,
+  buildVisitIndexStart:       validateApiKey(buildVisitIndexStartHandler),
+  buildVisitIndexWorker:      buildVisitIndexWorkerFn,
 };
-
