@@ -687,13 +687,8 @@ const generateSummaryWorker = async (event) => {
       await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
 
       const statusChecks = await Promise.all(chunkJobIds.map(cjid =>
-        dynamo.send(new UpdateCommand({
-          TableName: JOBS_TABLE,
-          Key: { job_id: cjid },
-          UpdateExpression: 'SET updated_at = :now',
-          ExpressionAttributeValues: { ':now': new Date().toISOString() },
-          ReturnValues: 'ALL_NEW',
-        })).then(r => r.Attributes)
+        dynamo.send(new GetCommand({ TableName: JOBS_TABLE, Key: { job_id: cjid } }))
+          .then(r => r.Item)
       ));
 
       const statuses = statusChecks.map(a => a?.status || 'running');
@@ -714,14 +709,8 @@ const generateSummaryWorker = async (event) => {
     await setJobStatus(job_id, 'Merging results...');
 
     for (const cjid of chunkJobIds) {
-      const r = await dynamo.send(new UpdateCommand({
-        TableName: JOBS_TABLE,
-        Key: { job_id: cjid },
-        UpdateExpression: 'SET updated_at = :now',
-        ExpressionAttributeValues: { ':now': new Date().toISOString() },
-        ReturnValues: 'ALL_NEW',
-      }));
-      const chunkResult = r.Attributes?.result;
+      const r = await dynamo.send(new GetCommand({ TableName: JOBS_TABLE, Key: { job_id: cjid } }));
+      const chunkResult = r.Item?.result;
       if (!patientName && chunkResult?.patient_name) patientName = chunkResult.patient_name;
       if (!caseNumber  && chunkResult?.case_number)  caseNumber  = chunkResult.case_number;
       if (Array.isArray(chunkResult?.visits)) {
