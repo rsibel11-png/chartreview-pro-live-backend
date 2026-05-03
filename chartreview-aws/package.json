@@ -1,24 +1,17 @@
 {
-  "name": "chartreview-pro-api",
+  "name": "chartreview-aws",
   "version": "1.0.0",
-  "description": "HIPAA-compliant PHI backend for ChartReview Pro",
-  "main": "index.js",
-  "scripts": {
-    "deploy": "serverless deploy --stage prod",
-    "deploy:dev": "serverless deploy --stage dev",
-    "remove": "serverless remove --stage prod",
-    "patch-cors": "bash scripts/patch-cors.sh"
-  },
+  "description": "ChartReview Pro AWS Lambda backend",
+  "main": "src/handlers/documents_new.js",
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/lib-dynamodb": "^3.0.0",
-    "@aws-sdk/client-s3": "^3.0.0",
-    "@aws-sdk/s3-request-presigner": "^3.0.0",
-    "@aws-sdk/client-textract": "^3.0.0",
+    "@aws-sdk/client-bedrock-runtime": "3.370.0",
+    "@aws-sdk/client-dynamodb": "3.370.0",
+    "@aws-sdk/client-lambda": "3.370.0",
+    "@aws-sdk/client-s3": "3.370.0",
+    "@aws-sdk/client-sqs": "3.370.0",
+    "@aws-sdk/client-textract": "3.370.0",
+    "@aws-sdk/lib-dynamodb": "3.370.0",
+    "@aws-sdk/s3-request-presigner": "3.370.0",
     "uuid": "^9.0.0"
-  },
-  "devDependencies": {
-    "serverless": "^3.0.0",
-    "serverless-plugin-scripts": "1.0.2"
   }
 }
