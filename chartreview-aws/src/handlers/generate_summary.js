@@ -381,6 +381,34 @@ const CHUNK_FN          = process.env.GENERATE_CHUNK_WORKER_FUNCTION_NAME || 'ch
 
 // ── generateSummaryChunkWorker ────────────────────────────────────────────────
 // Processes a slice of batches, writes partial results to its chunk sub-job.
+
+// ─── generateSummaryStart — receives API call, creates job, fires worker async ─
+const generateSummaryStartHandler = async (event) => {
+  const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
+  const { doc_ids, patient_name = '' } = body;
+  const org_id = event._orgId || body.org_id || '';
+
+  if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
+
+  const job_id = randomUUID();
+  await dynamo.send(new UpdateCommand({
+    TableName: JOBS_TABLE, Key: { job_id },
+    UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t, org_id = :oid',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':s': 'running', ':now': new Date().toISOString(), ':t': 'generate_summary', ':oid': org_id },
+  }));
+
+  // Fire the coordinator worker asynchronously
+  await lambda.send(new InvokeCommand({
+    FunctionName: WORKER_FN,
+    InvocationType: 'Event',
+    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id })),
+  }));
+
+  console.log(`generateSummaryStart: job_id=${job_id} docs=${doc_ids.length}`);
+  return httpResponse(200, { job_id });
+};
+
 const generateSummaryChunkWorker = async (event) => {
   const {
     job_id,         // parent job (for status messages)
