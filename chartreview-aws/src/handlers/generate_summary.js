@@ -112,6 +112,27 @@ const incrementRegionUsage = async (region, tokensUsed) => {
   }
 };
 
+// Mark a region as fully exhausted — sets a very high token count so it's
+// deprioritized for the rest of the day across all concurrent jobs
+const saturateRegion = async (region) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    await dynamo.send(new UpdateCommand({
+      TableName: USAGE_TABLE,
+      Key: { region_id: region },
+      UpdateExpression: 'SET tokens_used_today = :max, date_utc = :date, last_updated = :now',
+      ExpressionAttributeValues: {
+        ':max': 999999999,
+        ':date': today,
+        ':now': new Date().toISOString(),
+      },
+    }));
+    console.log(`saturateRegion: marked ${region} as exhausted for today`);
+  } catch (e) {
+    console.warn(`saturateRegion: failed for ${region}:`, e.message);
+  }
+};
+
 // Pick the region with the lowest token usage today.
 // Time-of-day heuristic: deprioritize US regions during US business hours (13:00-23:00 UTC = 9am-7pm ET)
 const selectBestRegions = (usage) => {
@@ -129,9 +150,14 @@ const selectBestRegions = (usage) => {
     return usageA - usageB;
   });
 
+  // Filter out regions already saturated (marked exhausted today)
+  const available = sorted.filter(r => (usage[r.region] || 0) < 900000000);
+  const skipped   = sorted.filter(r => (usage[r.region] || 0) >= 900000000);
+  if (skipped.length) console.log(`selectBestRegions: skipping exhausted: ${skipped.map(r => r.region).join(', ')}`);
+
   console.log(`selectBestRegions: hour=${hourUtc}UTC, isUSBizHours=${isUSBusinessHours}`);
-  console.log('selectBestRegions order:', sorted.map(r => `${r.region}(${usage[r.region]||0})`).join(' → '));
-  return sorted;
+  console.log('selectBestRegions order:', available.map(r => `${r.region}(${usage[r.region]||0})`).join(' → '));
+  return available.length ? available : sorted;
 };
 
 const httpResponse = (statusCode, body) => ({
@@ -211,6 +237,13 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder) => {
         if (!isThrottle) throw err;  // non-throttle errors: don't try other models
         // throttled: try next model in this region, then next region
       }
+    }
+    // All models in this region were throttled — mark it saturated so future calls skip it
+    if (lastErr) {
+      const isRegionThrottled = lastErr.message?.includes('Too many tokens') ||
+                                lastErr.name === 'ThrottlingException' ||
+                                lastErr.$metadata?.httpStatusCode === 429;
+      if (isRegionThrottled) await saturateRegion(region);
     }
   }
   throw lastErr; // all regions + models exhausted
