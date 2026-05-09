@@ -1,4 +1,4 @@
-// Updated: 2026-04-26 — v4: strengthen date accuracy (checklist overrides HPI dates); fix diagnosis field leakage from treatment plan
+// Updated: 2026-05-09 — v5: multi-region Bedrock router (us-east-1, us-east-2, us-west-2, eu-west-1, ap-southeast-1) with DynamoDB usage tracking
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -18,18 +18,121 @@ const { validateApiKey } = require('./auth');
 
 const s3      = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
 const dynamo  = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const bedrock = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const lambda  = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
 
 const BUCKET        = process.env.S3_BUCKET            || 'chartreview-documents-prod';
 const DOCS_TABLE    = process.env.DOCUMENTS_TABLE       || 'chartreview-documents-prod';
 const JOBS_TABLE    = process.env.JOBS_TABLE            || 'chartreview-jobs-prod';
-// Model fallback chain: try each in order when throttled
-const BEDROCK_MODELS = [
-  'us.anthropic.claude-sonnet-4-6',               // primary: cross-region Sonnet 4.6
-  'us.anthropic.claude-sonnet-4-5-20250929-v1:0', // fallback: cross-region Sonnet 4.5
-];
+const USAGE_TABLE   = process.env.BEDROCK_USAGE_TABLE   || 'chartreview-bedrock-usage';
 const WORKER_FN     = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
+
+// ─── Multi-region Bedrock router ─────────────────────────────────────────────
+// Each region has an independent daily token quota. We track usage per region
+// in DynamoDB and pick the least-used region at call time.
+// Regions are tried in order of ascending tokens_used_today.
+const CANDIDATE_REGIONS = [
+  {
+    region: 'us-east-1',
+    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+  },
+  {
+    region: 'us-east-2',
+    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+  },
+  {
+    region: 'us-west-2',
+    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+  },
+  {
+    region: 'eu-west-1',
+    models: ['eu.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+  },
+  {
+    region: 'ap-southeast-1',
+    models: ['ap.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+  },
+];
+
+// Cache Bedrock clients per region (avoid re-creating on every call)
+const bedrockClientCache = {};
+const getBedrockClient = (region) => {
+  if (!bedrockClientCache[region]) {
+    bedrockClientCache[region] = new BedrockRuntimeClient({ region });
+  }
+  return bedrockClientCache[region];
+};
+
+// Read token usage for all regions from DynamoDB
+const getRegionUsage = async () => {
+  const usage = {};
+  await Promise.all(CANDIDATE_REGIONS.map(async ({ region }) => {
+    try {
+      const r = await dynamo.send(new GetCommand({
+        TableName: USAGE_TABLE,
+        Key: { region_id: region },
+      }));
+      const item = r.Item;
+      if (item) {
+        // Check if the record is from today (UTC) — reset if not
+        const today = new Date().toISOString().slice(0, 10);
+        if (item.date_utc === today) {
+          usage[region] = item.tokens_used_today || 0;
+        } else {
+          usage[region] = 0; // stale record — treat as empty
+        }
+      } else {
+        usage[region] = 0;
+      }
+    } catch (e) {
+      console.warn(`getRegionUsage: failed for ${region}:`, e.message);
+      usage[region] = 0;
+    }
+  }));
+  return usage;
+};
+
+// Increment token usage counter for a region
+const incrementRegionUsage = async (region, tokensUsed) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    await dynamo.send(new UpdateCommand({
+      TableName: USAGE_TABLE,
+      Key: { region_id: region },
+      UpdateExpression: 'SET tokens_used_today = if_not_exists(tokens_used_today, :zero) + :inc, date_utc = :date, last_updated = :now',
+      ExpressionAttributeValues: {
+        ':inc': tokensUsed,
+        ':zero': 0,
+        ':date': today,
+        ':now': new Date().toISOString(),
+      },
+    }));
+  } catch (e) {
+    console.warn(`incrementRegionUsage: failed for ${region}:`, e.message);
+    // Non-fatal — don't let usage tracking break the main flow
+  }
+};
+
+// Pick the region with the lowest token usage today.
+// Time-of-day heuristic: deprioritize US regions during US business hours (13:00-23:00 UTC = 9am-7pm ET)
+const selectBestRegions = (usage) => {
+  const hourUtc = new Date().getUTCHours();
+  const isUSBusinessHours = hourUtc >= 13 && hourUtc < 23;
+
+  const sorted = [...CANDIDATE_REGIONS].sort((a, b) => {
+    let usageA = usage[a.region] || 0;
+    let usageB = usage[b.region] || 0;
+    // During US business hours, add a penalty to US regions to prefer EU/AP
+    if (isUSBusinessHours) {
+      if (['us-east-1','us-east-2','us-west-2'].includes(a.region)) usageA += 5_000_000;
+      if (['us-east-1','us-east-2','us-west-2'].includes(b.region)) usageB += 5_000_000;
+    }
+    return usageA - usageB;
+  });
+
+  console.log(`selectBestRegions: hour=${hourUtc}UTC, isUSBizHours=${isUSBusinessHours}`);
+  console.log('selectBestRegions order:', sorted.map(r => `${r.region}(${usage[r.region]||0})`).join(' → '));
+  return sorted;
+};
 
 const httpResponse = (statusCode, body) => ({
   statusCode,
@@ -44,7 +147,8 @@ const httpResponse = (statusCode, body) => ({
 // ─── AWS swap #1: replaces InvokeLLM ─────────────────────────────────────────
 // Original: base44.integrations.Core.InvokeLLM({ prompt, file_urls, response_json_schema })
 // New: fetch each PDF from S3 as base64, send to Bedrock with same prompt + schema
-const callBedrock = async (fileKeys, prompt, schema) => {
+// regionOrder is optional — if not provided, we fetch usage from DynamoDB and sort
+const callBedrock = async (fileKeys, prompt, schema, regionOrder) => {
   // Build content array: one document block per PDF (mirrors file_urls behavior)
   const contentBlocks = [];
   for (const fileKey of fileKeys) {
@@ -71,34 +175,51 @@ const callBedrock = async (fileKeys, prompt, schema) => {
     tool_choice: { type: 'tool', name: 'structured_output' },
   };
 
+  // Use provided region order, or fetch fresh usage and sort
+  const orderedRegions = regionOrder || selectBestRegions(await getRegionUsage());
+
   let lastErr;
-  for (const modelId of BEDROCK_MODELS) {
-    try {
-      console.log(`callBedrock: trying model ${modelId}`);
-      const cmd = new InvokeModelCommand({
-        modelId,
-        contentType: 'application/json',
-        accept: 'application/json',
-        body: JSON.stringify(bedrockPayload),
-      });
-      const res = await bedrock.send(cmd);
-      const parsed = JSON.parse(Buffer.from(res.body).toString('utf-8'));
-      const toolUse = parsed.content?.find(b => b.type === 'tool_use');
-      if (!toolUse) throw new Error('Bedrock returned no tool_use block');
-      console.log(`callBedrock: success with model ${modelId}`);
-      console.log('callBedrock input keys: ' + Object.keys(toolUse.input || {}).join(','));
-      return toolUse.input;
-    } catch (err) {
-      const isThrottle = err.message?.includes('Too many tokens') ||
-                         err.name === 'ThrottlingException' ||
-                         err.$metadata?.httpStatusCode === 429;
-      console.warn(`callBedrock: model ${modelId} failed — ${err.message}`);
-      lastErr = err;
-      if (!isThrottle) throw err; // non-throttle errors: don't try other models
-      // throttled: try next model in chain
+  for (const candidate of orderedRegions) {
+    const { region, models } = candidate;
+    for (const modelId of models) {
+      try {
+        console.log(`callBedrock: trying region=${region} model=${modelId}`);
+        const client = getBedrockClient(region);
+        const cmd = new InvokeModelCommand({
+          modelId,
+          contentType: 'application/json',
+          accept: 'application/json',
+          body: JSON.stringify(bedrockPayload),
+        });
+        const res = await client.send(cmd);
+        const parsed = JSON.parse(Buffer.from(res.body).toString('utf-8'));
+        const toolUse = parsed.content?.find(b => b.type === 'tool_use');
+        if (!toolUse) throw new Error('Bedrock returned no tool_use block');
+        console.log(`callBedrock: success region=${region} model=${modelId}`);
+        console.log('callBedrock input keys: ' + Object.keys(toolUse.input || {}).join(','));
+        // Increment usage counter (estimate ~5000 tokens per call)
+        await incrementRegionUsage(region, 5000);
+        return toolUse.input;
+      } catch (err) {
+        const isThrottle = err.message?.includes('Too many tokens') ||
+                           err.name === 'ThrottlingException' ||
+                           err.$metadata?.httpStatusCode === 429;
+        const isTooLong = err.message?.includes('Input is too long');
+        console.warn(`callBedrock: region=${region} model=${modelId} failed — ${err.message}`);
+        lastErr = err;
+        if (isTooLong) throw err;    // oversized doc — no point trying other models/regions
+        if (!isThrottle) throw err;  // non-throttle errors: don't try other models
+        // throttled: try next model in this region, then next region
+      }
     }
   }
-  throw lastErr; // all models exhausted
+  throw lastErr; // all regions + models exhausted
+};
+
+// Pre-fetch region order once per job to avoid N DynamoDB reads per batch
+const getRegionOrder = async () => {
+  const usage = await getRegionUsage();
+  return selectBestRegions(usage);
 };
 
 // ─── AWS swap #2: replaces awsProxy(/documents/${id}/download-url) ────────────
@@ -446,6 +567,10 @@ const generateSummaryChunkWorker = async (event) => {
 
   console.log(`chunkWorker[${chunkIndex}] start: ${batches.length} batches, chunk_job_id=${chunk_job_id}`);
 
+  // Pre-fetch region order once for this chunk worker (avoids DynamoDB read per batch)
+  const regionOrder = await getRegionOrder();
+  console.log(`chunkWorker[${chunkIndex}] regionOrder: ${regionOrder.map(r => r.region).join(' → ')}`);
+
   const chunkVisits = [];
   let patientName   = patientNameHint || '';
   let caseNumber    = '';
@@ -509,12 +634,12 @@ const generateSummaryChunkWorker = async (event) => {
     const globalBatchNum = batchOffset + batchIndex + 1;
     const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
     try {
-      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), fullSchema);
+      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), fullSchema, regionOrder);
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
-        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), simplifiedSchema);
+        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), simplifiedSchema, regionOrder);
         return result;
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
@@ -579,6 +704,10 @@ const generateSummaryWorker = async (event) => {
   const { job_id, doc_ids, patient_name = '', org_id } = event;
   console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length}`);
 
+  // Pre-fetch region order once for entire coordinator run
+  const regionOrder = await getRegionOrder();
+  console.log(`coordinator regionOrder: ${regionOrder.map(r => r.region).join(' → ')}`);
+
   try {
     // ── 1. Fetch doc records ──────────────────────────────────────────────────
     const docRecords = await fetchDocRecords(doc_ids);
@@ -639,7 +768,7 @@ const generateSummaryWorker = async (event) => {
         await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
           const partIdx = vi + chunkIdx;
           try {
-            const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema);
+            const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema, regionOrder);
             if (Array.isArray(viResult.visits)) {
               viResults[partIdx] = viResult.visits
                 .map(v => {
@@ -855,7 +984,7 @@ const generateSummaryWorker = async (event) => {
             const visitList  = mvGroup.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''}`).join('\n');
             const recPrompt  = `You are reviewing medical-legal documents. A specific clinical visit is known to exist in these records but was missed in the prior extraction pass.\n\nTARGET VISIT${mvGroup.length > 1 ? 'S' : ''}:\n${visitList}\n\nYour task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided document and extract full clinical details for ${mvGroup.length > 1 ? 'each one' : 'it'}. If you cannot find it, return an empty visits array. Do not extract any other visits.`;
             try {
-              const recResult = await callBedrock([recFileKey], recPrompt, recSchema);
+              const recResult = await callBedrock([recFileKey], recPrompt, recSchema, regionOrder);
               if (Array.isArray(recResult.visits) && recResult.visits.length > 0) {
                 const recClean = sanitizeVisits(recResult.visits, patientName);
                 allVisits = allVisits.concat(recClean);
@@ -983,6 +1112,10 @@ const buildVisitIndexWorkerFn = async (event) => {
       },
     };
 
+    // Pre-fetch region order once for VI worker
+    const regionOrder = await getRegionOrder();
+    console.log(`VI worker regionOrder: ${regionOrder.map(r => r.region).join(' → ')}`);
+
     const viResults = new Array(allParts.length).fill(null);
     let extractedPatientName = inputPatientName || '';
     for (let vi = 0; vi < allParts.length; vi += VI_CONCURRENCY) {
@@ -990,7 +1123,7 @@ const buildVisitIndexWorkerFn = async (event) => {
       await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
         const partIdx = vi + chunkIdx;
         try {
-          const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema);
+          const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema, regionOrder);
           if (Array.isArray(viResult.visits)) {
             viResults[partIdx] = viResult.visits.filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
           }
@@ -1064,4 +1197,5 @@ module.exports = {
   buildVisitIndexStart:       validateApiKey(buildVisitIndexStartHandler),
   buildVisitIndexWorker:      buildVisitIndexWorkerFn,
 };
+
 
