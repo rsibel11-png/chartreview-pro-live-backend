@@ -246,6 +246,7 @@ CRITICAL OUTPUT RULES — MUST FOLLOW FOR EVERY FIELD:
 - Extract PERTINENT POSITIVES ONLY — omit normal/unremarkable findings entirely.
 - ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER in separate lines.
 - visit_date MUST be in YYYY-MM-DD format always (e.g. 2026-01-20). Never return any other date format.
+- If a visit date cannot be determined, return an empty string "" for visit_date. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string for visit_date.
 - Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
 - If information is not available for a field, return an empty string "".
 
@@ -348,6 +349,28 @@ ${checklistSection}
 ${skipPagesSection}`;
 };
 
+
+const buildVisitIndexPrompt = () => {
+  return `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter date, provider name, and facility/location.
+
+For each clinical encounter found, extract:
+1. date - the date of service (YYYY-MM-DD format). PRIMARY SOURCE: the document header or note title (e.g. "Visit Note - November 7, 2022" → 2022-11-07). The vitals table Date column also confirms the visit date. NEVER use the injury date or any date mentioned inside the HPI narrative as the visit date.
+2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
+3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
+4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
+
+RULES:
+- Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
+- Each unique date + provider combination is a separate entry.
+- Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
+- CRITICAL: The HPI section often mentions the date of injury -- this is NOT the visit date. The visit date is ALWAYS in the document header or vitals table.
+- Do NOT include the date of injury as a visit date unless confirmed by a document header on that exact date.
+- CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
+- Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
+- If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
+
+Return all entries in the visits array.`;
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GENERATE SUMMARY — CONCURRENT CHUNK ARCHITECTURE
@@ -619,8 +642,26 @@ const generateSummaryWorker = async (event) => {
             const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema);
             if (Array.isArray(viResult.visits)) {
               viResults[partIdx] = viResult.visits
-                .filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date))
-                .map(v => ({ ...v, source_doc_id: viPart.id, source_part_label: viPart.label }));
+                .map(v => {
+                  // Normalize date to YYYY-MM-DD — try common formats before discarding
+                  let d = (v.date || '').trim();
+                  if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+                    // Try MM/DD/YYYY
+                    const mmddyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+                    if (mmddyyyy) d = `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
+                    // Try Month DD, YYYY (e.g. "July 16, 2024")
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+                      const parsed = new Date(d);
+                      if (!isNaN(parsed.getTime())) {
+                        d = parsed.toISOString().slice(0, 10);
+                      } else {
+                        d = ''; // truly unparseable — drop date but keep visit
+                      }
+                    }
+                  }
+                  return { ...v, date: d, source_doc_id: viPart.id, source_part_label: viPart.label };
+                })
+                .filter(v => v.date); // only keep visits with a resolved date
             }
             console.log(`VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
           } catch (e) {
@@ -1023,3 +1064,4 @@ module.exports = {
   buildVisitIndexStart:       validateApiKey(buildVisitIndexStartHandler),
   buildVisitIndexWorker:      buildVisitIndexWorkerFn,
 };
+
