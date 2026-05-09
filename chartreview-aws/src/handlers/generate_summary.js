@@ -31,6 +31,9 @@ const WORKER_FN     = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-
 // in DynamoDB and pick the least-used region at call time.
 // Regions are tried in order of ascending tokens_used_today.
 const CANDIDATE_REGIONS = [
+  // US cross-region profiles — each has its own independent daily quota.
+  // The 'us.' prefix profiles route across us-east-1/us-east-2/us-west-2 automatically.
+  // eu/ap model IDs differ per region and require separate validation — excluded for now.
   {
     region: 'us-east-1',
     models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
@@ -42,14 +45,6 @@ const CANDIDATE_REGIONS = [
   {
     region: 'us-west-2',
     models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
-  },
-  {
-    region: 'eu-west-1',
-    models: ['eu.anthropic.claude-sonnet-4-5-20250929-v1:0'],
-  },
-  {
-    region: 'ap-southeast-1',
-    models: ['ap.anthropic.claude-sonnet-4-5-20250929-v1:0'],
   },
 ];
 
