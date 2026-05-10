@@ -1,4 +1,4 @@
-// Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
+// Updated: 2026-05-10 — Grok prompt pass: stronger persona, anti-verbosity block, HPI filler removal, exam ROM+bullets, PT 1-2s
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -483,16 +483,12 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
 3. Practice/setting - for expert reports use "Medical Expert Report", "Independent Medical Examination", or "Chart Review" as appropriate
 4. Chief complaint - brief statement of visit purpose or report purpose
 
-5. History of Present Illness (HPI) - SUMMARIZE CONCISELY:
-   - Key presenting symptoms and their onset
-   - Injury date if applicable (only on first visit) - VERIFY this injury date is BEFORE or ON the visit date
-   - Pain scale where provided (e.g., "7/10")
-   - Mechanism of injury (brief)
-   - Whether symptoms are improved, the same, or worse from prior examinations
-   - Relevant past medical history only if directly related
-   - For expert reports: summarize the expert's review of the history
-   - Keep this section focused and concise, 2-3 sentences maximum. No filler phrases, no restating the obvious. Distill only what is clinically material.
-   - DO NOT mention future events or injuries
+5. History of Present Illness (HPI) - SUMMARIZE EXTREMELY CONCISELY (2-3 sentences max):
+   - Key symptoms, onset, injury mechanism/date (only on first visit), pain scale.
+   - Symptom progression (improved/same/worse).
+   - No filler: omit "the patient reports", "she states", "he denies", "patient presents with", "complains of", "was noted to have". State facts directly.
+   - For expert reports: summarize the expert's history review in 1-2 sentences only.
+   - VERIFY injury date is BEFORE or ON the visit date. DO NOT mention future events.
 
 6. Physical Examination Findings - SUMMARIZE KEY PERTINENT POSITIVES ONLY:
    - ONLY include findings documented on THIS specific visit/report date
