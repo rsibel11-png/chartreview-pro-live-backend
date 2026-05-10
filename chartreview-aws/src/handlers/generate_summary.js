@@ -1,4 +1,4 @@
-// Updated: 2026-05-10 — Reverted primary model to Sonnet 4.6 (Haiku caused 0-visit failures); Haiku remains as fallback (C-4 cross-ref, facility examples, dedup wording, treatment plan sub-bullets)
+// Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -387,7 +387,7 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
     ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from pages: ${skipPages.join(', ')})`
     : '';
 
-  return `You are a medical-legal document analyst. Analyze these ${docCount} medical document(s)${chunkLabel} and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
+  return `You are a medical-legal document analyst. Be ruthlessly concise. Eliminate all filler. Mirror the brevity of a high-quality medical-legal summary — every word must earn its place. Analyze these ${docCount} medical document(s)${chunkLabel} and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
 ${multiDocNote}
 
 DOCUMENT TYPE HANDLING:
@@ -491,7 +491,7 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
    - Whether symptoms are improved, the same, or worse from prior examinations
    - Relevant past medical history only if directly related
    - For expert reports: summarize the expert's review of the history
-   - Keep this section focused and concise, 3-5 sentences maximum
+   - Keep this section focused and concise, 2-3 sentences maximum. No filler phrases, no restating the obvious. Distill only what is clinically material.
    - DO NOT mention future events or injuries
 
 6. Physical Examination Findings - SUMMARIZE KEY PERTINENT POSITIVES ONLY:
@@ -502,13 +502,13 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
    - Neurological findings (numbness, tingling, burning) - only if present
    - Swelling, tenderness - only if notable
    - Do NOT list normal findings
-   - Keep concise, bullet-point style, 3-5 key findings maximum
+   - Keep concise, bullet-point style, 3 key findings maximum. Abnormal findings only — omit all normal/unremarkable results.
    - For expert reports with no physical exam: leave empty
 
 7. Imaging findings (X-ray, MRI, CT scans) - include EXACTLY as written, do NOT summarize these, ONLY if performed or reviewed on THIS visit/report date
 8. Lab findings (bloodwork panels) - ONLY include if labs were actually performed on THIS visit date, otherwise return empty string
 9. Impression/diagnosis - for expert reports include expert opinions, causation analysis, and conclusions with ICD-10 codes where applicable
-10. Treatment Plan / Recommendations - SUMMARIZE CONCISELY:
+10. Treatment Plan / Recommendations - SUMMARIZE CONCISELY (2-3 items max, no elaboration):
    - Main treatment interventions prescribed or performed
    - Medications prescribed (name, dosage if stated)
    - For expert reports: expert's recommendations, causation opinions, prognosis
@@ -516,7 +516,7 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
    - Follow-up timeline
    - Keep to 2-4 key points, omit routine instructions
 
-Be thorough but CONCISE. Focus on clinically significant information only.
+Be thorough but RUTHLESSLY CONCISE. Every field should read like a tight, professional medical-legal summary — not a transcription. Omit anything a reviewing attorney already knows or can infer. No filler. No restating headers as content.
 
 CRITICAL FORMATTING RULES:
 - Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
