@@ -1,4 +1,4 @@
-// Updated: 2026-05-09 — v5: multi-region Bedrock router (us-east-1, us-east-2, us-west-2, eu-west-1, ap-southeast-1) with DynamoDB usage tracking
+// Updated: 2026-05-10 — tighten buildPrompt field instructions to match original Base44 app (3-5 sentence limits, pertinent positives only, CRITICAL EXTRACTION RULES)
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -390,16 +390,11 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
   return `You are a medical-legal document analyst. Analyze these ${docCount} medical document(s)${chunkLabel} and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
 
 CRITICAL OUTPUT RULES — MUST FOLLOW FOR EVERY FIELD:
-- Be concise. Summarize and condense — do NOT transcribe verbatim from the document.
-- Maximum 2-3 sentences per field unless otherwise specified below.
-- Extract PERTINENT POSITIVES ONLY — omit normal/unremarkable findings entirely.
-- ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER in separate lines.
+- SUMMARIZE AND CONDENSE — do NOT transcribe verbatim from the document. Use your own words.
+- ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER on separate lines.
 - visit_date MUST be in YYYY-MM-DD format always (e.g. 2026-01-20). Never return any other date format.
-- If a visit date cannot be determined, return an empty string "" for visit_date. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string for visit_date.
 - Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
 - If information is not available for a field, return an empty string "".
-
-${multiDocNote}
 
 DOCUMENT TYPE HANDLING:
 You may encounter different types of documents. Handle each type as follows:
@@ -461,37 +456,31 @@ CRITICAL DATE ACCURACY:
 
 For EACH entry extract:
 
-1. visit_date — YYYY-MM-DD format, mandatory
-2. rendering_provider — doctor name only, not patient name
-3. practice_setting — specific facility name, never generic "Office Visit"
-4. chief_complaint — brief statement of visit purpose
+For EACH entry found, extract:
+1. Visit date (YYYY-MM-DD) — BE PRECISE. Use "Date of Service" or "Visit Date", NOT "Date of Injury".
+2. Rendering provider name — doctor's name only, not patient name
+3. Practice/setting — specific facility name or document type
+4. Chief complaint — brief statement of visit purpose
+5. HPI — SUMMARIZE CONCISELY: key symptoms, injury date (first visit only), pain scale, mechanism, symptom progression. 3-5 sentences max.
+6. Physical Examination — key pertinent positives only: pain location/severity, ROM with measurements, neurological findings, swelling. Do NOT list normal findings. 3-5 key findings max.
+7. Imaging findings — include EXACTLY as written, ONLY if performed on THIS visit date
+8. Lab findings — ONLY if labs actually performed on THIS visit date, otherwise empty string
+9. Impression/diagnosis — with ICD-10 codes in parentheses inline at end only (do NOT add codes if not in source)
+10. Treatment Plan — SUMMARIZE: main interventions, expert recommendations, restrictions, follow-up. 2-4 key points.
 
-5. hpi_summary — CONCISE, 2-3 sentences max:
-   - Key presenting symptoms and onset
-   - Injury date if applicable (first visit only) — must be before or on visit date
-   - Pain scale if provided (e.g. "7/10")
-   - Whether symptoms improved, same, or worse
-   - Do NOT mention future events
+CRITICAL EXTRACTION RULES:
+(1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
+(2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists anywhere in the text for that encounter. A visit with only date/provider and empty content fields is almost always an error — go back and fill it in.
+(3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
+(4) NEVER hallucinate — only use information explicitly in the text.
+(5) Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
+(6) If information is truly not available, return an empty string "".
+(7) The icd10_codes field must always be an array of strings (can be empty []).
+(8) PHYSICAL/OCCUPATIONAL THERAPY VISITS: Extract EVERY individual PT/OT session as its own separate record. Do NOT collapse multiple PT sessions into one. Do NOT summarize a series of visits as a single entry. Each visit date = one record. PT notes are often brief one-liners (date, therapist initials, modalities, exercise sets) -- each one is a separate visit and must be extracted individually. If a page contains 10 PT visit dates, return 10 separate visit records.
+(9) For PT visits: practice_setting should be the full facility name (e.g. "Dignity Health Physical Therapy", "Nevada Rehabilitation Institute"). Do NOT abbreviate to just "PT" or "Physical Therapy". Consistent facility naming across all records is critical.
 
-6. physical_exam_findings — PERTINENT POSITIVES ONLY, 3-5 key findings max:
-   - Pain location and severity if significant
-   - Range of motion limitations with measurements
-   - Neurological findings only if present (numbness, tingling)
-   - Swelling/tenderness only if notable
-   - OMIT all normal/unremarkable findings entirely
-   - For expert reports with no physical exam: leave empty
-
-7. imaging_findings — include exactly as written, only if performed or reviewed on THIS visit date
-8. lab_findings — only if labs actually performed on THIS visit date, otherwise empty string
-9. impression_diagnosis — expert opinions and diagnoses; ICD-10 codes inline in parentheses at end only
-10. treatment_plan — CONCISE, 2-4 key points max:
-    - Main interventions (medications, therapy, procedures)
-    - Activity restrictions if any
-    - Follow-up timeline
-    - Omit routine instructions
-
-Return ALL entries found across ALL documents as separate entries in the visits array.
-Also extract: patient_name and case_number (consistent across documents).
+Return ALL entries found as separate entries in the visits array.
+Also extract: patient_name, case_number.
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
 ${checklistSection}
