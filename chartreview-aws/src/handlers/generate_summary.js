@@ -1,4 +1,4 @@
-// Updated: 2026-05-10 — tighten buildPrompt field instructions to match original Base44 app (3-5 sentence limits, pertinent positives only, CRITICAL EXTRACTION RULES)
+// Updated: 2026-05-10 — TEST: swap primary model to Claude Haiku 4.5 (us.anthropic.claude-haiku-4-5-20251001-v1:0), Sonnet 4.6 as fallback
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -36,15 +36,15 @@ const CANDIDATE_REGIONS = [
   // eu/ap model IDs differ per region and require separate validation — excluded for now.
   {
     region: 'us-east-1',
-    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+    models: ['us.anthropic.claude-haiku-4-5-20251001-v1:0', 'us.anthropic.claude-sonnet-4-6'],
   },
   {
     region: 'us-east-2',
-    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+    models: ['us.anthropic.claude-haiku-4-5-20251001-v1:0', 'us.anthropic.claude-sonnet-4-6'],
   },
   {
     region: 'us-west-2',
-    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+    models: ['us.anthropic.claude-haiku-4-5-20251001-v1:0', 'us.anthropic.claude-sonnet-4-6'],
   },
 ];
 
