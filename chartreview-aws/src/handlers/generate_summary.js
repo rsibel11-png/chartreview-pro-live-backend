@@ -1,4 +1,4 @@
-// Updated: 2026-05-10 — SYNC: buildPrompt aligned exactly to original Base44 app prompt structure (C-4 cross-ref, facility examples, dedup wording, treatment plan sub-bullets)
+// Updated: 2026-05-10 — Reverted primary model to Sonnet 4.6 (Haiku caused 0-visit failures); Haiku remains as fallback (C-4 cross-ref, facility examples, dedup wording, treatment plan sub-bullets)
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -36,15 +36,15 @@ const CANDIDATE_REGIONS = [
   // eu/ap model IDs differ per region and require separate validation — excluded for now.
   {
     region: 'us-east-1',
-    models: ['us.anthropic.claude-3-5-haiku-20241022-v1:0', 'us.anthropic.claude-sonnet-4-6'],
+    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-3-5-haiku-20241022-v1:0'],
   },
   {
     region: 'us-east-2',
-    models: ['us.anthropic.claude-3-5-haiku-20241022-v1:0', 'us.anthropic.claude-sonnet-4-6'],
+    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-3-5-haiku-20241022-v1:0'],
   },
   {
     region: 'us-west-2',
-    models: ['us.anthropic.claude-3-5-haiku-20241022-v1:0', 'us.anthropic.claude-sonnet-4-6'],
+    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-3-5-haiku-20241022-v1:0'],
   },
 ];
 
