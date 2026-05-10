@@ -1,4 +1,4 @@
-// Updated: 2026-05-10 — REVERT: restore Sonnet 4.6 primary / Sonnet 4.5 fallback (Haiku 4.5 drops clinical detail, worse for medical-legal)
+// Updated: 2026-05-10 — TEST: Claude 3.5 Haiku primary (us.anthropic.claude-3-5-haiku-20241022-v1:0), Sonnet 4.6 fallback
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -36,15 +36,15 @@ const CANDIDATE_REGIONS = [
   // eu/ap model IDs differ per region and require separate validation — excluded for now.
   {
     region: 'us-east-1',
-    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+    models: ['us.anthropic.claude-3-5-haiku-20241022-v1:0', 'us.anthropic.claude-sonnet-4-6'],
   },
   {
     region: 'us-east-2',
-    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+    models: ['us.anthropic.claude-3-5-haiku-20241022-v1:0', 'us.anthropic.claude-sonnet-4-6'],
   },
   {
     region: 'us-west-2',
-    models: ['us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+    models: ['us.anthropic.claude-3-5-haiku-20241022-v1:0', 'us.anthropic.claude-sonnet-4-6'],
   },
 ];
 
