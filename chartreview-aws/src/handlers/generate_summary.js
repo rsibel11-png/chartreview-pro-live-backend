@@ -899,71 +899,72 @@ const generateSummaryWorker = async (event) => {
     }
 
     // ── 3b. PT session pre-filter (default: first + last per facility only) ───
-    // SAFETY: A doc part is only excluded if ALL knownVisits from that source_doc_id
-    // are PT visits. If a part has mixed PT + physician visits (same doc, different
-    // providers), we keep it so physician visits are not silently dropped.
-    const ptContextMap = {}; // doc_id -> "Visit X of Y at Facility"
+    // Approach: work directly from allParts. For each part, determine if it is a
+    // "pure PT" part by checking that every knownVisit sourced from it is a PT visit.
+    // Group pure-PT parts by normalized facility, sort by earliest PT visit date,
+    // then exclude middle parts (keep first + last). Mixed parts are always kept.
+    const ptContextMap = {}; // part.id -> "Visit X of Y at Facility"
     if (!include_all_pt) {
       try {
         const isPtVisit = (v) => {
           const vtype = v.visit_type || '';
           const prov  = v.provider  || '';
           const fac   = v.facility  || '';
-          // Match on visit_type label
           if (/physical therapy|physiotherapy|rehabilitation|rehab|hand therapy|occupational therapy/i.test(vtype)) return true;
-          // Match on provider credentials — PT, PTA, DPT, OT, COTA (word-boundary, not "MD" etc)
           if (/\b(PT|PTA|DPT|OT|COTA|CLT)\b/.test(prov) && !/\b(MD|DO|PA|NP|FNP|APRN|DC|DMD|DPM)\b/.test(prov)) return true;
-          // Match on facility name explicitly being a therapy clinic
           if (/\btherapy\b|\brehabilitation\b/i.test(fac) && !/pain management|spine|orthopedic|medical center|hospital/i.test(fac)) return true;
           return false;
         };
         const normFacility = (f) => (f || '').toLowerCase().trim().replace(/\s+/g, ' ');
 
-        // Build a map: source_doc_id -> all visits from that part (PT and non-PT)
-        const visitsByDocId = {};
+        // Map: part.id -> visits from that part
+        const visitsByPartId = {};
         for (const v of knownVisits) {
-          const docId = v.source_doc_id;
-          if (!docId) continue;
-          if (!visitsByDocId[docId]) visitsByDocId[docId] = [];
-          visitsByDocId[docId].push(v);
+          const pid = v.source_doc_id;
+          if (!pid) continue;
+          if (!visitsByPartId[pid]) visitsByPartId[pid] = [];
+          visitsByPartId[pid].push(v);
         }
 
-        // A doc part is "pure PT" only if every visit from it is a PT visit
-        const isPurePtPart = (docId) => {
-          const visits = visitsByDocId[docId] || [];
-          return visits.length > 0 && visits.every(isPtVisit);
+        // For parts with NO knownVisits entry (VI pre-pass missed it or date was empty),
+        // we cannot safely classify them — keep them always.
+        const isPurePtPart = (partId) => {
+          const visits = visitsByPartId[partId];
+          if (!visits || visits.length === 0) return false; // unknown — keep safe
+          return visits.every(isPtVisit);
         };
 
-        // Group pure-PT visits by normalized facility
-        const ptGroups = {};
-        for (const v of knownVisits) {
-          if (!isPtVisit(v)) continue;
-          if (!isPurePtPart(v.source_doc_id)) continue; // mixed part — never exclude
-          const key = normFacility(v.facility || v.provider || 'pt');
-          if (!ptGroups[key]) ptGroups[key] = [];
-          ptGroups[key].push(v);
+        // Group pure-PT parts by normalized facility
+        // Key: normalizedFacility -> array of { partId, earliestDate, facilityDisplay }
+        const ptFacilityGroups = {};
+        for (const part of allParts) {
+          if (!isPurePtPart(part.id)) continue;
+          const visits = visitsByPartId[part.id];
+          const repVisit = visits[0];
+          const facilityKey = normFacility(repVisit.facility || repVisit.provider || 'pt');
+          const facilityDisplay = repVisit.facility || 'Physical Therapy';
+          const earliestDate = visits.map(v => v.date || '').sort()[0] || '';
+          if (!ptFacilityGroups[facilityKey]) ptFacilityGroups[facilityKey] = { facilityDisplay, parts: [] };
+          ptFacilityGroups[facilityKey].parts.push({ partId: part.id, earliestDate });
         }
 
-        const excludedDocIds = new Set();
-        for (const [, visits] of Object.entries(ptGroups)) {
-          visits.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-          if (visits.length <= 2) continue;
-          const totalSessions = visits.length;
-          const firstDocId = visits[0].source_doc_id;
-          const lastDocId  = visits[visits.length - 1].source_doc_id;
-          const facilityDisplay = visits[0].facility || 'Physical Therapy';
-          if (firstDocId) ptContextMap[firstDocId] = `Visit 1 of ${totalSessions} at ${facilityDisplay}`;
-          if (lastDocId)  ptContextMap[lastDocId]  = `Visit ${totalSessions} of ${totalSessions} at ${facilityDisplay}`;
-          for (let vi = 1; vi < visits.length - 1; vi++) {
-            const midDocId = visits[vi].source_doc_id;
-            if (midDocId && isPurePtPart(midDocId)) excludedDocIds.add(midDocId);
+        const excludedPartIds = new Set();
+        for (const [, group] of Object.entries(ptFacilityGroups)) {
+          const parts = group.parts.sort((a, b) => a.earliestDate.localeCompare(b.earliestDate));
+          if (parts.length <= 2) continue; // only 1-2 PT files — nothing to filter
+          const totalParts = parts.length;
+          const facilityDisplay = group.facilityDisplay;
+          ptContextMap[parts[0].partId]              = `Visit 1 of ${totalParts} at ${facilityDisplay}`;
+          ptContextMap[parts[totalParts - 1].partId] = `Visit ${totalParts} of ${totalParts} at ${facilityDisplay}`;
+          for (let pi = 1; pi < totalParts - 1; pi++) {
+            excludedPartIds.add(parts[pi].partId);
           }
-          console.log(`PT pre-filter: ${facilityDisplay} — ${totalSessions} pure-PT sessions, excluding ${excludedDocIds.size} middle`);
+          console.log(`PT pre-filter: ${facilityDisplay} — ${totalParts} pure-PT files, excluding ${totalParts - 2} middle`);
         }
 
         const beforeCount = allParts.length;
         for (let pi = allParts.length - 1; pi >= 0; pi--) {
-          if (excludedDocIds.has(allParts[pi].id)) allParts.splice(pi, 1);
+          if (excludedPartIds.has(allParts[pi].id)) allParts.splice(pi, 1);
         }
         console.log(`PT pre-filter: ${beforeCount} → ${allParts.length} parts (${beforeCount - allParts.length} excluded)`);
         for (const part of allParts) {
