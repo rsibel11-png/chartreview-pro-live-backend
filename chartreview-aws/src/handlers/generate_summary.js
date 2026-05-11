@@ -959,6 +959,22 @@ const generateSummaryWorker = async (event) => {
           ptFacilityGroups[facilityKey].parts.push({ partId: part.id, earliestDate });
         }
 
+        // DEBUG: log all PT facility groups found
+        console.log('PT pre-filter groups:', JSON.stringify(
+          Object.entries(ptFacilityGroups).map(([k, g]) => ({
+            key: k, facility: g.facilityDisplay, partCount: g.parts.length,
+            parts: g.parts.map(p => ({ id: p.partId.slice(-8), date: p.earliestDate }))
+          }))
+        ));
+        // DEBUG: log all parts with their visitsByPartId classification
+        for (const part of allParts) {
+          const visits = visitsByPartId[part.id] || [];
+          const purePt = isPurePtPart(part.id);
+          if (visits.length > 0) {
+            console.log(\`PT part check: \${part.id.slice(-8)} purePT=\${purePt} visits=[\${visits.map(v => v.provider + '|' + v.facility + '|' + v.visit_type).join('; ')}]\`);
+          }
+        }
+
         const excludedPartIds = new Set();
         for (const [, group] of Object.entries(ptFacilityGroups)) {
           const parts = group.parts.sort((a, b) => a.earliestDate.localeCompare(b.earliestDate));
