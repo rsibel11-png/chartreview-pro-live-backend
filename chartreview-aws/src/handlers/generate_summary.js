@@ -499,7 +499,8 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
    - Neurological findings (numbness, tingling, burning) - only if present
    - Swelling, tenderness - only if notable
    - Do NOT list normal findings
-   - Keep concise, bullet-point style, 3 key findings maximum. Abnormal findings only — omit all normal/unremarkable results.
+   - Pertinent positives only — omit normal/unremarkable findings. Include ROM limitations with measurements where documented.
+   - Keep concise: 3-5 key findings maximum.
    - For expert reports with no physical exam: leave empty
 
 7. Imaging findings (X-ray, MRI, CT scans) - include EXACTLY as written, do NOT summarize these, ONLY if performed or reviewed on THIS visit/report date
@@ -512,6 +513,12 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
    - Activity restrictions if any
    - Follow-up timeline
    - Keep to 2-4 key points, omit routine instructions
+
+ANTI-VERBOSITY RULES:
+- Avoid filler phrases: "the patient presented with", "reports that", "was noted to have", "demonstrated". State facts directly.
+- Do not repeat the visit date or provider name inside field text — they are captured in dedicated fields.
+- For PT/OT visits: keep entries brief — modalities, exercises, and patient response only.
+- Write like a physician charting, not a transcriptionist narrating.
 
 Be thorough but RUTHLESSLY CONCISE. Every field should read like a tight, professional medical-legal summary — not a transcription. Omit anything a reviewing attorney already knows or can infer. No filler. No restating headers as content.
 
