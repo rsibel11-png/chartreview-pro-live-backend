@@ -375,7 +375,7 @@ const enforceOneC4 = (visitList) => {
   });
 };
 
-const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
+const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = [], ptSessionContext = '') => {
   const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
   const multiDocNote = docCount > 1
     ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files and combine them into a single comprehensive summary. Do not stop after the first document.`
@@ -546,7 +546,7 @@ Also extract:
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
 ${checklistSection}
-${skipPagesSection}`;
+${skipPagesSection}${ptSessionContext ? '\n\nPT SESSION CONTEXT: ' + ptSessionContext + '. Begin the hpi_summary for this PT entry with \'Visit X of Y at [Facility]\' (use the actual numbers/facility from context).' : ''}`;
 };
 
 
@@ -608,7 +608,7 @@ const CHUNK_FN          = process.env.GENERATE_CHUNK_WORKER_FUNCTION_NAME || 'ch
 // ─── generateSummaryStart — receives API call, creates job, fires worker async ─
 const generateSummaryStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
-  const { doc_ids, patient_name = '' } = body;
+  const { doc_ids, patient_name = '', include_all_pt = false } = body;
   const org_id = event._orgId || body.org_id || '';
 
   if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
@@ -625,7 +625,7 @@ const generateSummaryStartHandler = async (event) => {
   await lambda.send(new InvokeCommand({
     FunctionName: WORKER_FN,
     InvocationType: 'Event',
-    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id })),
+    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id, include_all_pt })),
   }));
 
   console.log(`generateSummaryStart: job_id=${job_id} docs=${doc_ids.length}`);
@@ -713,12 +713,13 @@ const generateSummaryChunkWorker = async (event) => {
     const globalBatchNum = batchOffset + batchIndex + 1;
     const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
     try {
-      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), fullSchema, regionOrder);
+      const ptCtx = batch.length === 1 ? (batch[0].pt_session_context || '') : '';
+      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], ptCtx), fullSchema, regionOrder);
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
-        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), simplifiedSchema, regionOrder);
+        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], ptCtx), simplifiedSchema, regionOrder);
         return result;
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
@@ -780,7 +781,7 @@ const generateSummaryChunkWorker = async (event) => {
 
 // ── generateSummaryWorker (coordinator) ──────────────────────────────────────
 const generateSummaryWorker = async (event) => {
-  const { job_id, doc_ids, patient_name = '', org_id } = event;
+  const { job_id, doc_ids, patient_name = '', org_id, include_all_pt = false } = event;
   console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length}`);
 
   // Pre-fetch region order once for entire coordinator run
@@ -895,6 +896,46 @@ const generateSummaryWorker = async (event) => {
     } catch (viErr) {
       console.warn('VI pre-pass failed (non-fatal):', viErr.message);
       knownVisits = [];
+    }
+
+    // ── 3b. PT session pre-filter (default: first + last per facility only) ───
+    const ptContextMap = {}; // doc_id -> "Visit X of Y at Facility"
+    if (!include_all_pt) {
+      try {
+        const normFacility = (f) => (f || '').toLowerCase().trim().replace(/\s+/g, ' ');
+        const ptGroups = {};
+        for (const v of knownVisits) {
+          if (!/physical therapy|physiotherapy|rehabilitation|rehab|\bpt\b|hand therapy|occupational therapy/i.test(v.visit_type || '')) continue;
+          const key = normFacility(v.facility || v.provider || 'pt');
+          if (!ptGroups[key]) ptGroups[key] = [];
+          ptGroups[key].push(v);
+        }
+        const excludedDocIds = new Set();
+        for (const [, visits] of Object.entries(ptGroups)) {
+          visits.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+          if (visits.length <= 2) continue;
+          const totalSessions = visits.length;
+          const firstDocId = visits[0].source_doc_id;
+          const lastDocId  = visits[visits.length - 1].source_doc_id;
+          const facilityDisplay = visits[0].facility || 'Physical Therapy';
+          if (firstDocId) ptContextMap[firstDocId] = `Visit 1 of ${totalSessions} at ${facilityDisplay}`;
+          if (lastDocId)  ptContextMap[lastDocId]  = `Visit ${totalSessions} of ${totalSessions} at ${facilityDisplay}`;
+          for (let vi = 1; vi < visits.length - 1; vi++) {
+            if (visits[vi].source_doc_id) excludedDocIds.add(visits[vi].source_doc_id);
+          }
+          console.log(`PT pre-filter: ${facilityDisplay} — ${totalSessions} sessions, excluding ${totalSessions - 2} middle`);
+        }
+        const beforeCount = allParts.length;
+        for (let pi = allParts.length - 1; pi >= 0; pi--) {
+          if (excludedDocIds.has(allParts[pi].id)) allParts.splice(pi, 1);
+        }
+        console.log(`PT pre-filter: ${beforeCount} → ${allParts.length} parts (${beforeCount - allParts.length} excluded)`);
+        for (const part of allParts) {
+          if (ptContextMap[part.id]) part.pt_session_context = ptContextMap[part.id];
+        }
+      } catch (ptErr) {
+        console.warn('PT pre-filter failed (non-fatal):', ptErr.message);
+      }
     }
 
     // ── 4. Build batches + split into chunks of CHUNK_SIZE ───────────────────
