@@ -915,7 +915,18 @@ const generateSummaryWorker = async (event) => {
           if (/\btherapy\b|\brehabilitation\b/i.test(fac) && !/pain management|spine|orthopedic|medical center|hospital/i.test(fac)) return true;
           return false;
         };
-        const normFacility = (f) => (f || '').toLowerCase().trim().replace(/\s+/g, ' ');
+        // normFacility: strip location/branch suffixes so that
+        // "Dignity Health Physical Therapy - Blue Diamond" and
+        // "Dignity Health Physical Therapy" group together.
+        // Strips anything after " - ", " – ", " (", or common suffix words.
+        const normFacility = (f) => (f || '')
+          .toLowerCase()
+          .trim()
+          .replace(/\s*[-–—]\s*(blue diamond|lake mead|nw|ne|se|sw|north|south|east|west|suite|ste|bldg|building|floor|fl|\d+).*$/i, '')
+          .replace(/\s*[-–—]\s*[a-z0-9 ]{1,30}$/i, '') // strip any remaining " - location" suffix
+          .replace(/\s*\(.*?\)\s*$/, '')              // strip trailing parentheticals
+          .replace(/\s+/g, ' ')
+          .trim();
 
         // Map: part.id -> visits from that part
         const visitsByPartId = {};
