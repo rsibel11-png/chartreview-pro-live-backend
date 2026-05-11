@@ -905,7 +905,18 @@ const generateSummaryWorker = async (event) => {
     const ptContextMap = {}; // doc_id -> "Visit X of Y at Facility"
     if (!include_all_pt) {
       try {
-        const isPtVisit = (v) => /physical therapy|physiotherapy|rehabilitation|rehab|\bpt\b|hand therapy|occupational therapy/i.test(v.visit_type || '');
+        const isPtVisit = (v) => {
+          const vtype = v.visit_type || '';
+          const prov  = v.provider  || '';
+          const fac   = v.facility  || '';
+          // Match on visit_type label
+          if (/physical therapy|physiotherapy|rehabilitation|rehab|hand therapy|occupational therapy/i.test(vtype)) return true;
+          // Match on provider credentials — PT, PTA, DPT, OT, COTA (word-boundary, not "MD" etc)
+          if (/\b(PT|PTA|DPT|OT|COTA|CLT)\b/.test(prov) && !/\b(MD|DO|PA|NP|FNP|APRN|DC|DMD|DPM)\b/.test(prov)) return true;
+          // Match on facility name explicitly being a therapy clinic
+          if (/\btherapy\b|\brehabilitation\b/i.test(fac) && !/pain management|spine|orthopedic|medical center|hospital/i.test(fac)) return true;
+          return false;
+        };
         const normFacility = (f) => (f || '').toLowerCase().trim().replace(/\s+/g, ' ');
 
         // Build a map: source_doc_id -> all visits from that part (PT and non-PT)
