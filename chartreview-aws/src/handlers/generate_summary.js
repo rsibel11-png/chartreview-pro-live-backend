@@ -1,4 +1,4 @@
-// Updated: 2026-05-10 — Prompt balance: dialed back HPI/exam caps, softened anti-verbosity (was stripping clinical content)
+// Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -483,13 +483,16 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
 3. Practice/setting - for expert reports use "Medical Expert Report", "Independent Medical Examination", or "Chart Review" as appropriate
 4. Chief complaint - brief statement of visit purpose or report purpose
 
-5. History of Present Illness (HPI) - SUMMARIZE CONCISELY (3-4 sentences max):
-   - Key symptoms, onset, injury mechanism/date (only on first visit), pain scale.
-   - Symptom progression (improved/same/worse) and any new complaints.
-   - Relevant history only if directly related to the claim.
-   - No filler phrases: omit "the patient reports", "she states", "complains of", "was noted to have". State facts directly.
-   - For expert reports: summarize the expert's history review concisely.
-   - VERIFY injury date is BEFORE or ON the visit date. DO NOT mention future events.
+5. History of Present Illness (HPI) - SUMMARIZE CONCISELY:
+   - Key presenting symptoms and their onset
+   - Injury date if applicable (only on first visit) - VERIFY this injury date is BEFORE or ON the visit date
+   - Pain scale where provided (e.g., "7/10")
+   - Mechanism of injury (brief)
+   - Whether symptoms are improved, the same, or worse from prior examinations
+   - Relevant past medical history only if directly related
+   - For expert reports: summarize the expert's review of the history
+   - Keep this section focused and concise, 2-3 sentences maximum. No filler phrases, no restating the obvious. Distill only what is clinically material.
+   - DO NOT mention future events or injuries
 
 6. Physical Examination Findings - SUMMARIZE KEY PERTINENT POSITIVES ONLY:
    - ONLY include findings documented on THIS specific visit/report date
@@ -499,8 +502,7 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
    - Neurological findings (numbness, tingling, burning) - only if present
    - Swelling, tenderness - only if notable
    - Do NOT list normal findings
-   - Pertinent positives only — omit normal/unremarkable findings. Include ROM limitations with measurements where documented.
-   - Keep concise: 3-5 key findings maximum.
+   - Keep concise, bullet-point style, 3 key findings maximum. Abnormal findings only — omit all normal/unremarkable results.
    - For expert reports with no physical exam: leave empty
 
 7. Imaging findings (X-ray, MRI, CT scans) - include EXACTLY as written, do NOT summarize these, ONLY if performed or reviewed on THIS visit/report date
@@ -513,12 +515,6 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
    - Activity restrictions if any
    - Follow-up timeline
    - Keep to 2-4 key points, omit routine instructions
-
-ANTI-VERBOSITY RULES:
-- Avoid filler phrases: "the patient presented with", "reports that", "was noted to have", "demonstrated". State facts directly.
-- Do not repeat the visit date or provider name inside field text — they are captured in dedicated fields.
-- For PT/OT visits: keep entries brief — modalities, exercises, and patient response only.
-- Write like a physician charting, not a transcriptionist narrating.
 
 Be thorough but RUTHLESSLY CONCISE. Every field should read like a tight, professional medical-legal summary — not a transcription. Omit anything a reviewing attorney already knows or can infer. No filler. No restating headers as content.
 
