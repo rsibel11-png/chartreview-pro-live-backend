@@ -21,8 +21,9 @@ const dynamo  = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const lambda  = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
 
 const BUCKET        = process.env.S3_BUCKET            || 'chartreview-documents-prod';
-const DOCS_TABLE    = process.env.DOCUMENTS_TABLE       || 'chartreview-documents-prod';
-const JOBS_TABLE    = process.env.JOBS_TABLE            || 'chartreview-jobs-prod';
+const DOCS_TABLE      = process.env.DOCUMENTS_TABLE       || 'chartreview-documents-prod';
+const JOBS_TABLE      = process.env.JOBS_TABLE            || 'chartreview-jobs-prod';
+const SUMMARIES_TABLE = process.env.SUMMARIES_TABLE       || 'chartreview-summaries-prod';
 const USAGE_TABLE   = process.env.BEDROCK_USAGE_TABLE   || 'chartreview-bedrock-usage';
 const WORKER_FN        = process.env.GENERATE_WORKER_FUNCTION_NAME       || 'chartreview-pro-prod-generateSummaryWorker';
 const POLISH_WORKER_FN = process.env.POLISH_WORKER_FUNCTION_NAME        || 'chartreview-pro-prod-generateSummaryPolishWorker';
