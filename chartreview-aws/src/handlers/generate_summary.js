@@ -1,4 +1,4 @@
-// Updated: 2026-05-10 — Grok prompt pass: stronger persona, anti-verbosity block, HPI filler removal, exam ROM+bullets, PT 1-2s
+// Updated: 2026-05-10 — Prompt balance: dialed back HPI/exam caps, softened anti-verbosity (was stripping clinical content)
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
 //      → callBedrock(fileKeys, prompt, schema) via S3 fetch + Bedrock InvokeModelCommand
@@ -483,11 +483,12 @@ IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extrac
 3. Practice/setting - for expert reports use "Medical Expert Report", "Independent Medical Examination", or "Chart Review" as appropriate
 4. Chief complaint - brief statement of visit purpose or report purpose
 
-5. History of Present Illness (HPI) - SUMMARIZE EXTREMELY CONCISELY (2-3 sentences max):
+5. History of Present Illness (HPI) - SUMMARIZE CONCISELY (3-4 sentences max):
    - Key symptoms, onset, injury mechanism/date (only on first visit), pain scale.
-   - Symptom progression (improved/same/worse).
-   - No filler: omit "the patient reports", "she states", "he denies", "patient presents with", "complains of", "was noted to have". State facts directly.
-   - For expert reports: summarize the expert's history review in 1-2 sentences only.
+   - Symptom progression (improved/same/worse) and any new complaints.
+   - Relevant history only if directly related to the claim.
+   - No filler phrases: omit "the patient reports", "she states", "complains of", "was noted to have". State facts directly.
+   - For expert reports: summarize the expert's history review concisely.
    - VERIFY injury date is BEFORE or ON the visit date. DO NOT mention future events.
 
 6. Physical Examination Findings - SUMMARIZE KEY PERTINENT POSITIVES ONLY:
