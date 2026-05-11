@@ -899,17 +899,40 @@ const generateSummaryWorker = async (event) => {
     }
 
     // ── 3b. PT session pre-filter (default: first + last per facility only) ───
+    // SAFETY: A doc part is only excluded if ALL knownVisits from that source_doc_id
+    // are PT visits. If a part has mixed PT + physician visits (same doc, different
+    // providers), we keep it so physician visits are not silently dropped.
     const ptContextMap = {}; // doc_id -> "Visit X of Y at Facility"
     if (!include_all_pt) {
       try {
+        const isPtVisit = (v) => /physical therapy|physiotherapy|rehabilitation|rehab|\bpt\b|hand therapy|occupational therapy/i.test(v.visit_type || '');
         const normFacility = (f) => (f || '').toLowerCase().trim().replace(/\s+/g, ' ');
+
+        // Build a map: source_doc_id -> all visits from that part (PT and non-PT)
+        const visitsByDocId = {};
+        for (const v of knownVisits) {
+          const docId = v.source_doc_id;
+          if (!docId) continue;
+          if (!visitsByDocId[docId]) visitsByDocId[docId] = [];
+          visitsByDocId[docId].push(v);
+        }
+
+        // A doc part is "pure PT" only if every visit from it is a PT visit
+        const isPurePtPart = (docId) => {
+          const visits = visitsByDocId[docId] || [];
+          return visits.length > 0 && visits.every(isPtVisit);
+        };
+
+        // Group pure-PT visits by normalized facility
         const ptGroups = {};
         for (const v of knownVisits) {
-          if (!/physical therapy|physiotherapy|rehabilitation|rehab|\bpt\b|hand therapy|occupational therapy/i.test(v.visit_type || '')) continue;
+          if (!isPtVisit(v)) continue;
+          if (!isPurePtPart(v.source_doc_id)) continue; // mixed part — never exclude
           const key = normFacility(v.facility || v.provider || 'pt');
           if (!ptGroups[key]) ptGroups[key] = [];
           ptGroups[key].push(v);
         }
+
         const excludedDocIds = new Set();
         for (const [, visits] of Object.entries(ptGroups)) {
           visits.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
@@ -921,10 +944,12 @@ const generateSummaryWorker = async (event) => {
           if (firstDocId) ptContextMap[firstDocId] = `Visit 1 of ${totalSessions} at ${facilityDisplay}`;
           if (lastDocId)  ptContextMap[lastDocId]  = `Visit ${totalSessions} of ${totalSessions} at ${facilityDisplay}`;
           for (let vi = 1; vi < visits.length - 1; vi++) {
-            if (visits[vi].source_doc_id) excludedDocIds.add(visits[vi].source_doc_id);
+            const midDocId = visits[vi].source_doc_id;
+            if (midDocId && isPurePtPart(midDocId)) excludedDocIds.add(midDocId);
           }
-          console.log(`PT pre-filter: ${facilityDisplay} — ${totalSessions} sessions, excluding ${totalSessions - 2} middle`);
+          console.log(`PT pre-filter: ${facilityDisplay} — ${totalSessions} pure-PT sessions, excluding ${excludedDocIds.size} middle`);
         }
+
         const beforeCount = allParts.length;
         for (let pi = allParts.length - 1; pi >= 0; pi--) {
           if (excludedDocIds.has(allParts[pi].id)) allParts.splice(pi, 1);
