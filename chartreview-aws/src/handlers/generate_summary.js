@@ -10,7 +10,7 @@
 
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, UpdateCommand, PutCommand } = require('@aws-sdk/lib-dynamodb');
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { randomUUID } = require('crypto');
@@ -24,7 +24,8 @@ const BUCKET        = process.env.S3_BUCKET            || 'chartreview-documents
 const DOCS_TABLE    = process.env.DOCUMENTS_TABLE       || 'chartreview-documents-prod';
 const JOBS_TABLE    = process.env.JOBS_TABLE            || 'chartreview-jobs-prod';
 const USAGE_TABLE   = process.env.BEDROCK_USAGE_TABLE   || 'chartreview-bedrock-usage';
-const WORKER_FN     = process.env.GENERATE_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-generateSummaryWorker';
+const WORKER_FN        = process.env.GENERATE_WORKER_FUNCTION_NAME       || 'chartreview-pro-prod-generateSummaryWorker';
+const POLISH_WORKER_FN = process.env.POLISH_WORKER_FUNCTION_NAME        || 'chartreview-pro-prod-generateSummaryPolishWorker';
 
 // ─── Multi-region Bedrock router ─────────────────────────────────────────────
 // Each region has an independent daily token quota. We track usage per region
@@ -1116,12 +1117,53 @@ const generateSummaryWorker = async (event) => {
     }
 
     await setJobStatus(job_id, `Saving ${allVisits.length} visits...`);
+
+    // Save summary record with status 'polishing' — hidden from UI until polish pass completes
+    const aws_summary_id = require('crypto').randomUUID();
+    const org_id = docRecords[0]?.org_id || '';
+    await dynamo.send(new PutCommand({
+      TableName: SUMMARIES_TABLE,
+      Item: {
+        aws_summary_id,
+        org_id,
+        patient_name:  patientName || '',
+        case_number:   caseNumber  || '',
+        visits:        allVisits,
+        doc_count:     docRecords.length,
+        visit_count:   allVisits.length,
+        status:        'polishing',
+        created_at:    new Date().toISOString(),
+        updated_at:    new Date().toISOString(),
+      },
+    }));
+    console.log(`coordinator: summary saved as 'polishing' — aws_summary_id=${aws_summary_id}`);
+
+    // Fire polish worker async — coordinator does NOT wait
+    try {
+      await lambda.send(new InvokeCommand({
+        FunctionName:   POLISH_WORKER_FN,
+        InvocationType: 'Event',
+        Payload:        Buffer.from(JSON.stringify({ aws_summary_id, org_id })),
+      }));
+      console.log(`coordinator: polish worker invoked for ${aws_summary_id}`);
+    } catch (invokeErr) {
+      // If invoke fails, flip status to draft so card still appears
+      console.error('coordinator: polish invoke failed — marking draft directly', invokeErr.message);
+      await dynamo.send(new UpdateCommand({
+        TableName: SUMMARIES_TABLE, Key: { aws_summary_id },
+        UpdateExpression: 'SET #s = :s, updated_at = :now',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':s': 'draft', ':now': new Date().toISOString() },
+      }));
+    }
+
     await markJobComplete(job_id, {
-      patient_name: patientName || '',
-      case_number:  caseNumber  || '',
-      visits:       allVisits,
-      doc_count:    docRecords.length,
-      visit_count:  allVisits.length,
+      patient_name:   patientName || '',
+      case_number:    caseNumber  || '',
+      visits:         allVisits,
+      doc_count:      docRecords.length,
+      visit_count:    allVisits.length,
+      aws_summary_id,
     });
 
   } catch (err) {

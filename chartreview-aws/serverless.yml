@@ -313,6 +313,8 @@ functions:
       SUMMARIES_TABLE: chartreview-summaries-prod
       JOBS_TABLE: chartreview-jobs-prod
       GENERATE_CHUNK_WORKER_FUNCTION_NAME: chartreview-pro-prod-generateSummaryChunkWorker
+      POLISH_WORKER_FUNCTION_NAME: chartreview-pro-prod-generateSummaryPolishWorker
+      BEDROCK_USAGE_TABLE: chartreview-bedrock-usage
 
   generateSummaryChunkWorker:
     handler: src/handlers/generate_summary.generateSummaryChunkWorker
@@ -322,6 +324,15 @@ functions:
       S3_BUCKET: chartreview-documents-prod
       DOCUMENTS_TABLE: chartreview-documents-prod
       JOBS_TABLE: chartreview-jobs-prod
+
+  generateSummaryPolishWorker:
+    handler: src/handlers/generate_summary.generateSummaryPolishWorker
+    timeout: 300
+    memorySize: 512
+    environment:
+      SUMMARIES_TABLE: chartreview-summaries-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      BEDROCK_USAGE_TABLE: chartreview-bedrock-usage
 
   getJob:
     handler: src/handlers/documents_new.getJob
