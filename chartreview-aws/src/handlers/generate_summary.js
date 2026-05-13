@@ -1161,20 +1161,44 @@ const generateSummaryWorker = async (event) => {
       }
     }
 
+// Updated: 2026-05-13 — robust date sort: parse MM/DD/YYYY → YYYY-MM-DD, secondary clinical order
+const parseDateSortKey = (d) => {
+  if (!d) return '9999-99-99';
+  const m = (d || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return d; // fall back to raw string if unexpected format
+  return `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+};
+
+const CLINICAL_DOC_ORDER = [
+  /c-4|workers.*comp/i,
+  /emergency\s+department|urgent\s+care/i,
+  /history\s*(&|and)\s*physical|\bh&p\b/i,
+  /consultation/i,
+  /operative\s+report|surgical\s+report/i,
+  /progress\s+note|hospitalist/i,
+  /discharge/i,
+];
+const clinicalDocRank = (visit) => {
+  const s = (visit.practice_setting || '').toLowerCase();
+  for (let i = 0; i < CLINICAL_DOC_ORDER.length; i++) {
+    if (CLINICAL_DOC_ORDER[i].test(s)) return i;
+  }
+  return CLINICAL_DOC_ORDER.length; // unknown doc type goes last
+};
+
+const visitSortComparator = (a, b) => {
+  const da = parseDateSortKey(a.visit_date);
+  const db = parseDateSortKey(b.visit_date);
+  if (da < db) return -1;
+  if (da > db) return 1;
+  // Same date — sort by clinical document type
+  return clinicalDocRank(a) - clinicalDocRank(b);
+};
+
     // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
     allVisits = deduplicateVisits(allVisits);
-    allVisits.sort((a, b) => {
-      if (!a.visit_date) return 1;
-      if (!b.visit_date) return -1;
-      const dateDiff = (a.visit_date||'').localeCompare(b.visit_date||'');
-      if (dateDiff !== 0) return dateDiff;
-      const aIsC4 = (a.practice_setting || '').toLowerCase().includes('c-4');
-      const bIsC4 = (b.practice_setting || '').toLowerCase().includes('c-4');
-      if (aIsC4 && !bIsC4) return -1;
-      if (!aIsC4 && bIsC4) return 1;
-      return 0;
-    });
+    allVisits.sort(visitSortComparator);
 
     // ── 9. Recovery pass (same as before) ────────────────────────────────────
     if (knownVisits.length > 0) {
