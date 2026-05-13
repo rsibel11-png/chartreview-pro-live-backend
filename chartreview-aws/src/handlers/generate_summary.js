@@ -324,44 +324,116 @@ const toTitleCase = (str) => {
 
 // ─── Original app logic (verbatim from chartreview-pro) + Claude 4.x brevity constraints ──
 
+const normalizeProviderForDedup = (name) => {
+  return (name || '')
+    .toLowerCase()
+    .replace(/\s*[\(\[].*?[\)\]]\s*/g, ' ')
+    .replace(/\s*[-–]\s*(henderson|las vegas|northwest|nw|summerlin|north|south|east|west|lake mead|blue diamond|rainbow|sahara|flamingo|tropicana|boulder|aliante|centennial|sunrise|green valley|anthem)\b.*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const mergeVisitPair = (acc, cur) => {
+  const longer = (a, b) => ((a||'').length >= (b||'').length ? a : b);
+  const mergeList = (a, b) => {
+    const aArr = Array.isArray(a) ? a : [];
+    const bArr = Array.isArray(b) ? b : [];
+    const seen = new Set(aArr.map(s => (s||'').toLowerCase().trim()));
+    const merged = [...aArr];
+    for (const item of bArr) {
+      if (!seen.has((item||'').toLowerCase().trim())) merged.push(item);
+    }
+    return merged;
+  };
+  return {
+    ...acc,
+    hpi_summary:            longer(acc.hpi_summary, cur.hpi_summary),
+    physical_exam_findings: longer(acc.physical_exam_findings, cur.physical_exam_findings),
+    treatment_plan:         longer(acc.treatment_plan, cur.treatment_plan),
+    impression_diagnosis:   longer(acc.impression_diagnosis, cur.impression_diagnosis),
+    imaging_findings:       longer(acc.imaging_findings, cur.imaging_findings),
+    chief_complaint:        longer(acc.chief_complaint, cur.chief_complaint),
+    icd10_codes:            mergeList(acc.icd10_codes, cur.icd10_codes),
+  };
+};
+
+// Updated: 2026-05-13 — upgraded to merge-based dedup (keeps longest narrative per field)
 const deduplicateVisits = (visits) => {
   const visitList = visits || [];
+  const groups = new Map();
+  const order  = [];
 
-  // Step 1: Remove exact duplicates (same date + provider + setting)
-  const exactKeys = new Set();
-  const deduped = visitList.filter((visit, idx) => {
-    const dateKey = (visit.visit_date || '').trim().toLowerCase();
-    const providerKey = (visit.rendering_provider || '').trim().toLowerCase();
-    const settingKey = (visit.practice_setting || '').trim().toLowerCase();
-    if (!dateKey && !providerKey) return true; // no identifying info, keep
-    const key = `${dateKey}|${providerKey}|${settingKey}`;
-    if (exactKeys.has(key)) return false;
-    exactKeys.add(key);
-    return true;
-  });
+  for (const visit of visitList) {
+    const dateKey     = (visit.visit_date || '').trim();
+    const providerKey = normalizeProviderForDedup(visit.rendering_provider);
+    if (!dateKey && !providerKey) {
+      const uid = `__nokey_${Math.random()}`;
+      groups.set(uid, [visit]);
+      order.push(uid);
+      continue;
+    }
+    const setting   = (visit.practice_setting || '').toLowerCase();
+    const isOpReport = /operative report|surgical report|operation report/i.test(setting);
+    const key = isOpReport ? `${dateKey}|${providerKey}|__op__` : `${dateKey}|${providerKey}`;
+    if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+    groups.get(key).push(visit);
+  }
 
-  return deduped;
+  return order.map(key => groups.get(key).reduce((acc, cur) => mergeVisitPair(acc, cur)));
+};
+
+// Updated: 2026-05-13 — added EXCLUDED_PATTERNS to filter periop/admin visits before save
+const EXCLUDED_PATTERNS = [
+  /pacu/i,
+  /post.?anesthesia/i,
+  /anesthesia/i,
+  /pre.?op(?!erative\s+report)/i,
+  /preoperative(?!\s+report)/i,
+  /perioperative/i,
+  /nursing\s+(document|record)/i,
+  /surgical\s+case\s+record/i,
+  /admission\s+orders/i,
+  /inpatient\s+admission/i,
+  /inpatient\s+pharmacy/i,
+  /pharmacy\s*(\/?\s*orders)?/i,
+  /inpatient\s+(pain\s+management|medicine)(?!.*progress|.*discharge|.*consult)/i,
+];
+
+const isExcludedVisit = (visit) => {
+  const setting = (visit.practice_setting || '').toLowerCase();
+  if (setting.includes('c-4') || setting.includes('workers') || setting.includes('wcb')) return false;
+  const combined = `${visit.practice_setting || ''} ${visit.rendering_provider || ''} ${visit.chief_complaint || ''}`;
+  return EXCLUDED_PATTERNS.some(rx => rx.test(combined));
+};
+
+const stripLabFindings = (visit) => {
+  const setting = (visit.practice_setting || '').toLowerCase();
+  const isLabReport = /\blab\b|patholog|microbio|blood\s+work|\bCBC\b|\bCMP\b|culture/i.test(setting);
+  if (isLabReport) return visit;
+  return { ...visit, lab_findings: '' };
 };
 
 const sanitizeVisits = (visits, patientName) => {
   const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
   const validProgressions = ['improved','same','worse','not_documented'];
-  return (visits || []).map(visit => {
-    const clean = { ...visit };
-    stringFields.forEach(field => {
-      const val = clean[field];
-      if (val === null || val === undefined || val === false) clean[field] = '';
-      else if (typeof val === 'object') clean[field] = JSON.stringify(val);
-      else if (typeof val !== 'string') clean[field] = String(val);
+  return (visits || [])
+    .filter(visit => !isExcludedVisit(visit))
+    .map(visit => {
+      const clean = { ...stripLabFindings(visit) };
+      stringFields.forEach(field => {
+        const val = clean[field];
+        if (val === null || val === undefined || val === false) clean[field] = '';
+        else if (typeof val === 'object') clean[field] = JSON.stringify(val);
+        else if (typeof val !== 'string') clean[field] = String(val);
+      });
+      if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
+      if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
+      const patientLower = patientName?.toLowerCase();
+      if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
+        clean.practice_setting = '';
+      }
+      return clean;
     });
-    if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
-    if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
-    const patientLower = patientName?.toLowerCase();
-    if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
-      clean.practice_setting = '';
-    }
-    return clean;
-  });
 };
 
 const enforceOneC4 = (visitList) => {
