@@ -499,7 +499,7 @@ B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIE
    - impression_diagnosis: the expert's opinions, conclusions, and diagnoses
    - treatment_plan: the expert's recommendations or causation opinions
    - imaging_findings: any imaging reviewed or interpreted by the expert
-   - visit_date: the date the report was authored or the examination was performed (use SERVICE DATE / document header date, NOT the electronic signature date)
+   - visit_date: the date the report was authored or the examination was performed
 
 C) POLICE REPORTS:
    Treat as a single entry with:
@@ -545,7 +545,6 @@ CRITICAL: If the document(s) contain MULTIPLE office visits or patient encounter
 
 CRITICAL DATE AND TIMELINE ACCURACY:
 - Pay EXTREME attention to dates mentioned in the documents
-- VISIT DATE = SERVICE START DATE, NOT SIGN-OFF DATE: Emergency department and hospital records often show an 'Electronically Signed by' or 'Signed' line dated the following calendar day (e.g., signed 10/02/25 at 0132 for a patient who arrived 10/01/25 at 1820). ALWAYS use the earlier SERVICE DATE — look for 'SERVICE DT', 'Service Date', 'Date of Service', 'Initial Greet Date/Time', or the document header date. The sign-off timestamp is administrative, not clinical.
 - Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES - treat each as a separate visit
 - Match ALL findings, exams, and imaging to the CORRECT visit date they were documented on
 - NEVER include information from a future visit in an earlier visit
@@ -642,7 +641,6 @@ RULES:
 - Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
 - CRITICAL: The HPI section often mentions the date of injury -- this is NOT the visit date. The visit date is ALWAYS in the document header or vitals table.
 - Do NOT include the date of injury as a visit date unless confirmed by a document header on that exact date.
-- CRITICAL — ER/HOSPITAL SIGN-OFF DATES: Emergency department and inpatient records frequently show an 'Electronically Signed' or 'Signed by' line dated after midnight (e.g., signed 10/02/25 at 0132). This is the physician's sign-off, NOT the visit date. Always use the SERVICE DATE, 'Service Dt', 'Date of Service', 'Initial Greet Date/Time', or the document header date instead. A patient who arrived at 1820 on 10/01 and whose note was signed at 0132 on 10/02 had a visit date of 10/01.
 - CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
 - Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
