@@ -383,6 +383,7 @@ const deduplicateVisits = (visits) => {
 };
 
 // Updated: 2026-05-13 — added EXCLUDED_PATTERNS to filter periop/admin visits before save
+// Updated: 2026-05-13 — added EXCLUDED_PATTERNS to filter periop/admin visits before save
 const EXCLUDED_PATTERNS = [
   /pacu/i,
   /post.?anesthesia/i,
@@ -397,6 +398,9 @@ const EXCLUDED_PATTERNS = [
   /inpatient\s+pharmacy/i,
   /pharmacy\s*(\/?\s*orders)?/i,
   /inpatient\s+(pain\s+management|medicine)(?!.*progress|.*discharge|.*consult)/i,
+  /\bcorrespondence\b/i,
+  /claims?\s+(specialist|adjuster|manager|administrator)/i,
+  /utilization\s+review/i,
 ];
 
 const isExcludedVisit = (visit) => {
