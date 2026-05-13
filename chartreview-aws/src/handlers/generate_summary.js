@@ -909,12 +909,10 @@ const generateSummaryWorker = async (event) => {
         const isPtVisit = (v) => {
           const vtype = v.visit_type || '';
           const prov  = v.provider  || '';
-          // Match on visit_type label (most reliable — set by VI LLM)
+          const fac   = v.facility  || '';
           if (/physical therapy|physiotherapy|rehabilitation|rehab|hand therapy|occupational therapy/i.test(vtype)) return true;
-          // Match on provider credentials appearing after a comma or space at end of name
-          // e.g. "Amy Meyer, PT DPT CLT" or "Isaiah C. Taylor, PT"
-          // Requires credential after a comma — avoids false matches on facility/clinic names
-          if (/,\s*(PT|PTA|DPT|OT|COTA|CLT)(\s|,|$)/.test(prov) && !/\b(MD|DO|PA|NP|FNP|APRN|DC|DMD|DPM)\b/.test(prov)) return true;
+          if (/\b(PT|PTA|DPT|OT|COTA|CLT)\b/.test(prov) && !/\b(MD|DO|PA|NP|FNP|APRN|DC|DMD|DPM)\b/.test(prov)) return true;
+          if (/\btherapy\b|\brehabilitation\b/i.test(fac) && !/pain management|spine|orthopedic|medical center|hospital/i.test(fac)) return true;
           return false;
         };
         // normFacility: strip location/branch suffixes so that
@@ -1004,13 +1002,6 @@ const generateSummaryWorker = async (event) => {
     }
     const numChunks = batchChunks.length;
     console.log(`coordinator: firing ${numChunks} chunk workers`);
-
-    // Safety: if PT pre-filter (or empty doc set) left nothing to process, fail fast
-    if (numChunks === 0) {
-      console.warn('coordinator: 0 batches after pre-filter — no documents to process');
-      await markJobFailed(job_id, 'No documents available to process after pre-filtering. If PT filter is enabled, try running with "Include all PT sessions" checked.');
-      return;
-    }
 
     // ── 5. Create chunk sub-jobs + fire all chunk workers simultaneously ─────
     const chunkJobIds = [];
