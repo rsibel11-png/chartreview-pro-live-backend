@@ -641,6 +641,7 @@ RULES:
 - Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
 - CRITICAL: The HPI section often mentions the date of injury -- this is NOT the visit date. The visit date is ALWAYS in the document header or vitals table.
 - Do NOT include the date of injury as a visit date unless confirmed by a document header on that exact date.
+- ER/HOSPITAL NOTES: Emergency department and hospital records often contain a header line like 'SERVICE DT: 10/01/25' or 'Initial Greet Date/Time 10/01/25 1820' alongside a footer line 'Electronically Signed by ... on 10/02/25 at 0132'. The SERVICE DT or Initial Greet date is the correct visit date. The signed date is an administrative timestamp — ignore it for dating purposes.
 - CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
 - Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
