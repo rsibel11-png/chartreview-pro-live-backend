@@ -325,12 +325,13 @@ const toTitleCase = (str) => {
 // ─── Original app logic (verbatim from chartreview-pro) + Claude 4.x brevity constraints ──
 
 const normalizeProviderForDedup = (name) => {
-  return (name || '')
+  let n = (name || '')
     .toLowerCase()
     .replace(/\s*[\(\[].*?[\)\]]\s*/g, ' ')
-    .replace(/\s*[-–]\s*(henderson|las vegas|northwest|nw|summerlin|north|south|east|west|lake mead|blue diamond|rainbow|sahara|flamingo|tropicana|boulder|aliante|centennial|sunrise|green valley|anthem)\b.*/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/\s*[-\u2013]\s*(henderson|las vegas|northwest|nw|summerlin|north|south|east|west|lake mead|blue diamond|rainbow|sahara|flamingo|tropicana|boulder|aliante|centennial|sunrise|green valley|anthem)\b.*/i, '');
+  n = n.replace(/\b(md|do|pa|np|aprn|rn|pt|dpt|ot|otd|dc|phd|psyd|lcsw|mft|pa-c)\b/gi, '')
+       .replace(/[,.]/g, ' ').replace(/\s+/g, ' ').trim();
+  return n.split(' ').filter(Boolean).sort().join(' ');
 };
 
 const mergeVisitPair = (acc, cur) => {
@@ -372,9 +373,11 @@ const deduplicateVisits = (visits) => {
       order.push(uid);
       continue;
     }
-    const setting   = (visit.practice_setting || '').toLowerCase();
-    const isOpReport = /operative report|surgical report|operation report/i.test(setting);
-    const key = isOpReport ? `${dateKey}|${providerKey}|__op__` : `${dateKey}|${providerKey}`;
+    const setting         = (visit.practice_setting || '').toLowerCase();
+    const isOpReport      = /operative report|surgical report|operation report/i.test(setting);
+    const isDischargeNote = /discharge\s+(report|summary|note)|progress\s+note.*discharge/i.test(setting);
+    const typeKey = isOpReport ? '__op__' : (isDischargeNote ? '__discharge__' : '');
+    const key = typeKey ? `${dateKey}|${providerKey}|${typeKey}` : `${dateKey}|${providerKey}`;
     if (!groups.has(key)) { groups.set(key, []); order.push(key); }
     groups.get(key).push(visit);
   }
@@ -407,8 +410,13 @@ const EXCLUDED_PATTERNS = [
 ];
 
 const isExcludedVisit = (visit) => {
-  const setting = (visit.practice_setting || '').toLowerCase();
-  if (setting.includes('c-4') || setting.includes('workers') || setting.includes('wcb')) return false;
+  const setting   = (visit.practice_setting || '').toLowerCase();
+  const diagnosis = (visit.impression_diagnosis || '').toLowerCase();
+  const hpi       = (visit.hpi_summary || '').toLowerCase();
+  const isWorkersComp = setting.includes('c-4') || setting.includes('workers') || setting.includes('wcb')
+    || /\bform c-4\b|workers.{0,10}compensation|wcb report/i.test(diagnosis)
+    || /\bform c-4\b|workers.{0,10}compensation|wcb report/i.test(hpi);
+  if (isWorkersComp) return false;
   const combined = `${visit.practice_setting || ''} ${visit.rendering_provider || ''} ${visit.chief_complaint || ''}`;
   return EXCLUDED_PATTERNS.some(rx => rx.test(combined));
 };
