@@ -1214,8 +1214,20 @@ const visitSortComparator = (a, b) => {
 
     // ── 9. Recovery pass (same as before) ────────────────────────────────────
     if (knownVisits.length > 0) {
-      const foundDates   = new Set(allVisits.map(v => (v.visit_date || '').trim()).filter(Boolean));
-      const missingVisits = knownVisits.filter(v => v.date && !foundDates.has(v.date));
+      const foundDates = new Set(allVisits.map(v => (v.visit_date || '').trim()).filter(Boolean));
+      // For C-4 forms: check that a C-4 actually exists on that date, not just any visit
+      const hasC4OnDate = (date) => allVisits.some(v =>
+        (v.visit_date || '').trim() === date &&
+        /c-4|workers.{0,10}comp|wcb/i.test(v.practice_setting || '')
+      );
+      const missingVisits = knownVisits.filter(v => {
+        if (!v.date) return false;
+        // C-4 forms: missing if no C-4 visit exists on that date (even if other visits do)
+        if (/c-4\s*form|c4\s*form|workers.{0,10}comp/i.test(v.visit_type || '')) {
+          return !hasC4OnDate(v.date);
+        }
+        return !foundDates.has(v.date);
+      });
 
       if (missingVisits.length > 0) {
         console.log(`Recovery pass: ${missingVisits.length} missing visits:`, missingVisits.map(v => v.date));
@@ -1281,6 +1293,48 @@ const visitSortComparator = (a, b) => {
           if (!b.visit_date) return -1;
           return (a.visit_date||'').localeCompare(b.visit_date||'');
         });
+
+        // C-4 rescue: if knownVisits has a C-4 but allVisits still has none, do a targeted pass
+        const knownC4 = knownVisits.find(v => /c-4\s*form|c4\s*form|workers.{0,10}comp/i.test(v.visit_type || ''));
+        const hasC4Now = allVisits.some(v => /c-4|workers.{0,10}comp|wcb/i.test(v.practice_setting || ''));
+        if (knownC4 && !hasC4Now) {
+          try {
+            console.log('C-4 rescue: no C-4 in output, running targeted C-4 extraction');
+            const c4Part = allParts.find(p => p.id === knownC4.source_doc_id) || allParts[0];
+            if (c4Part?.file_key) {
+              const c4Prompt = `You are extracting a C-4 Workers' Compensation form from a medical document.
+Find the WCB Form C-4 (Workers' Compensation Board Doctor's Report) in this document.
+Extract it as a single visit with:
+- visit_date: the date on the form (YYYY-MM-DD)
+- rendering_provider: the physician's name from the signature block
+- practice_setting: "C-4 Workers' Compensation Report"
+- impression_diagnosis: the diagnosis listed (ICD codes if present)
+- treatment_plan: any treatment or work restrictions noted
+- hpi_summary: empty string
+- chief_complaint: empty string
+- physical_exam_findings: empty string
+Return the result in a visits array. If no C-4 form is found, return an empty visits array.`;
+              const c4Schema = { type: 'object', properties: { visits: { type: 'array', items: { type: 'object', properties: {
+                visit_date: { type: 'string' }, rendering_provider: { type: 'string' },
+                practice_setting: { type: 'string' }, impression_diagnosis: { type: 'string' },
+                treatment_plan: { type: 'string' }, hpi_summary: { type: 'string' },
+                chief_complaint: { type: 'string' }, physical_exam_findings: { type: 'string' },
+                imaging_findings: { type: 'string' }, lab_findings: { type: 'string' },
+                icd10_codes: { type: 'array', items: { type: 'string' } },
+                symptom_progression: { type: 'string', enum: ['improved','same','worse','not_documented'] },
+              }}}}}};
+              const c4Result = await callBedrock([c4Part.file_key], c4Prompt, c4Schema, regionOrder);
+              if (Array.isArray(c4Result.visits) && c4Result.visits.length > 0) {
+                const c4Clean = sanitizeVisits(c4Result.visits, patientName);
+                allVisits = allVisits.concat(c4Clean);
+                allVisits = deduplicateVisits(allVisits);
+                console.log(`C-4 rescue: recovered ${c4Clean.length} C-4 visit(s)`);
+              }
+            }
+          } catch (c4Err) {
+            console.warn('C-4 rescue failed (non-fatal):', c4Err.message);
+          }
+        }
       }
     }
 
