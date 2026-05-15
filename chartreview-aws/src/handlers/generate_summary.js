@@ -397,13 +397,17 @@ const EXCLUDED_PATTERNS = [
   /nursing\s+(document|record)/i,
   /surgical\s+case\s+record/i,
   /admission\s+orders/i,
+  /inpatient\s+orders/i,
   /inpatient\s+admission/i,
   /inpatient\s+pharmacy/i,
-  /pharmacy\s*(\/?\s*orders)?/i,
+  /inpatient\s+orthopedics/i,
+  /pharmacy\s*(\/?\.\s*orders)?/i,
   /inpatient\s+(pain\s+management|medicine)(?!.*progress|.*discharge|.*consult)/i,
   /\bcorrespondence\b/i,
   /claims?\s+(specialist|adjuster|manager|administrator)/i,
   /utilization\s+review/i,
+  /medication\s+order/i,
+  /orders?\s+placed/i,
   // Attending countersignature pages — "Operative Note" labels are EMR co-sign artifacts,
   // not separate clinical encounters. The real surgical record is "Operative Report".
   /\boperative\s+note\b(?!.*report)/i,
@@ -417,7 +421,7 @@ const isExcludedVisit = (visit) => {
     || /\bform c-4\b|workers.{0,10}compensation|wcb report/i.test(diagnosis)
     || /\bform c-4\b|workers.{0,10}compensation|wcb report/i.test(hpi);
   if (isWorkersComp) return false;
-  const combined = `${visit.practice_setting || ''} ${visit.rendering_provider || ''} ${visit.chief_complaint || ''}`;
+  const combined = `${visit.practice_setting || ''} ${visit.visit_type || ''} ${visit.rendering_provider || ''} ${visit.chief_complaint || ''} ${visit.hpi_summary || ''}`;
   return EXCLUDED_PATTERNS.some(rx => rx.test(combined));
 };
 
