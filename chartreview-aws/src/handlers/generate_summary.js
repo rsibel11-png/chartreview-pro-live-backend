@@ -1281,6 +1281,8 @@ const visitSortComparator = (a, b) => {
           if (!b.visit_date) return -1;
           return (a.visit_date||'').localeCompare(b.visit_date||'');
         });
+      } // end if (missingVisits.length > 0)
+    } // end if (knownVisits.length > 0) — recovery pass
 
     // ── 10. Checklist date correction ─────────────────────────────────────────
     if (knownVisits.length > 0) {
