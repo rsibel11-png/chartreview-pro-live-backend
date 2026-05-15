@@ -401,6 +401,9 @@ const EXCLUDED_PATTERNS = [
   /\bcorrespondence\b/i,
   /claims?\s+(specialist|adjuster|manager|administrator)/i,
   /utilization\s+review/i,
+  // Attending countersignature pages — "Operative Note" labels are EMR co-sign artifacts,
+  // not separate clinical encounters. The real surgical record is "Operative Report".
+  /\boperative\s+note\b(?!.*report)/i,
 ];
 
 const isExcludedVisit = (visit) => {
@@ -608,6 +611,7 @@ CRITICAL EXTRACTION RULES:
 (2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists anywhere in the text for that encounter. A visit with only date/provider and empty content fields is almost always an error — go back and fill it in.
 (3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
 (4) NEVER hallucinate — only use information explicitly in the text.
+(4a) STRICT DOCUMENT ISOLATION: Each visit entry must ONLY contain information explicitly written in THAT provider's document. Do NOT carry over, infer, or borrow content from other documents in the batch — even if those documents describe the same patient encounter. If a field says "see patient's chart", "see above", "per nursing notes", or similar deferral language, return an EMPTY STRING for that field. Do NOT fill it in from another document.
 (5) Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
 (6) If information is truly not available, return an empty string "".
 (7) The icd10_codes field must always be an array of strings (can be empty []).
