@@ -1357,8 +1357,7 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
       }));
 
       // Concatenate extracted_text in order -- PAGE N markers are already globally numbered
-      const fullText = partDocs.map(p => p.doc?.extracted_text || '').join('
-');
+      const fullText = partDocs.map(p => (p.doc && p.doc.extracted_text) || '').join('\n');
       console.log('classifyJobWorker: concatenated text length=' + fullText.length);
 
       if (fullText.length < 200) {
