@@ -1,3 +1,4 @@
+// Updated: 2026-05-15 — Fix 3: temperature: 0 in bedrockPayload for deterministic extraction
 // Updated: 2026-05-15 — Fix 1: __consultation__ + __radiology__ dedup keys prevent same-day same-provider cross-doc merge
 // Updated: 2026-05-15 — Fix 2: EXCLUDED_PATTERNS += inpatient orders / inpatient/surgery entries
 // Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
@@ -191,6 +192,7 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder) => {
   const bedrockPayload = {
     anthropic_version: 'bedrock-2023-05-31',
     max_tokens: 8000,
+    temperature: 0,
     messages: [{ role: 'user', content: contentBlocks }],
     tools: [{
       name: 'structured_output',
