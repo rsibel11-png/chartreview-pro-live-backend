@@ -1032,17 +1032,29 @@ RULES:
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
 - For each encounter, return the pages field: a list of 1-based page numbers where that encounter's PHYSICIAN/PROVIDER narrative appears. The document text contains explicit page boundary markers in the format '--- PAGE N ---'. Use these markers.
   CRITICAL PAGE RULE: Only include pages that contain the actual physician/provider authored content for this encounter (HPI, exam, assessment, plan, operative note, radiology report, discharge summary narrative). Do NOT include pages that merely fall between the start and end of an encounter — each page must be individually verified to contain physician-authored clinical content.
+  PROTECTED PAGE TYPES — Always mark these as CLINICAL even if they contain structured/formatted data:
+    - ED Discharge Summary pages where a physician (MD/DO/PA/NP) is listed as the primary author or ED Physician at the top
+    - Emergency physician notes (HPI, assessment, plan authored by MD/DO)
+    - Discharge summaries with physician narrative
+    - Lab results pages (CBC, BMP, CMP, coagulation, blood bank) — even though formatted as tables, these are clinical data
+    - Radiology report pages with physician-interpreted findings
+    - Operative/anesthesia notes authored by a physician or CRNA
+    If a page has BOTH physician-authored content AND nursing-style structured fields, classify it as CLINICAL.
+
   Pages to EXCLUDE from the pages array even if they appear within an encounter's date range:
-    - Nursing assessment/flowsheet pages
+    - Nursing assessment/flowsheet pages (authored only by RN/nursing staff with no physician narrative)
     - Medication administration records (MAR)
-    - Order audit trail pages
+    - Order audit trail pages (lists of order events: LIPTALSA, DRADKB1, DNURKEG2, etc.)
     - Pharmacy log/dispensing record pages
-    - Order set pages (VTE prophylaxis, diet orders, lab orders)
-    - Vital signs flowsheets
+    - Order set pages (VTE prophylaxis, diet orders, lab orders, protocol orders)
+    - Vital signs flowsheets (columns of numbers, no physician narrative)
     - Patient safety checklists
     - Intake/output logs
-    - Discharge planning/coordination pages
-    - Insurance/billing documentation
+    - Discharge planning/coordination pages authored only by nurses or case managers
+    - Insurance/billing/administrative correspondence
+    - Pre-op nursing documentation (safety checklists, universal protocol by RN)
+    - PACU nursing assessments and vital sign flowsheets
+    - Surgical case record pages containing only implant logs, sponge counts, or operative staff lists
   A typical office visit note = 1-3 pages. A typical ED physician note = 1-4 pages. An operative report = 1-3 pages. A discharge summary = 2-5 pages. If your page count for a single encounter exceeds these ranges, re-examine each page.
   If you cannot determine exact pages, return an empty array [].
 
