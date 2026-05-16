@@ -344,6 +344,26 @@ const listAllHandler = async (event) => {
 };
 
 // --- BUILD PROMPT -----------------------------------------------------------
+// v26: build extracted text with page boundary markers so VI pre-pass
+// can identify which pages each encounter lives on without Bedrock vision.
+function buildPagedText(blocks) {
+  const lines = (blocks || [])
+    .filter(function(b) { return b.BlockType === 'LINE'; })
+    .sort(function(a, b) { return (a.Page || 1) - (b.Page || 1); });
+  var out = '';
+  var currentPage = 0;
+  for (var i = 0; i < lines.length; i++) {
+    var block = lines[i];
+    var p = block.Page || 1;
+    if (p !== currentPage) {
+      out += '\n--- PAGE ' + p + ' ---\n';
+      currentPage = p;
+    }
+    out += (block.Text || '') + '\n';
+  }
+  return out.trim();
+}
+
 function buildPrompt(extractedText, docPatientName, docCaseNumber, chunkTag) {
   var text      = extractedText;
   var chunkNote = chunkTag ? ' This is ' + chunkTag + ' of a larger document - extract ALL visits present in this section.' : '';
@@ -623,10 +643,7 @@ Return ONLY a JSON object with these exact fields:
         }
 
         if (jobStatus === 'SUCCEEDED') {
-          extractedText = allBlocks
-            .filter(function(b) { return b.BlockType === 'LINE'; })
-            .map(function(b) { return b.Text; })
-            .join('\n');
+          extractedText = buildPagedText(allBlocks);
           textract_page_count = allBlocks.filter(function(b) { return b.BlockType === 'PAGE'; }).length || null;
         } else {
           extractedText = '[Textract job status: ' + jobStatus + ']';
@@ -635,10 +652,7 @@ Return ONLY a JSON object with these exact fields:
         var textractResult = await textract.send(new DetectDocumentTextCommand({
           Document: { S3Object: { Bucket: BUCKET, Name: doc.file_key } }
         }));
-        extractedText = (textractResult.Blocks || [])
-          .filter(function(b) { return b.BlockType === 'LINE'; })
-          .map(function(b) { return b.Text; })
-          .join('\n');
+        extractedText = buildPagedText(textractResult.Blocks || []);
         textract_page_count = (textractResult.Blocks || []).filter(function(b) { return b.BlockType === 'PAGE'; }).length || null;
       }
     } catch (err) {
