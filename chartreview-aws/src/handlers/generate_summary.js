@@ -397,17 +397,13 @@ const EXCLUDED_PATTERNS = [
   /nursing\s+(document|record)/i,
   /surgical\s+case\s+record/i,
   /admission\s+orders/i,
-  /inpatient\s+orders/i,
   /inpatient\s+admission/i,
   /inpatient\s+pharmacy/i,
-  /inpatient\s+orthopedics/i,
-  /pharmacy\s*(\/?\.\s*orders)?/i,
+  /pharmacy\s*(\/?\s*orders)?/i,
   /inpatient\s+(pain\s+management|medicine)(?!.*progress|.*discharge|.*consult)/i,
   /\bcorrespondence\b/i,
   /claims?\s+(specialist|adjuster|manager|administrator)/i,
   /utilization\s+review/i,
-  /medication\s+order/i,
-  /orders?\s+placed/i,
   // Attending countersignature pages — "Operative Note" labels are EMR co-sign artifacts,
   // not separate clinical encounters. The real surgical record is "Operative Report".
   /\boperative\s+note\b(?!.*report)/i,
@@ -421,7 +417,7 @@ const isExcludedVisit = (visit) => {
     || /\bform c-4\b|workers.{0,10}compensation|wcb report/i.test(diagnosis)
     || /\bform c-4\b|workers.{0,10}compensation|wcb report/i.test(hpi);
   if (isWorkersComp) return false;
-  const combined = `${visit.practice_setting || ''} ${visit.visit_type || ''} ${visit.rendering_provider || ''} ${visit.chief_complaint || ''} ${visit.hpi_summary || ''}`;
+  const combined = `${visit.practice_setting || ''} ${visit.rendering_provider || ''} ${visit.chief_complaint || ''}`;
   return EXCLUDED_PATTERNS.some(rx => rx.test(combined));
 };
 
@@ -539,25 +535,19 @@ D) AMBULANCE / EMS REPORTS (pre-hospital care records):
    - visit_date: the date of the incident/transport
 
 E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as a C-4 if ALL of the following are true:
-    1. The actual text of the C-4 form is physically present in the document you are reading — you must see the WCB Form C-4 header, title block, or form fields in the text itself (e.g., "Form C-4", "EMPLOYEE'S CLAIM FOR COMPENSATION", "Workers' Compensation Board", "WCB Report", form field labels like "Date of Injury", "Last Day Worked", "Supervisor Name" in a structured form layout). Do NOT infer or assume a C-4 exists based on the visit being workers' comp related.
-    2. The visit date is at or near the EARLIEST date in the entire document set — the C-4 is the intake form completed at the FIRST visit for the industrial accident. There is only ONE C-4 per case. It will typically be found embedded within the initial ER or first office visit records, not in follow-up notes.
-    3. Do NOT label any follow-up visits, post-operative visits, or subsequent office visits as C-4, even if those notes reference the workers' comp claim or injury. Only the initial treating visit generates a C-4 form.
+    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official WCB Form C-4 header, title block, or reference number (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or injury reports as C-4 unless the actual form is present.
 
-    If you find what appears to be C-4 form text at multiple dates, include ONLY the one with the earliest date and treat all others as regular office visits.
-    If no actual C-4 form text is found anywhere in the documents, do not create a C-4 entry at all.
-
-    For the ONE C-4 entry:
+    For ACTUAL C-4 forms only:
     - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
     - practice_setting: "C-4 Workers' Compensation Report"
     - impression_diagnosis: diagnosis only — ICD codes if present, otherwise the written diagnosis
-    - visit_date: the date the form was completed or the examination date — look in the BOTTOM provider-completed section of the form for the service date. This is CRITICAL to extract even if the rest of the form is illegible.
+    - visit_date: the date the form was completed or the examination date — this is CRITICAL to extract even if the rest of the form is illegible
     - hpi_summary: leave empty
     - chief_complaint: leave empty
     - physical_exam_findings: leave empty
     - treatment_plan: leave empty
-    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set, use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields. The provider name on a C-4 is often a cursive signature — cross-reference the same-date ED note or office visit for the printed provider name. Explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit").
-    - ORDERING: Place the C-4 entry BEFORE the regular office visit entry of the same date.
+    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set, use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields. Explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit").
+    - ORDERING: The C-4 entry must use the same visit_date as the corresponding office visit so it appears together in chronological order. In the visits array, place the C-4 entry BEFORE the regular office visit entry of the same date.
 
 DEDUPLICATION RULE - Physician Progress Reports vs. Office Visits:
 If the same date has BOTH a physician progress report AND an office visit from the SAME provider, IGNORE the physician progress report and ONLY include the office visit. The office visit record contains the actual clinical information, while the progress report is typically a summary/administrative document.
@@ -625,11 +615,11 @@ CRITICAL FORMATTING RULES:
 - ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER on separate lines.
 
 CRITICAL EXTRACTION RULES:
-(1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any. CRITICAL: A standalone radiology or imaging report (X-ray, MRI, CT, bone scan) is its own separate visit entry even if it shares a date with an ER visit or office visit. Do NOT absorb a radiology report's findings into another visit's imaging_findings and skip creating the radiology visit — create BOTH: the clinical visit AND the separate radiology visit. The radiology visit's practice_setting should be the imaging facility name, rendering_provider should be the radiologist, and imaging_findings should contain the full report impression.
+(1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
 (2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists anywhere in the text for that encounter. A visit with only date/provider and empty content fields is almost always an error — go back and fill it in.
 (3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
 (4) NEVER hallucinate — only use information explicitly in the text.
-(4a) STRICT DOCUMENT ISOLATION: Each visit entry must ONLY contain information explicitly written in THAT provider's document. Do NOT carry over, infer, or borrow content from other documents in the batch — even if those documents describe the same patient encounter. If a field says "see patient's chart", "see above", "per nursing notes", or similar deferral language, return an EMPTY STRING for that field. Do NOT fill it in from another document. EXCEPTION — C-4 FORMS ONLY: C-4 forms are often handwritten and sparse. You MAY cross-reference the same-date office visit or H&P in the same batch to fill in illegible or missing C-4 fields (rendering provider, diagnosis, ICD codes). This is the ONLY permitted cross-document reference.
+(4a) STRICT DOCUMENT ISOLATION: Each visit entry must ONLY contain information explicitly written in THAT provider's document. Do NOT carry over, infer, or borrow content from other documents in the batch — even if those documents describe the same patient encounter. If a field says "see patient's chart", "see above", "per nursing notes", or similar deferral language, return an EMPTY STRING for that field. Do NOT fill it in from another document.
 (5) Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
 (6) If information is truly not available, return an empty string "".
 (7) The icd10_codes field must always be an array of strings (can be empty []).
@@ -1291,8 +1281,8 @@ const visitSortComparator = (a, b) => {
           if (!b.visit_date) return -1;
           return (a.visit_date||'').localeCompare(b.visit_date||'');
         });
-      } // end if (missingVisits.length > 0)
-    } // end if (knownVisits.length > 0) — recovery pass
+      }
+    }
 
     // ── 10. Checklist date correction ─────────────────────────────────────────
     if (knownVisits.length > 0) {
