@@ -370,6 +370,26 @@ const deduplicateVisits = (visits) => {
   const groups = new Map();
   const order  = [];
 
+  // Fingerprint a radiology visit by provider + first 60 chars of imaging findings.
+  // This lets us merge duplicate extractions of the same study (different dates assigned
+  // by VI pre-pass vs extraction pass) while still keeping genuinely different studies
+  // (e.g. Blake elbow XR vs Alford wrist XR) separate.
+  const radiologyFingerprint = (visit) => {
+    const provider = normalizeProviderForDedup(visit.rendering_provider);
+    const findings = (visit.imaging_findings || visit.impression_diagnosis || '')
+      .toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 60);
+    return `${provider}||${findings}`;
+  };
+
+  // When merging two radiology visits with different dates, keep the earlier date —
+  // the VI pre-pass date is usually the service date; the extraction pass may pick
+  // up the report signature date which is slightly later.
+  const earlierDate = (a, b) => {
+    if (!a) return b;
+    if (!b) return a;
+    return a <= b ? a : b;
+  };
+
   for (const visit of visitList) {
     const dateKey     = (visit.visit_date || '').trim();
     const providerKey = normalizeProviderForDedup(visit.rendering_provider);
@@ -385,19 +405,29 @@ const deduplicateVisits = (visits) => {
     // Consultations are always unique records — never merge with same-day inpatient orders
     // even when signed by the same provider (e.g. Chan consult + Chan inpatient transfer order)
     const isConsult       = /\bconsultation\b|\bconsult\b/i.test(setting);
-    // Each radiology report is a unique study — never merge two reports by same radiologist same day
+    // Radiology: key on provider + findings fingerprint (not date+order.length).
+    // Same study extracted twice with different dates will share a key and merge;
+    // different studies by the same radiologist will differ in findings and stay separate.
     const isRadiology     = /radiology|imaging\s+report|\bradiology\s+report\b|\bmri\b|\bct\b|\bx.?ray\b|\bxr\b|\bultrasound\b/i.test(setting);
     let typeKey = '';
-    if (isOpReport)      typeKey = '__op__';
+    if (isOpReport)           typeKey = '__op__';
     else if (isDischargeNote) typeKey = '__discharge__';
-    else if (isConsult)  typeKey = '__consult__';
-    else if (isRadiology) typeKey = `__radiology_${order.length}__`; // unique per study
-    const key = typeKey ? `${dateKey}|${providerKey}|${typeKey}` : `${dateKey}|${providerKey}`;
+    else if (isConsult)       typeKey = '__consult__';
+    else if (isRadiology)     typeKey = `__radiology_${radiologyFingerprint(visit)}__`;
+    const key = typeKey ? `${providerKey}|${typeKey}` : `${dateKey}|${providerKey}`;
     if (!groups.has(key)) { groups.set(key, []); order.push(key); }
     groups.get(key).push(visit);
   }
 
-  return order.map(key => groups.get(key).reduce((acc, cur) => mergeVisitPair(acc, cur)));
+  return order.map(key => {
+    const merged = groups.get(key).reduce((acc, cur) => mergeVisitPair(acc, cur));
+    // For radiology merges: resolve date to the earliest seen across all duplicates
+    if (groups.get(key).length > 1 && key.includes('__radiology_')) {
+      const dates = groups.get(key).map(v => v.visit_date || '').filter(Boolean);
+      merged.visit_date = dates.reduce(earlierDate, dates[0]);
+    }
+    return merged;
+  });
 };
 
 // Updated: 2026-05-13 — added EXCLUDED_PATTERNS to filter periop/admin visits before save
