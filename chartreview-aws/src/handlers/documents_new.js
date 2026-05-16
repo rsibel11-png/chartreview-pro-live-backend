@@ -1013,52 +1013,59 @@ const JOBS_TABLE = process.env.JOBS_TABLE || 'chartreview-jobs-prod';
 // Output mapped into page_classifications + encounter_index in DynamoDB.
 // Library displays existing green/red UI unchanged.
 // generate_summary.js reads encounter_index directly — no separate VI pre-pass at summary time.
-const VI_PREPASS_PROMPT = `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter — identifying the date, provider, facility, visit type, and the exact pages that encounter occupies.
+const VI_PREPASS_PROMPT = `You are reviewing medical-legal documents. Your ONLY task is to identify every distinct clinical encounter and list ONLY the specific pages that contain that encounter's clinical narrative.
 
 The document text contains explicit page boundary markers in the format:
   --- PAGE N ---
-Use these markers to determine which page numbers each encounter spans.
-Example: a consult note that begins after "--- PAGE 12 ---" and ends before "--- PAGE 15 ---" -> pages: [12,13,14].
+Use these markers to determine which pages belong to each encounter.
+
+CRITICAL PAGE ASSIGNMENT RULE:
+List a page in an encounter's pages array ONLY if that page contains the actual clinical narrative for that encounter (HPI, exam findings, assessment, plan, operative note, radiology interpretation, etc.).
+Do NOT include pages that fall between two encounters just because they are physically between them.
+Do NOT include nursing flowsheet pages, order pages, MAR pages, or admin pages even if they appear between pages of a clinical note.
+Each page must EARN its inclusion by containing clinical content for that specific encounter.
 
 For each clinical encounter found, extract:
-1. date - the date of service (YYYY-MM-DD). Use the document header or note title as the PRIMARY source. NEVER use the injury date or a date mentioned inside an HPI narrative. If date cannot be determined, use "".
-2. provider - the treating provider full name and credentials (e.g. "Arthur J. Taylor, MD"). If not identifiable, use "Not Documented".
-3. facility - the facility or practice name (e.g. "Centennial Hills Hospital ED", "Dignity Health Physical Therapy").
-4. visit_type - "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", "Consult", "H&P", "Discharge Summary", or other brief label.
-5. pages - array of 1-based page numbers this encounter occupies (e.g. [12,13,14]).
+1. date - date of service (YYYY-MM-DD). Use document header or note title. NEVER use injury date or HPI dates. Use "" if unknown.
+2. provider - treating provider full name and credentials. Use "Not Documented" if unknown.
+3. facility - facility or practice name.
+4. visit_type - "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", "Consult", "H&P", "Discharge Summary", or similar.
+5. pages - ONLY the page numbers containing this encounter's clinical text. Be conservative — when in doubt, leave the page out.
 
-INCLUDE these encounter types:
+INCLUDE only these encounter types:
 - Physician / PA / NP office visit notes with HPI, exam, assessment, plan
-- Emergency department attending provider notes (not nursing triage)
-- Hospital attending progress notes, admission H&P, consult notes
+- Emergency department attending provider notes (NOT nursing triage or nursing assessments)
+- Hospital attending physician progress notes, admission H&P, consult notes
 - Operative and surgical reports
-- Radiology reports authored by a radiologist (each report = separate entry, even if findings mentioned in adjacent ED note)
-- Discharge summaries with a physician narrative
-- Physical therapy / OT initial evaluations, progress notes, discharge summaries
+- Radiology reports authored by a radiologist (each report = separate entry)
+- Discharge summaries with physician narrative (assessment + hospital course)
+- Physical therapy / OT evaluations, progress notes, discharge summaries
 - Independent medical examination reports
 - Laboratory result pages
 - C-4 workers comp forms
-- Police / EMT / EMS / accident reports (mechanism of injury -- clinically relevant)
+- Police / EMT / EMS / accident reports
 
-EXCLUDE these page types (do NOT create an encounter entry for them):
-- Nursing-only entries: nursing assessments, APRN medication order entries, nursing reassessment flowsheets, intake/output logs
+DO NOT create encounter entries for:
+- Nursing assessments, nursing flowsheets, APRN medication order entries
 - ADT admission blocks, protocol order bundles (VTE, oxygen, electrolyte, fall precautions)
 - MAR / pharmacy grids, medication reconciliation pages
 - Patient safety checklists (fall risk, VTE risk, pressure ulcer screens)
-- Case management, social work, discharge planning pages
-- Insurance auth forms, EOBs, billing pages, fax covers
-- Conditions of Admission, consent-to-treat, financial responsibility forms
-- Generic patient education handout pages
-- Cover/title/blank/separator pages
+- Case management, social work, discharge planning notes
+- Insurance forms, EOBs, billing pages, fax covers
+- Conditions of Admission, consent forms, financial responsibility forms
+- Patient education handouts
+- Cover pages, blank pages, separator pages
 
 HOSPITAL RADIOLOGY REPORTS -- CRITICAL:
-Large hospital records embed radiology reports with headers like:
+Hospital records embed radiology reports with headers like:
   "[FACILITY] ER RADIOLOGY" / "PROCEDURE:" / "DATE:" / "FINDINGS:" / "IMPRESSION:" / "Electronically signed by: [Name] MD"
-Each such report is a SEPARATE encounter entry:
-- The signing RADIOLOGIST is the provider (not the ordering physician).
-- The exam DATE field is the visit date.
-- One entry per report per radiologist. Two radiologists reading two studies on the same day = TWO entries.
-- Do NOT collapse radiology reports into the adjacent ED note entry.
+Each is a SEPARATE encounter entry. The signing RADIOLOGIST is the provider. The exam DATE is the visit date.
+Two studies by different radiologists on the same day = TWO separate entries.
+Do NOT merge radiology reports into the adjacent ED note.
+
+SELF-CHECK before returning:
+- If your pages arrays collectively cover more than 40% of all pages in this document, you have likely over-included admin/nursing pages. Re-examine each page and remove non-clinical pages.
+- If a visit has more than 8 pages, verify each page actually contains clinical narrative for that visit.
 
 Return ONLY valid JSON -- no markdown, no explanation:
 {
