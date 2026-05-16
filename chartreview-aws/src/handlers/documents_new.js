@@ -1,3 +1,4 @@
+// Updated: 2026-05-16 — improved CLASSIFY_PROMPT: physician-narrative bar, hospital admin/nursing/order page exclusions
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
@@ -1035,19 +1036,38 @@ PART 2 - OVERALL CLINICAL RELEVANCE:
 PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPENDENTLY):
 5. Scan EVERY SINGLE PAGE individually. Flag pages with LOW clinical relevance. TREAT EACH PAGE AS STANDALONE.
 
+   A page is clinically relevant ONLY if it contains a NARRATIVE CLINICAL ENCOUNTER -- meaning a physician, PA, NP, or radiologist has written an assessment, HPI, examination finding, diagnosis, treatment plan, operative note, or radiology interpretation for this patient. Pages that merely document what was ordered, administered, or tracked without a clinical narrative are NOT clinically relevant.
+
    Always flag as low relevance:
    - Cover/title pages, blank pages, headers/footers only, TOC, fax cover sheets, admin forms, billing pages, signature-only pages, separator pages, photo pages (surveillance, vehicles, people without clinical context)
    - MAR/pharmacy grid pages, nursing flowsheet pages, vital sign grid pages, ADL log pages, Documentation Survey Report pages, any page that is primarily a table of checkmarks/initials/codes with no physician narrative
-   - Hospital order/workflow pages: order tracking logs, discharge request orders, medication order audit trails, order action/discontinue/acknowledgment records
+   - Hospital order/workflow pages: order tracking logs, discharge request orders, medication order audit trails, order action/discontinue/acknowledgment records, ADT admission blocks, admission level-of-care order sets (e.g. "ADT2 triggered protocol orders"), protocol order bundles (VTE prophylaxis, oxygen management, electrolyte replacement, fall precautions) -- these are administrative workflow records even if a physician name appears on them
+   - Nursing-only entries: nursing assessments, nursing APRN medication order entries, IV insertion records, nursing reassessment flowsheets, intake/output logs -- flag UNLESS a physician or PA has authored a clinical narrative on the same page
+   - Case management / social work / discharge planning pages: case management evaluations, discharge planning notes, social work assessments, payer authorization pages, disposition planning records
+   - Inpatient medication reconciliation pages, pharmacy medication lists, prescription printouts, medication fill records
+   - Patient safety checklists: fall risk screens, VTE risk assessments, pressure ulcer screens, pain assessment grids, patient safety parameter checklists with no physician narrative
    - Medical records transmittal pages, law firm letters, HIPAA auth forms, affidavits, consent-to-release pages, Conditions of Admission pages
    - Generic patient education handout pages (standardized printouts not authored by the treating provider)
    - Billing charge pages, account balance pages, insurance payment summary pages
-   NOTE: Do NOT flag police reports, EMT/EMS reports, or accident reports as low relevance.
-   NOTE: PT/OT initial evaluations and discharge summaries ARE clinical -- do not flag those.
-   NOTE: Radiology report addendum pages, continuation pages, and attestation/signature pages that are part of a radiology report ARE clinical -- do not flag them as low relevance.
+   - Inpatient discharge order pages and discharge instruction printouts WITHOUT a physician discharge summary narrative (a discharge summary WITH assessment/plan IS clinical; a discharge order form is not)
+
+   ALWAYS KEEP as clinically relevant (do NOT flag):
+   - Physician, PA, or NP office visit notes with HPI, exam, assessment, and plan
+   - Emergency department provider notes (attending MD/PA/NP narrative -- not nursing triage forms)
+   - Hospital attending physician progress notes, admission H&P, consult notes
+   - Operative reports and pre/post-operative notes authored by a surgeon
+   - Radiology reports authored by a radiologist (including addendum and attestation pages that are part of the report)
+   - Discharge summaries with a physician narrative (assessment, hospital course, discharge plan)
+   - Physical therapy and occupational therapy initial evaluations, progress notes, and discharge summaries
+   - Independent medical examination reports
+   - Laboratory result pages showing actual test values
+   - Police/accident/EMT/EMS reports
+
+   NOTE: A page with BOTH a nursing entry AND a physician entry -- keep it (clinical wins).
+   NOTE: If uncertain whether an entry is a physician narrative vs. a nursing/admin entry, look for: does it contain HPI, assessment, differential diagnosis, or treatment plan language? If yes, keep it.
 
    Return an ARRAY: {page_number: number, reason: "specific description"}
-   Only return [] if EVERY page has substantial clinical content. Be VERY aggressive flagging.
+   Only return [] if EVERY page has a substantive clinical narrative. Be VERY aggressive flagging administrative and nursing-only pages.
 
 PART 4 - METADATA EXTRACTION:
 6. Patient name (if medical document)
@@ -1057,8 +1077,8 @@ PART 4 - METADATA EXTRACTION:
 10. Count of office visits in this file
 11. EXACT page count
 
-CRITICAL: Each page is ONLY relevant if it contains substantive clinical content ON THAT PAGE ALONE.
-RECHECK: If you flagged no pages, verify every single page contains substantive clinical content.
+CRITICAL: Each page is ONLY relevant if it contains a substantive clinical narrative authored by a treating provider (physician, PA, NP, radiologist, or therapist). Nursing entries, order sets, protocol bundles, and administrative workflow pages are NOT clinical even if they contain medical terminology.
+RECHECK: If you flagged fewer than 10% of pages in a hospital record, re-examine every page -- hospital records almost always contain large sections of nursing/admin/order pages that should be flagged.
 
 Return ONLY a JSON object:
 {
