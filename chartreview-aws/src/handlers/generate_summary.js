@@ -246,6 +246,64 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder) => {
   throw lastErr; // all regions + models exhausted
 };
 
+// Text-only Bedrock call — no PDF, just a plain text prompt.
+// Used by VI pre-pass to read extracted_text from DynamoDB (free, no vision tokens).
+const callBedrockText = async (textContent, prompt, schema, regionOrder) => {
+  const bedrockPayload = {
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 8000,
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: `DOCUMENT TEXT:\n\`\`\`\n${textContent}\n\`\`\`` },
+      { type: 'text', text: prompt },
+    ]}],
+    tools: [{
+      name: 'structured_output',
+      description: 'Return structured data',
+      input_schema: schema,
+    }],
+    tool_choice: { type: 'tool', name: 'structured_output' },
+  };
+
+  const orderedRegions = regionOrder || selectBestRegions(await getRegionUsage());
+  let lastErr;
+  for (const candidate of orderedRegions) {
+    const { region, models } = candidate;
+    for (const modelId of models) {
+      try {
+        console.log(`callBedrockText: trying region=${region} model=${modelId}`);
+        const client = getBedrockClient(region);
+        const cmd = new InvokeModelCommand({
+          modelId,
+          contentType: 'application/json',
+          accept: 'application/json',
+          body: JSON.stringify(bedrockPayload),
+        });
+        const res = await client.send(cmd);
+        const parsed = JSON.parse(Buffer.from(res.body).toString('utf-8'));
+        const toolUse = parsed.content?.find(b => b.type === 'tool_use');
+        if (!toolUse) throw new Error('Bedrock returned no tool_use block');
+        console.log(`callBedrockText: success region=${region} model=${modelId}`);
+        await incrementRegionUsage(region, 2000); // text-only calls are cheaper
+        return toolUse.input;
+      } catch (err) {
+        const isThrottle = err.message?.includes('Too many tokens') ||
+                           err.name === 'ThrottlingException' ||
+                           err.$metadata?.httpStatusCode === 429;
+        console.warn(`callBedrockText: region=${region} model=${modelId} failed — ${err.message}`);
+        lastErr = err;
+        if (!isThrottle) throw err;
+      }
+    }
+    if (lastErr) {
+      const isThrottled = lastErr.message?.includes('Too many tokens') ||
+                          lastErr.name === 'ThrottlingException' ||
+                          lastErr.$metadata?.httpStatusCode === 429;
+      if (isThrottled) await saturateRegion(region);
+    }
+  }
+  throw lastErr;
+};
+
 // Pre-fetch region order once per job to avoid N DynamoDB reads per batch
 const getRegionOrder = async () => {
   const usage = await getRegionUsage();
@@ -573,7 +631,7 @@ RULES:
 - CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
 - Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
-- For each encounter, return the pages field: a list of 1-based page numbers where that encounter's content appears in this document. Include all pages belonging to the encounter (e.g. a 3-page consult note on pages 12-14 → pages: [12,13,14]). If you cannot determine exact pages, return an empty array [].
+- For each encounter, return the pages field: a list of 1-based page numbers where that encounter's content appears. The document text contains explicit page boundary markers in the format '--- PAGE N ---'. Use these markers to determine which page numbers each encounter spans (e.g. a consult note that begins after '--- PAGE 12 ---' and ends before '--- PAGE 15 ---' → pages: [12,13,14]). If you cannot determine exact pages, return an empty array [].
 
 HOSPITAL RADIOLOGY REPORTS — CRITICAL:
 Large hospital records often contain embedded radiology reports formatted with a header block like:
@@ -834,6 +892,7 @@ const generateSummaryWorker = async (event) => {
         file_key: fileKey,
         file_size: doc.file_size || 0,
         page_classifications: partClassif,
+        extracted_text: doc.extracted_text || '',  // for VI pre-pass (text path)
       });
     }
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
@@ -872,7 +931,13 @@ const generateSummaryWorker = async (event) => {
         await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
           const partIdx = vi + chunkIdx;
           try {
-            const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema, regionOrder);
+            // Use Textract extracted_text (with page markers) if available — free, no vision tokens.
+            // Fall back to PDF vision call if extracted_text is missing or too short.
+            const hasText = viPart.extracted_text && viPart.extracted_text.length > 200;
+            const viResult = hasText
+              ? await callBedrockText(viPart.extracted_text, buildVisitIndexPrompt(), viSchema, regionOrder)
+              : await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema, regionOrder);
+            console.log(`VI: ${viPart.label} using ${hasText ? 'Textract text' : 'PDF vision'} (${(viPart.extracted_text || '').length} chars)`);
             if (Array.isArray(viResult.visits)) {
               viResults[partIdx] = viResult.visits
                 .map(v => {
