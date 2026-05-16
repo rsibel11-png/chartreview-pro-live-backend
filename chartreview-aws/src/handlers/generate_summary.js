@@ -994,10 +994,17 @@ const generateSummaryWorker = async (event) => {
         if (viSeen.has(k)) return false;
         viSeen.add(k); return true;
       });
-      // Filter admin visit types
-      knownVisits = knownVisits.filter(v =>
-        !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
-      );
+      // Filter noise from checklist — use both weak visit_type check AND
+      // EXCLUDED_PATTERNS against facility+visit_type (same fields VI pre-pass captures)
+      knownVisits = knownVisits.filter(v => {
+        const vt = v.visit_type || '';
+        const fac = v.facility  || '';
+        if (/admin|fax|authorization|reminder/i.test(vt)) return false;
+        // Run EXCLUDED_PATTERNS against the visit_type + facility combo
+        const combined = `${fac} ${vt}`;
+        if (EXCLUDED_PATTERNS.some(rx => rx.test(combined))) return false;
+        return true;
+      });
       console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
     } catch (viErr) {
       console.warn('VI pre-pass failed (non-fatal):', viErr.message);
@@ -1227,6 +1234,7 @@ const visitSortComparator = (a, b) => {
 
     // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
+    allVisits = sanitizeVisits(allVisits, patientName); // final gate — catches anything that slipped through chunk workers
     allVisits = deduplicateVisits(allVisits);
     allVisits.sort(visitSortComparator);
 
@@ -1293,6 +1301,7 @@ const visitSortComparator = (a, b) => {
             }
           }));
         }
+        allVisits = sanitizeVisits(allVisits, patientName); // re-sanitize after recovery additions
         allVisits = deduplicateVisits(allVisits);
         allVisits.sort((a, b) => {
           if (!a.visit_date) return 1;
