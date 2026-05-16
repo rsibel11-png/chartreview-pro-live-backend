@@ -8093,6 +8093,12 @@
         "pako": "^1.0.11",
         "tslib": "^1.11.1"
       }
+    },
+    "node_modules/pdf-lib/node_modules/tslib": {
+      "version": "1.14.1",
+      "resolved": "https://registry.npmjs.org/tslib/-/tslib-1.14.1.tgz",
+      "integrity": "sha512-Xni35NKzjgMrwevysHTCArtLDpPvye8zV/0E4EyYn43P7/7qvQwPh9BGkHewbMulVntbigmcT7rdX3BNo9wRJg==",
+      "license": "0BSD"
     }
   },
   "dependencies": {
