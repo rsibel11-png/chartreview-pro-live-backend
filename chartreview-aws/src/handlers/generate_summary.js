@@ -375,10 +375,13 @@ const enforceOneC4 = (visitList) => {
   });
 };
 
-const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
+const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = [], pageScope = null) => {
   const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
   const multiDocNote = docCount > 1
     ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files and combine them into a single comprehensive summary. Do not stop after the first document.`
+    : '';
+  const pageScopeNote = pageScope && pageScope.length > 0
+    ? `\n\nPAGE SCOPE: This document is a large multi-page record. Focus your extraction ONLY on pages ${pageScope.join(', ')}. These pages were identified by the pre-pass as containing the relevant clinical encounter(s). You may use adjacent pages for context only — extract clinical content from the scoped pages only.`
     : '';
   const checklistSection = knownVisitsChecklist.length > 0
     ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
@@ -546,6 +549,7 @@ Also extract:
 - Case number (should be consistent across documents)
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
+${pageScopeNote}
 ${checklistSection}
 ${skipPagesSection}`;
 };
@@ -569,6 +573,7 @@ RULES:
 - CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
 - Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
+- For each encounter, return the pages field: a list of 1-based page numbers where that encounter's content appears in this document. Include all pages belonging to the encounter (e.g. a 3-page consult note on pages 12-14 → pages: [12,13,14]). If you cannot determine exact pages, return an empty array [].
 
 HOSPITAL RADIOLOGY REPORTS — CRITICAL:
 Large hospital records often contain embedded radiology reports formatted with a header block like:
@@ -715,7 +720,7 @@ const generateSummaryChunkWorker = async (event) => {
     },
   };
 
-  const runBatch = async (batch, batchIndex, knownVisitsChecklist = []) => {
+  const runBatch = async (batch, batchIndex, knownVisitsChecklist = [], pageScope = null) => {
     const fileKeys = batch.map(p => p.file_key).filter(Boolean);
     if (!fileKeys.length) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: no valid file keys, skipping`);
@@ -723,13 +728,18 @@ const generateSummaryChunkWorker = async (event) => {
     }
     const globalBatchNum = batchOffset + batchIndex + 1;
     const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
+    // Add ±1 page buffer so we don't miss content at encounter edges
+    const scopeWithBuffer = pageScope && pageScope.length > 0
+      ? [...new Set(pageScope.flatMap(p => [p - 1, p, p + 1]).filter(p => p > 0))].sort((a, b) => a - b)
+      : null;
+    if (scopeWithBuffer) console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: page scope [${scopeWithBuffer.join(',')}]`);
     try {
-      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), fullSchema, regionOrder);
+      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], scopeWithBuffer), fullSchema, regionOrder);
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
-        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), simplifiedSchema, regionOrder);
+        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], scopeWithBuffer), simplifiedSchema, regionOrder);
         return result;
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
@@ -751,7 +761,10 @@ const generateSummaryChunkWorker = async (event) => {
       await setJobStatus(job_id, `Analyzing batches ${globalStart}–${globalEnd} of ${totalBatches}...`);
 
       const results = await Promise.all(
-        slice.map((batch, j) => runBatch(batch, i + j, knownVisits || []))
+        slice.map((batch, j) => {
+          const batchPageScope = batch.length === 1 && batch[0].pageScope ? batch[0].pageScope : null;
+          return runBatch(batch, i + j, knownVisits || [], batchPageScope);
+        })
       );
       for (const result of results) {
         if (!result) continue;
@@ -848,6 +861,7 @@ const generateSummaryWorker = async (event) => {
                 visit_type:       { type: 'string' },
                 source_doc_id:    { type: 'string' },
                 source_part_label:{ type: 'string' },
+                pages:            { type: 'array', items: { type: 'integer' }, description: 'Page numbers (1-based) where this encounter appears' },
               },
             },
           },
@@ -878,7 +892,8 @@ const generateSummaryWorker = async (event) => {
                       }
                     }
                   }
-                  return { ...v, date: d, source_doc_id: viPart.id, source_part_label: viPart.label };
+                  const pages = Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [];
+                  return { ...v, date: d, source_doc_id: viPart.id, source_part_label: viPart.label, pages };
                 })
                 .filter(v => v.date); // only keep visits with a resolved date
             }
@@ -908,10 +923,22 @@ const generateSummaryWorker = async (event) => {
       knownVisits = [];
     }
 
-    // ── 4. Build batches + split into chunks of CHUNK_SIZE ───────────────────
+    // ── 4. Build encounter-scoped batches using VI page data ─────────────────
+    // Each VI visit with page data → its own scoped batch for that doc part.
+    // Parts with no VI page data → full-document batch (safe fallback).
     const batches = [];
-    for (let start = 0; start < allParts.length; start += BATCH_SIZE) {
-      batches.push(allParts.slice(start, start + BATCH_SIZE));
+    for (const part of allParts) {
+      const partVisits = knownVisits.filter(v => v.source_doc_id === part.id && Array.isArray(v.pages) && v.pages.length > 0);
+      if (partVisits.length > 0) {
+        for (const encounter of partVisits) {
+          batches.push([{ ...part, pageScope: encounter.pages }]);
+        }
+        console.log(`coordinator: part ${part.label} → ${partVisits.length} encounter-scoped batches`);
+      } else {
+        // No VI page data — fall back to full-document extraction
+        batches.push([{ ...part, pageScope: null }]);
+        console.log(`coordinator: part ${part.label} → full-document batch (no VI page data)`);
+      }
     }
     const totalBatches = batches.length;
     console.log(`coordinator: ${totalBatches} batches → chunks of ${CHUNK_SIZE}`);
