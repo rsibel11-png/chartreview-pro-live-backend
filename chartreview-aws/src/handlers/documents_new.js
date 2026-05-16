@@ -1,4 +1,4 @@
-// Updated: 2026-05-16 — classify replaced with VI pre-pass; encounter_index written to DynamoDB for summary pipeline
+// Updated: 2026-05-16 — improved CLASSIFY_PROMPT: physician-narrative bar, hospital admin/nursing/order page exclusions
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
@@ -11,7 +11,7 @@ const { randomUUID } = require('crypto');
 const { validateApiKey } = require('./auth');
 
 const client   = new DynamoDBClient({});
-const dynamo   = DynamoDBDocumentClient.from(client, { marshallOptions: { removeUndefinedValues: true } });
+const dynamo   = DynamoDBDocumentClient.from(client);
 const s3       = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
 const textract = new TextractClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const bedrock  = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-1' });
@@ -1008,97 +1008,105 @@ const reassessHandler = async (event) => {
 
 const JOBS_TABLE = process.env.JOBS_TABLE || 'chartreview-jobs-prod';
 
-// ── VI Pre-pass prompt — replaces binary CLASSIFY_PROMPT ──────────────────────────────────────────
-// Asks: "what distinct clinical encounters exist and which pages do they occupy?"
-// Output mapped into page_classifications + encounter_index in DynamoDB.
-// Library displays existing green/red UI unchanged.
-// generate_summary.js reads encounter_index directly — no separate VI pre-pass at summary time.
-const VI_PREPASS_PROMPT = `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter date, provider name, and facility/location.
+// --- SHARED: Bedrock classification prompt (used by both sync + async paths) ---
+const CLASSIFY_PROMPT = `Analyze this document VERY CAREFULLY and extract the following information:
 
-For each clinical encounter found, extract:
-1. date - the date of service (YYYY-MM-DD format). PRIMARY SOURCE: the document header or note title (e.g. "Visit Note - November 7, 2022" -> 2022-11-07). The vitals table Date column also confirms the visit date. NEVER use the injury date or any date mentioned inside the HPI narrative as the visit date.
-2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
-3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
-4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
+PART 1 - DOCUMENT CLASSIFICATION:
+1. Document category: Is this a medical or legal document?
+2. If medical, what type: doctor_office_notes, independent_medical_examination, hospital_records, radiology_reports, medical_expert_testimony, lab_results, or other?
+3. If legal, what type: deposition, legal_correspondence, court_filing, or other?
 
-RULES:
-- Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
-- Each unique date + provider combination is a separate entry.
-- Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
-- ALWAYS include C-4 forms (Workers' Compensation Form C-4 / "Employee's Claim for Compensation and Report of Initial Treatment") as clinical encounters with visit_type "C-4 Form". These are mandatory clinical-legal documents. If you see anchor text "FORM C-4", "EMPLOYEE'S CLAIM FOR COMPENSATION", or similar WC claim form headers, you MUST include those pages.
-- CRITICAL: The HPI section often mentions the date of injury -- this is NOT the visit date. The visit date is ALWAYS in the document header or vitals table.
-- Do NOT include the date of injury as a visit date unless confirmed by a document header on that exact date.
-- CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
-- Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
-- If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
-- For each encounter, return the pages field: a list of 1-based page numbers where that encounter's PHYSICIAN/PROVIDER narrative appears. The document text contains explicit page boundary markers in the format '--- PAGE N ---'. Use these markers.
-  CRITICAL PAGE RULE: Only include pages that contain the actual physician/provider authored content for this encounter (HPI, exam, assessment, plan, operative note, radiology report, discharge summary narrative). Do NOT include pages that merely fall between the start and end of an encounter — each page must be individually verified to contain physician-authored clinical content.
-  PROTECTED PAGE TYPES — Always mark these as CLINICAL even if they contain structured/formatted data:
-    - ED Discharge Summary pages where a physician (MD/DO/PA/NP) is listed as the primary author or ED Physician at the top (e.g. "ED Physician: Tall, Samantha M MD")
-    - Emergency physician notes (HPI, assessment, plan authored by MD/DO)
-    - Discharge summaries with physician narrative content (not just blank templates)
-    - Radiology report pages with physician-interpreted findings
-    - Operative/anesthesia notes authored by a physician or CRNA
-    - Physician-signed discharge instructions that include clinical content (weight-bearing status, wound care, activity restrictions, follow-up plan) — these are authored by the treating MD, not nursing
-    - Discharge medication lists with physician signature (prescribed medications at discharge)
-    If a page has BOTH physician-authored content AND nursing-style structured fields, classify it as CLINICAL.
-    If a page is a BLANK template or form with no clinical content filled in, classify it as NON-CLINICAL.
+PART 2 - OVERALL CLINICAL RELEVANCE:
+4. Is the ENTIRE document clinically relevant? Mark as relevant ONLY if it contains ACTUAL CLINICAL CONTENT with medical findings, examination results, diagnoses, or treatment notes.
 
-  Pages to EXCLUDE from the pages array even if they appear within an encounter's date range:
-    - Nursing assessment/flowsheet pages (authored only by RN/nursing staff with no physician narrative)
-    - Medication administration records (MAR)
-    - Order audit trail pages (lists of order events: LIPTALSA, DRADKB1, DNURKEG2, etc.)
-    - Pharmacy log/dispensing record pages
-    - Order set pages (VTE prophylaxis, diet orders, lab orders, protocol orders)
-    - Vital signs flowsheets (columns of numbers, no physician narrative)
-    - Patient safety checklists
-    - Intake/output logs
-    - Discharge planning/coordination pages authored only by nurses or case managers
-    - Lab results pages (CBC, BMP, CMP, coagulation, blood bank results in tabular format)
-    - Insurance/billing/administrative correspondence
-    - Pre-op nursing documentation (safety checklists, universal protocol by RN)
-    - PACU nursing assessments and vital sign flowsheets
-    - Surgical case record pages containing only implant logs, sponge counts, or operative staff lists
-  A typical office visit note = 1-3 pages. A typical ED physician note = 1-4 pages. An operative report = 1-3 pages. A discharge summary = 2-5 pages. If your page count for a single encounter exceeds these ranges, re-examine each page.
-  If you cannot determine exact pages, return an empty array [].
+   ALWAYS MARK AS RELEVANT (do not reject):
+   - Police/accident/MVA/incident reports, EMT/EMS/paramedic reports, workers comp accident reports -- these establish mechanism of injury and are legally required.
 
-HOSPITAL RADIOLOGY REPORTS -- CRITICAL:
-Large hospital records often contain embedded radiology reports formatted with a header block like:
-  "[FACILITY] ER RADIOLOGY" / "PROCEDURE:" / "DATE:" / "FINDINGS:" / "IMPRESSION:" / "Electronically signed by: [Name] MD"
-Each such report is a SEPARATE clinical encounter, even if its findings are also mentioned inside the ED note or H&P.
-- Identify each radiology report by its own header (facility name, exam type, date, radiologist signature).
-- The signing radiologist is the rendering_provider -- NOT the ordering physician.
-- The exam DATE field (e.g. "DATE: 10/1/2025 10:00 PM CDT") is the visit date for that report.
-- Create one entry per report, per radiologist. If one radiologist reads the elbow XR and another reads the wrist XR on the same day, that is TWO separate entries.
-- Do NOT collapse multiple radiology reports into the ED visit entry. They are independent encounters.
+   REJECT (not clinically relevant) if ANY of these apply:
+   - Insurance/auth forms, EOBs, fax cover sheets, emails, billing, scheduling, patient intake forms without clinical content
+   - Photo-only documents (surveillance, vehicle, scene photos with no medical text)
+   - Hospital/rehab nursing-admin records: MAR grids, nursing flowsheets, vital sign grids, ADL logs, wound care checklists, dietary records, pharmacy printouts (AbacusRX etc.), Documentation Survey Report forms, resident activity logs, staffing tables, facility photo ID pages -- REJECT these even if mixed with some clinical pages, UNLESS a physician order or physician progress note is embedded on that specific page.
+   - Hospital order/workflow pages: order tracking logs, discharge request orders, medication order audit trails, order action/discontinue/acknowledgment records, nursing order review logs -- these are administrative workflow records with no clinical findings even if signed by a physician.
+   - Medical records transmittal cover pages, law firm records request letters, HIPAA authorization forms, affidavits of custodian of records, consent-to-release forms.
+   - Billing/charge summary pages: itemized charges, insurance payment summaries, statement of charges, account balance pages.
+   - Generic patient education handout pages (standardized printouts like "Broken Foot care", "Care after receiving medication in the ER" -- these are not written by the treating provider and contain no clinical findings).
+   - Conditions of Admission forms, financial responsibility forms, patient rights documents, consent-to-treat signature pages.
+   If uncertain, lean toward REJECTION.
 
-Return all entries in the visits array. Return ONLY valid JSON -- no markdown, no explanation:
+PART 3 - PAGE-BY-PAGE ANALYSIS (EXTREMELY IMPORTANT - ANALYZE EACH PAGE INDEPENDENTLY):
+5. Scan EVERY SINGLE PAGE individually. Flag pages with LOW clinical relevance. TREAT EACH PAGE AS STANDALONE.
+
+   A page is clinically relevant ONLY if it contains a NARRATIVE CLINICAL ENCOUNTER -- meaning a physician, PA, NP, or radiologist has written an assessment, HPI, examination finding, diagnosis, treatment plan, operative note, or radiology interpretation for this patient. Pages that merely document what was ordered, administered, or tracked without a clinical narrative are NOT clinically relevant.
+
+   Always flag as low relevance:
+   - Cover/title pages, blank pages, headers/footers only, TOC, fax cover sheets, admin forms, billing pages, signature-only pages, separator pages, photo pages (surveillance, vehicles, people without clinical context)
+   - MAR/pharmacy grid pages, nursing flowsheet pages, vital sign grid pages, ADL log pages, Documentation Survey Report pages, any page that is primarily a table of checkmarks/initials/codes with no physician narrative
+   - Hospital order/workflow pages: order tracking logs, discharge request orders, medication order audit trails, order action/discontinue/acknowledgment records, ADT admission blocks, admission level-of-care order sets (e.g. "ADT2 triggered protocol orders"), protocol order bundles (VTE prophylaxis, oxygen management, electrolyte replacement, fall precautions) -- these are administrative workflow records even if a physician name appears on them
+   - Nursing-only entries: nursing assessments, nursing APRN medication order entries, IV insertion records, nursing reassessment flowsheets, intake/output logs -- flag UNLESS a physician or PA has authored a clinical narrative on the same page
+   - Case management / social work / discharge planning pages: case management evaluations, discharge planning notes, social work assessments, payer authorization pages, disposition planning records
+   - Inpatient medication reconciliation pages, pharmacy medication lists, prescription printouts, medication fill records
+   - Patient safety checklists: fall risk screens, VTE risk assessments, pressure ulcer screens, pain assessment grids, patient safety parameter checklists with no physician narrative
+   - Medical records transmittal pages, law firm letters, HIPAA auth forms, affidavits, consent-to-release pages, Conditions of Admission pages
+   - Generic patient education handout pages (standardized printouts not authored by the treating provider)
+   - Billing charge pages, account balance pages, insurance payment summary pages
+   - Inpatient discharge order pages and discharge instruction printouts WITHOUT a physician discharge summary narrative (a discharge summary WITH assessment/plan IS clinical; a discharge order form is not)
+
+   ALWAYS KEEP as clinically relevant (do NOT flag):
+   - Physician, PA, or NP office visit notes with HPI, exam, assessment, and plan
+   - Emergency department provider notes (attending MD/PA/NP narrative -- not nursing triage forms)
+   - Hospital attending physician progress notes, admission H&P, consult notes
+   - Operative reports and pre/post-operative notes authored by a surgeon
+   - Radiology reports authored by a radiologist (including addendum and attestation pages that are part of the report)
+   - Discharge summaries with a physician narrative (assessment, hospital course, discharge plan)
+   - Physical therapy and occupational therapy initial evaluations, progress notes, and discharge summaries
+   - Independent medical examination reports
+   - Laboratory result pages showing actual test values
+   - Police/accident/EMT/EMS reports
+
+   NOTE: A page with BOTH a nursing entry AND a physician entry -- keep it (clinical wins).
+   NOTE: If uncertain whether an entry is a physician narrative vs. a nursing/admin entry, look for: does it contain HPI, assessment, differential diagnosis, or treatment plan language? If yes, keep it.
+
+   Return an ARRAY: {page_number: number, reason: "specific description"}
+   Only return [] if EVERY page has a substantive clinical narrative. Be VERY aggressive flagging administrative and nursing-only pages.
+
+PART 4 - METADATA EXTRACTION:
+6. Patient name (if medical document)
+7. Document date (earliest visit date if multiple)
+8. Provider/entity name (first provider if multiple)
+9. Case number if mentioned
+10. Count of office visits in this file
+11. EXACT page count
+
+CRITICAL: Each page is ONLY relevant if it contains a substantive clinical narrative authored by a treating provider (physician, PA, NP, radiologist, or therapist). Nursing entries, order sets, protocol bundles, and administrative workflow pages are NOT clinical even if they contain medical terminology.
+RECHECK: If you flagged fewer than 10% of pages in a hospital record, re-examine every page -- hospital records almost always contain large sections of nursing/admin/order pages that should be flagged.
+
+Return ONLY a JSON object:
 {
-  "visits": [
-    {
-      "date": "YYYY-MM-DD or empty string",
-      "provider": "string",
-      "facility": "string",
-      "visit_type": "string",
-      "pages": [1, 2, 3]
-    }
-  ]
+  "category": "medical or legal or uncategorized",
+  "subcategory": "string",
+  "is_relevant_medical_document": true or false,
+  "patient_name": "string",
+  "document_date": "string",
+  "provider_name": "string",
+  "case_number": "string",
+  "office_visit_count": 0,
+  "page_count": 0,
+  "rejection_reason": "string",
+  "low_relevance_pages": [{"page_number": 1, "reason": "string"}]
 }`;
 
-// --- Shared: run VI pre-pass on extracted_text from DynamoDB -----------------
-// Pure text Bedrock call -- no PDF vision, no S3 fetch.
-// Returns { visits: [{ date, provider, facility, visit_type, pages }] }
-const runViPrepass = async (extractedText, aws_document_id) => {
-  console.log('runViPrepass: text length=' + extractedText.length + ' for', aws_document_id);
+// --- Shared: run Bedrock classification on a PDF buffer ----------------------
+// Returns parsed result object or throws.
+const runBedrockClassify = async (pdfBase64, aws_document_id) => {
+  console.log('runBedrockClassify: PDF size ' + (pdfBase64.length/1024/1024).toFixed(1) + 'MB for', aws_document_id);
   const payload = {
     anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 8192,
-    temperature: 0,
+    max_tokens: 4096,
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: extractedText },
-        { type: 'text', text: VI_PREPASS_PROMPT },
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+        { type: 'text', text: CLASSIFY_PROMPT },
       ],
     }],
   };
@@ -1111,133 +1119,46 @@ const runViPrepass = async (extractedText, aws_document_id) => {
   const body = JSON.parse(new TextDecoder().decode(resp.body));
   const rawText = body.content?.[0]?.text || '';
   const match = rawText.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON in VI pre-pass response: ' + rawText.substring(0, 300));
-  const parsed = JSON.parse(match[0]);
-  console.log('runViPrepass: found ' + (parsed.visits || []).length + ' encounters for', aws_document_id);
-  return parsed;
+  if (!match) throw new Error('No JSON in Bedrock response: ' + rawText.substring(0, 300));
+  return JSON.parse(match[0]);
 };
 
-// --- Shared: map VI visits -> page_classifications + encounter_index in DynamoDB ------
-// clinical pages  = pages belonging to a VI encounter  (green in Library)
-// non-clinical    = all other pages                    (red in Library)
-// encounter_index = raw VI visit list for generate_summary.js (no separate pre-pass needed)
-const saveViPrepassToDoc = async (aws_document_id, viResult, doc, pageOffset = 0) => {
-  const visits = viResult.visits || [];
-  const pageCount = doc.page_count || 1;
-
-  // Build page -> encounter label map
-  const pageToEncounter = new Map();
-  let totalPagesTagged = 0;
-  for (const v of visits) {
-    const label = [v.visit_type, v.provider, v.date].filter(Boolean).join(' -- ');
-    const vPages = Array.isArray(v.pages) ? v.pages.filter(p => typeof p === 'number' && p > 0) : [];
-    console.log('saveViPrepassToDoc visit:', label, '| pages:', JSON.stringify(vPages));
-    for (const p of vPages) {
-      const actualPage = pageOffset > 0 ? p + pageOffset : p;
-      pageToEncounter.set(actualPage, label);
-      totalPagesTagged++;
-    }
+// --- Shared: write classification result to documents table ------------------
+const saveClassificationToDoc = async (aws_document_id, result, doc, pageOffset = 0) => {
+  if (pageOffset > 0 && Array.isArray(result.low_relevance_pages) && result.low_relevance_pages.length > 0) {
+    result.low_relevance_pages = result.low_relevance_pages.map(p => ({
+      ...p, page_number: (p.page_number || 0) + pageOffset,
+    }));
   }
-  console.log('saveViPrepassToDoc: pageToEncounter has', pageToEncounter.size, 'pages tagged from', visits.length, 'visits, pageOffset=', pageOffset, 'pageCount=', pageCount);
-
-  // Build page_classifications for every page in the document
-  const pageClassifications = [];
-  for (let p = 1; p <= pageCount; p++) {
-    const actualPage = pageOffset > 0 ? p + pageOffset : p;
-    if (pageToEncounter.has(actualPage)) {
-      pageClassifications.push({ page: actualPage, is_clinical: true,  encounter: pageToEncounter.get(actualPage), reason: '' });
-    } else {
-      pageClassifications.push({ page: actualPage, is_clinical: false, encounter: '', reason: 'Not part of any identified clinical encounter' });
-    }
-  }
-
-  // C-4 PROTECTION: Force any page containing C-4 anchor text to is_clinical=true
-  // Mirrors the protection logic in generate_summary.js.
-  // The VI pre-pass recognizes C-4 forms but sometimes fails to assign them pages --
-  // this fallback scans the extracted_text for C-4 anchors and rescues those pages.
-  const C4_ANCHORS = [
-    "FORM C-4",
-    "EMPLOYEE'S CLAIM FOR COMPENSATION",
-    "EMPLOYEE\'S CLAIM FOR COMPENSATION",
-    "C-4 FORM",
-    "EMPLOYER'S REPORT",
-    "WC-1 FORM",
-  ];
-  const extractedTextForC4 = doc.extracted_text || '';
-  if (C4_ANCHORS.some(anchor => extractedTextForC4.toUpperCase().includes(anchor.toUpperCase()))) {
-    // Find which pages contain C-4 anchor text using the --- PAGE N --- markers
-    const pageTextMap = new Map();
-    const pageChunks = extractedTextForC4.split(/--- PAGE (\d+) ---/);
-    for (let i = 1; i < pageChunks.length; i += 2) {
-      const pageNum = parseInt(pageChunks[i], 10);
-      const pageText = pageChunks[i + 1] || '';
-      pageTextMap.set(pageNum, pageText);
-    }
-    let c4PagesRescued = 0;
-    for (const [pageNum, pageText] of pageTextMap) {
-      if (C4_ANCHORS.some(anchor => pageText.toUpperCase().includes(anchor.toUpperCase()))) {
-        const actualPage = pageOffset > 0 ? pageNum + pageOffset : pageNum;
-        const existing = pageClassifications.find(pc => pc.page === actualPage);
-        if (existing && !existing.is_clinical) {
-          existing.is_clinical = true;
-          existing.encounter = 'C-4 Form -- Workers\' Compensation';
-          existing.reason = '';
-          c4PagesRescued++;
-          console.log('C-4 protection: rescued page', actualPage, 'as clinical');
-        }
-      }
-    }
-    if (c4PagesRescued > 0) {
-      console.log('C-4 protection: rescued', c4PagesRescued, 'pages as clinical for', aws_document_id);
-    }
-  }
-
-  const clinicalPageCount = pageClassifications.filter(p => p.is_clinical).length;
-  const rejectedPageCount = pageCount - clinicalPageCount;
-
-  // low_relevance_pages: existing Library UI field
-  const lowRelevancePages = pageClassifications
-    .filter(p => !p.is_clinical)
-    .map(p => ({ page_number: p.page, reason: p.reason }));
-
-  // encounter_index: VI visit list with pageOffset applied, consumed by generate_summary.js
-  const encounterIndex = visits.map(v => ({
-    ...v,
-    pages: pageOffset > 0 ? (v.pages || []).map(pg => pg + pageOffset) : (v.pages || []),
-  }));
-
+  const isRejected = result.is_relevant_medical_document === false;
   await dynamo.send(new UpdateCommand({
     TableName: TABLE,
     Key: { aws_document_id },
-    UpdateExpression: [
-      'SET page_classifications = :pc',
-      'clinical_page_count = :cpc',
-      'rejected_page_count = :rpc',
-      'low_relevance_pages = :lrp',
-      'encounter_index = :ei',
-      'classification_status = :cs',
-      'relevance_assessed = :ra',
-      'is_rejected = :rej',
-      'updated_at = :now',
-    ].join(', '),
+    UpdateExpression: `SET #cat = :cat, subcategory = :sub, is_rejected = :rejected,
+      rejection_reason = :reason, patient_name = :pname, document_date = :ddate,
+      provider_name = :provider, case_number = :casenum, office_visit_count = :ovc,
+      page_count = :pc, low_relevance_pages = :lrp, relevance_assessed = :ra, updated_at = :now`,
+    ExpressionAttributeNames: { '#cat': 'category' },
     ExpressionAttributeValues: {
-      ':pc':  pageClassifications,
-      ':cpc': clinicalPageCount,
-      ':rpc': rejectedPageCount,
-      ':lrp': lowRelevancePages,
-      ':ei':  encounterIndex,
-      ':cs':  'complete',
-      ':ra':  true,
-      ':rej': clinicalPageCount === 0,
-      ':now': new Date().toISOString(),
+      ':cat':      result.category || 'uncategorized',
+      ':sub':      result.subcategory || 'other',
+      ':rejected': isRejected,
+      ':reason':   isRejected ? (result.rejection_reason || 'Not clinically relevant') : '',
+      ':pname':    result.patient_name || (doc && doc.patient_name) || '',
+      ':provider': result.provider_name || '',
+      ':ddate':    result.document_date || '',
+      ':casenum':  result.case_number || '',
+      ':ovc':      result.office_visit_count || 0,
+      ':pc':       result.page_count || (doc && doc.page_count) || 0,
+      ':lrp':      result.low_relevance_pages || [],
+      ':ra':       true,
+      ':now':      new Date().toISOString(),
     },
   }));
-
-  console.log('saveViPrepassToDoc: ' + clinicalPageCount + ' clinical, ' + rejectedPageCount + ' non-clinical, ' + visits.length + ' encounters for', aws_document_id);
-  return clinicalPageCount === 0;
+  return isRejected;
 };
 
-// --- GET JOB// --- GET JOB ----------------------------------------------------------------
+// --- GET JOB ----------------------------------------------------------------
 const getJobHandler = async (event) => {
   const orgId = event._orgId;
   if (!orgId) return response(400, { error: 'x-org-id header is required' });
@@ -1270,9 +1191,6 @@ const classifyStartHandler = async (event) => {
 
     const requestBody = JSON.parse(event.body || '{}');
     const page_offset = typeof requestBody.page_offset === 'number' ? requestBody.page_offset : 0;
-    // sibling_parts: array of { aws_document_id, part_index, page_count } for ALL parts of this document
-    // When provided, the worker concatenates all parts and runs ONE VI pre-pass across the full document
-    const sibling_parts = Array.isArray(requestBody.sibling_parts) ? requestBody.sibling_parts : null;
 
     // Write job record
     const job_id = randomUUID();
@@ -1291,17 +1209,16 @@ const classifyStartHandler = async (event) => {
       },
     }));
 
-    // Clear relevance_assessed on ALL sibling parts so UI knows they are being re-processed
-    const docIdsToReset = sibling_parts ? sibling_parts.map(s => s.aws_document_id) : [aws_document_id];
-    await Promise.all(docIdsToReset.map(did => dynamo.send(new UpdateCommand({
+    // Clear relevance_assessed so UI knows it is being re-processed
+    await dynamo.send(new UpdateCommand({
       TableName: TABLE,
-      Key: { aws_document_id: did },
+      Key: { aws_document_id },
       UpdateExpression: 'SET relevance_assessed = :ra, updated_at = :now',
       ExpressionAttributeValues: { ':ra': false, ':now': now },
-    }))));
+    }));
 
     // Fire classifyWorker async
-    const workerPayload = JSON.stringify({ __classifyJob: true, job_id, aws_document_id, org_id: orgId, page_offset, sibling_parts });
+    const workerPayload = JSON.stringify({ __classifyJob: true, job_id, aws_document_id, org_id: orgId, page_offset });
     if (process.env.CLASSIFY_QUEUE_URL) {
       await sqs.send(new SendMessageCommand({
         QueueUrl: process.env.CLASSIFY_QUEUE_URL,
@@ -1327,8 +1244,8 @@ const classifyStartHandler = async (event) => {
 // --- CLASSIFY JOB WORKER (async, no HTTP timeout) ---------------------------
 // Triggered by SQS classifyJobQueue or direct Lambda invoke.
 // Does the full Bedrock Vision classification pass and writes results.
-const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 0, sibling_parts = null) => {
-  console.log('classifyJobWorker started: job_id=' + job_id + ' doc=' + aws_document_id + ' pageOffset=' + page_offset + ' siblings=' + (sibling_parts ? sibling_parts.length : 0));
+const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 0) => {
+  console.log('classifyJobWorker started: job_id=' + job_id + ' doc=' + aws_document_id + ' pageOffset=' + page_offset);
   const now = () => new Date().toISOString();
 
   // Mark job running
@@ -1341,62 +1258,11 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
   }));
 
   try {
-    // --- MULTI-PART FULL-DOCUMENT VI PRE-PASS ---
-    // When sibling_parts is provided, fetch ALL parts, concatenate their extracted_text
-    // in part_index order, and run ONE VI pre-pass across the entire document.
-    // This matches the original summary-time VI pre-pass behavior and gives the model
-    // full document context -- eliminating per-chunk isolation and non-determinism.
-    if (sibling_parts && sibling_parts.length > 1) {
-      console.log('classifyJobWorker: multi-part mode -- fetching', sibling_parts.length, 'parts');
-
-      // Fetch all parts sorted by part_index
-      const sortedParts = [...sibling_parts].sort((a, b) => (a.part_index || 0) - (b.part_index || 0));
-      const partDocs = await Promise.all(sortedParts.map(async (s) => {
-        const r = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id: s.aws_document_id } }));
-        return { ...s, doc: r.Item };
-      }));
-
-      // Concatenate extracted_text in order -- PAGE N markers are already globally numbered
-      const fullText = partDocs.map(p => (p.doc && p.doc.extracted_text) || '').join('\n');
-      console.log('classifyJobWorker: concatenated text length=' + fullText.length);
-
-      if (fullText.length < 200) {
-        throw new Error('classifyJobWorker: concatenated extracted_text too short (' + fullText.length + ' chars)');
-      }
-
-      // ONE Bedrock call across full document
-      const classifyResult = await runViPrepass(fullText, aws_document_id);
-
-      // Write results back to EACH part's DynamoDB record
-      let anyRejected = true;
-      for (const p of partDocs) {
-        if (!p.doc) continue;
-        const partRejected = await saveViPrepassToDoc(p.aws_document_id, classifyResult, p.doc, 0);
-        if (!partRejected) anyRejected = false;
-      }
-
-      // Mark job complete
-      await dynamo.send(new UpdateCommand({
-        TableName: JOBS_TABLE,
-        Key: { job_id },
-        UpdateExpression: 'SET #s = :s, #r = :r, updated_at = :now',
-        ExpressionAttributeNames: { '#s': 'status', '#r': 'result' },
-        ExpressionAttributeValues: {
-          ':s': 'complete',
-          ':r': { aws_document_id, is_rejected: anyRejected, multi_part: true, part_count: sortedParts.length },
-          ':now': now(),
-        },
-      }));
-      console.log('classifyJobWorker multi-part complete: job_id=' + job_id);
-      return;
-    }
-
-    // --- SINGLE-PART MODE (fallback for single-part documents) ---
     const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     const doc = docResult.Item;
     if (!doc) throw new Error('Document not found: ' + aws_document_id);
 
-    // Text-density check
+    // Text-density check (same as processWorker)
     const SPARSE_CHARS_PER_PAGE = 30;
     const extractedTextLen = (doc.extracted_text || '').length;
     const docPageCount = doc.page_count || 1;
@@ -1405,17 +1271,70 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
     let classifyResult;
     if (charsPerPage < SPARSE_CHARS_PER_PAGE && extractedTextLen < 500) {
       console.log('classifyJobWorker: sparse doc, auto-rejecting without Bedrock');
-      classifyResult = { visits: [] };
+      const autoLowPages = Array.from({ length: docPageCount }, (_, i) => ({
+        page_number: i + 1 + page_offset,
+        reason: 'photo/image-only page (no extractable text)',
+      }));
+      classifyResult = {
+        category: 'non_clinical',
+        subcategory: 'photo_image_only',
+        is_relevant_medical_document: false,
+        patient_name: doc.patient_name || '',
+        document_date: '',
+        provider_name: '',
+        case_number: '',
+        office_visit_count: 0,
+        page_count: docPageCount,
+        rejection_reason: 'No extractable text (' + charsPerPage.toFixed(1) + ' chars/page) -- likely photo or image-only document',
+        low_relevance_pages: autoLowPages,
+      };
     } else {
-      const extractedText = doc.extracted_text || '';
-      if (!extractedText || extractedText.length < 200) {
-        throw new Error('classifyJobWorker: extracted_text too short or missing for ' + aws_document_id + ' (' + extractedText.length + ' chars)');
+      // Resolve the file_key -- shell records (no file_key) point to parts via original_document_id.
+      // Query GSI to find the first part and use its file_key instead.
+      let fileKey = doc.file_key;
+      let fileDoc = doc;
+      if (!fileKey) {
+        console.log('classifyJobWorker: no file_key on doc, querying for first part via GSI');
+        const partsResult = await dynamo.send(new QueryCommand({
+          TableName: TABLE,
+          IndexName: 'original_document_id-index',
+          KeyConditionExpression: 'original_document_id = :oid',
+          ExpressionAttributeValues: { ':oid': aws_document_id },
+          Limit: 1,
+        }));
+        const firstPart = partsResult.Items && partsResult.Items[0];
+        if (!firstPart || !firstPart.file_key) throw new Error('classify job failed: shell has no file_key and no parts found');
+        fileKey = firstPart.file_key;
+        fileDoc = firstPart;
+        console.log('classifyJobWorker: resolved to part file_key=' + fileKey);
       }
-      classifyResult = await runViPrepass(extractedText, aws_document_id);
+
+      // Fetch PDF from S3 -- try primary bucket first, fall back to legacy bucket
+      const CLASSIFY_FALLBACK_BUCKET = 'chartreview-pro-files-prod';
+      let pdfBase64;
+      for (const bucket of [...new Set([BUCKET, CLASSIFY_FALLBACK_BUCKET])]) {
+        try {
+          console.log('classifyJobWorker: fetching from bucket=' + bucket + ' key=' + fileKey);
+          const s3Object = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: fileKey }));
+          const chunks = [];
+          for await (const chunk of s3Object.Body) { chunks.push(chunk); }
+          pdfBase64 = Buffer.concat(chunks).toString('base64');
+          console.log('classifyJobWorker: fetched PDF from bucket=' + bucket);
+          break;
+        } catch (s3Err) {
+          if (s3Err.name === 'NoSuchKey' || s3Err.$metadata?.httpStatusCode === 404) {
+            console.log('classifyJobWorker: key not found in bucket=' + bucket + ', trying next');
+            continue;
+          }
+          throw s3Err;
+        }
+      }
+      if (!pdfBase64) throw new Error('classify job failed: The specified key does not exist in any bucket. key=' + fileKey);
+      classifyResult = await runBedrockClassify(pdfBase64, aws_document_id);
     }
 
     // Save classification to documents table
-    const isRejected = await saveViPrepassToDoc(aws_document_id, classifyResult, doc, page_offset);
+    const isRejected = await saveClassificationToDoc(aws_document_id, classifyResult, doc, page_offset);
 
     // Mark job complete with result summary
     await dynamo.send(new UpdateCommand({
@@ -1457,13 +1376,13 @@ const classifyJobQueueHandler = async (event) => {
   if (event.Records && event.Records[0] && event.Records[0].body) {
     const msg = JSON.parse(event.Records[0].body);
     if (msg.__classifyJob) {
-      await classifyJobWorker(msg.job_id, msg.aws_document_id, msg.org_id, msg.page_offset || 0, msg.sibling_parts || null);
+      await classifyJobWorker(msg.job_id, msg.aws_document_id, msg.org_id, msg.page_offset || 0);
       return;
     }
   }
   // Direct Lambda invoke fallback
   if (event.__classifyJob) {
-    await classifyJobWorker(event.job_id, event.aws_document_id, event.org_id, event.page_offset || 0, event.sibling_parts || null);
+    await classifyJobWorker(event.job_id, event.aws_document_id, event.org_id, event.page_offset || 0);
     return;
   }
   console.warn('classifyJobQueueHandler: no __classifyJob flag in event');
@@ -1480,7 +1399,7 @@ const classifyJobWorkerHandler = async (event) => {
     // SQS path
     payload = JSON.parse(event.Records[0].body);
   }
-  await classifyJobWorker(payload.job_id, payload.aws_document_id, payload.org_id, payload.page_offset || 0, payload.sibling_parts || null);
+  await classifyJobWorker(payload.job_id, payload.aws_document_id, payload.org_id, payload.page_offset || 0);
 };
 
 module.exports = {
