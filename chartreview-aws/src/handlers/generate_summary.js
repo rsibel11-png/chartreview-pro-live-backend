@@ -14,6 +14,7 @@ const { DynamoDBDocumentClient, GetCommand, UpdateCommand, PutCommand } = requir
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { randomUUID } = require('crypto');
+const { PDFDocument } = require('pdf-lib');
 const { validateApiKey } = require('./auth');
 
 const s3      = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
@@ -167,18 +168,57 @@ const httpResponse = (statusCode, body) => ({
   body: JSON.stringify(body),
 });
 
+// Fetch a PDF from S3 and slice it to only the requested pages (1-based).
+// Returns a Buffer of the new mini-PDF. Uses pdf-lib — pure JS, no native deps.
+const slicePdfPages = async (fileKey, pages) => {
+  const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
+  const chunks = [];
+  for await (const chunk of obj.Body) chunks.push(chunk);
+  const fullBuffer = Buffer.concat(chunks);
+
+  const srcDoc = await PDFDocument.load(fullBuffer, { ignoreEncryption: true });
+  const totalPages = srcDoc.getPageCount();
+
+  // Convert 1-based page numbers to 0-based indices, clamp to valid range
+  const indices = [...new Set(pages)]
+    .map(p => p - 1)
+    .filter(i => i >= 0 && i < totalPages)
+    .sort((a, b) => a - b);
+
+  if (!indices.length) {
+    console.warn(`slicePdfPages: no valid page indices for ${fileKey}, pages=${pages}`);
+    return fullBuffer; // fallback: return full PDF
+  }
+
+  const newDoc = await PDFDocument.create();
+  const copied = await newDoc.copyPagesFrom(srcDoc, indices);
+  copied.forEach(page => newDoc.addPage(page));
+
+  const slicedBytes = await newDoc.save();
+  console.log(`slicePdfPages: ${fileKey} sliced to pages [${pages.join(',')}] → ${indices.length} pages, ${slicedBytes.length} bytes`);
+  return Buffer.from(slicedBytes);
+};
+
 // ─── AWS swap #1: replaces InvokeLLM ─────────────────────────────────────────
 // Original: base44.integrations.Core.InvokeLLM({ prompt, file_urls, response_json_schema })
 // New: fetch each PDF from S3 as base64, send to Bedrock with same prompt + schema
 // regionOrder is optional — if not provided, we fetch usage from DynamoDB and sort
-const callBedrock = async (fileKeys, prompt, schema, regionOrder) => {
+// pageScope: optional array of 1-based page numbers — if provided, slices PDF before sending
+const callBedrock = async (fileKeys, prompt, schema, regionOrder, pageScope = null) => {
   // Build content array: one document block per PDF (mirrors file_urls behavior)
+  // If pageScope provided, slice each PDF to only those pages before sending —
+  // Claude gets a clean mini-PDF with no noise from other encounters.
   const contentBlocks = [];
   for (const fileKey of fileKeys) {
-    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
-    const chunks = [];
-    for await (const chunk of obj.Body) chunks.push(chunk);
-    const pdfBase64 = Buffer.concat(chunks).toString('base64');
+    const pdfBuffer = pageScope && pageScope.length > 0
+      ? await slicePdfPages(fileKey, pageScope)
+      : await (async () => {
+          const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
+          const chunks = [];
+          for await (const chunk of obj.Body) chunks.push(chunk);
+          return Buffer.concat(chunks);
+        })();
+    const pdfBase64 = pdfBuffer.toString('base64');
     contentBlocks.push({
       type: 'document',
       source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 },
@@ -433,14 +473,13 @@ const enforceOneC4 = (visitList) => {
   });
 };
 
-const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = [], pageScope = null) => {
+const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
   const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
   const multiDocNote = docCount > 1
     ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files and combine them into a single comprehensive summary. Do not stop after the first document.`
     : '';
-  const pageScopeNote = pageScope && pageScope.length > 0
-    ? `\n\nPAGE SCOPE: This document is a large multi-page record. Focus your extraction ONLY on pages ${pageScope.join(', ')}. These pages were identified by the pre-pass as containing the relevant clinical encounter(s). You may use adjacent pages for context only — extract clinical content from the scoped pages only.`
-    : '';
+  // pageScopeNote removed — PDF is now pre-sliced to the relevant pages before
+  // being sent to Claude, so no page-focus instruction is needed in the prompt.
   const checklistSection = knownVisitsChecklist.length > 0
     ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
       knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
@@ -607,7 +646,6 @@ Also extract:
 - Case number (should be consistent across documents)
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
-${pageScopeNote}
 ${checklistSection}
 ${skipPagesSection}`;
 };
@@ -792,12 +830,12 @@ const generateSummaryChunkWorker = async (event) => {
       : null;
     if (scopeWithBuffer) console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: page scope [${scopeWithBuffer.join(',')}]`);
     try {
-      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], scopeWithBuffer), fullSchema, regionOrder);
+      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), fullSchema, regionOrder, scopeWithBuffer);
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
-        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], scopeWithBuffer), simplifiedSchema, regionOrder);
+        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), simplifiedSchema, regionOrder, scopeWithBuffer);
         return result;
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
