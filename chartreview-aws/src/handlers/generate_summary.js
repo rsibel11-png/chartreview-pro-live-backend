@@ -1,3 +1,5 @@
+// Updated: 2026-05-15 — Fix 1: __consultation__ + __radiology__ dedup keys prevent same-day same-provider cross-doc merge
+// Updated: 2026-05-15 — Fix 2: EXCLUDED_PATTERNS += inpatient orders / COCSZ / inpatient/surgery entries
 // Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
@@ -376,7 +378,16 @@ const deduplicateVisits = (visits) => {
     const setting         = (visit.practice_setting || '').toLowerCase();
     const isOpReport      = /operative report|surgical report|operation report/i.test(setting);
     const isDischargeNote = /discharge\s+(report|summary|note)|progress\s+note.*discharge/i.test(setting);
-    const typeKey = isOpReport ? '__op__' : (isDischargeNote ? '__discharge__' : '');
+    // Consultations are always unique records — never merge with same-day inpatient orders
+    // even when signed by the same provider (e.g. Chan consult + Chan inpatient transfer order)
+    const isConsult       = /\bconsultation\b|\bconsult\b/i.test(setting);
+    // Each radiology report is a unique study — never merge two reports by same radiologist same day
+    const isRadiology     = /radiology|imaging\s+report|\bradiology\s+report\b|\bmri\b|\bct\b|\bx.?ray\b|\bxr\b|\bultrasound\b/i.test(setting);
+    let typeKey = '';
+    if (isOpReport)      typeKey = '__op__';
+    else if (isDischargeNote) typeKey = '__discharge__';
+    else if (isConsult)  typeKey = '__consult__';
+    else if (isRadiology) typeKey = `__radiology_${order.length}__`; // unique per study
     const key = typeKey ? `${dateKey}|${providerKey}|${typeKey}` : `${dateKey}|${providerKey}`;
     if (!groups.has(key)) { groups.set(key, []); order.push(key); }
     groups.get(key).push(visit);
@@ -407,6 +418,10 @@ const EXCLUDED_PATTERNS = [
   // Attending countersignature pages — "Operative Note" labels are EMR co-sign artifacts,
   // not separate clinical encounters. The real surgical record is "Operative Report".
   /\boperative\s+note\b(?!.*report)/i,
+  // Inpatient order entries (medication/telephone orders, not clinical notes)
+  /inpatient\s+orders?/i,
+  /\bcocsz\b.*inpatient/i,
+  /inpatient\s*\/\s*surgery(?!.*report|.*progress|.*discharge)/i,
 ];
 
 const isExcludedVisit = (visit) => {
