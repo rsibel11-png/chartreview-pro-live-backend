@@ -11,7 +11,7 @@ const { randomUUID } = require('crypto');
 const { validateApiKey } = require('./auth');
 
 const client   = new DynamoDBClient({});
-const dynamo   = DynamoDBDocumentClient.from(client);
+const dynamo   = DynamoDBDocumentClient.from(client, { marshallOptions: { removeUndefinedValues: true } });
 const s3       = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
 const textract = new TextractClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const bedrock  = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-1' });
