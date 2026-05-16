@@ -1025,6 +1025,7 @@ RULES:
 - Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
 - Each unique date + provider combination is a separate entry.
 - Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
+- ALWAYS include C-4 forms (Workers' Compensation Form C-4 / "Employee's Claim for Compensation and Report of Initial Treatment") as clinical encounters with visit_type "C-4 Form". These are mandatory clinical-legal documents. If you see anchor text "FORM C-4", "EMPLOYEE'S CLAIM FOR COMPENSATION", or similar WC claim form headers, you MUST include those pages.
 - CRITICAL: The HPI section often mentions the date of injury -- this is NOT the visit date. The visit date is ALWAYS in the document header or vitals table.
 - Do NOT include the date of injury as a visit date unless confirmed by a document header on that exact date.
 - CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
@@ -1147,6 +1148,47 @@ const saveViPrepassToDoc = async (aws_document_id, viResult, doc, pageOffset = 0
       pageClassifications.push({ page: actualPage, is_clinical: true,  encounter: pageToEncounter.get(actualPage), reason: '' });
     } else {
       pageClassifications.push({ page: actualPage, is_clinical: false, encounter: '', reason: 'Not part of any identified clinical encounter' });
+    }
+  }
+
+  // C-4 PROTECTION: Force any page containing C-4 anchor text to is_clinical=true
+  // Mirrors the protection logic in generate_summary.js.
+  // The VI pre-pass recognizes C-4 forms but sometimes fails to assign them pages --
+  // this fallback scans the extracted_text for C-4 anchors and rescues those pages.
+  const C4_ANCHORS = [
+    "FORM C-4",
+    "EMPLOYEE'S CLAIM FOR COMPENSATION",
+    "EMPLOYEE\'S CLAIM FOR COMPENSATION",
+    "C-4 FORM",
+    "EMPLOYER'S REPORT",
+    "WC-1 FORM",
+  ];
+  const extractedTextForC4 = doc.extracted_text || '';
+  if (C4_ANCHORS.some(anchor => extractedTextForC4.toUpperCase().includes(anchor.toUpperCase()))) {
+    // Find which pages contain C-4 anchor text using the --- PAGE N --- markers
+    const pageTextMap = new Map();
+    const pageChunks = extractedTextForC4.split(/--- PAGE (\d+) ---/);
+    for (let i = 1; i < pageChunks.length; i += 2) {
+      const pageNum = parseInt(pageChunks[i], 10);
+      const pageText = pageChunks[i + 1] || '';
+      pageTextMap.set(pageNum, pageText);
+    }
+    let c4PagesRescued = 0;
+    for (const [pageNum, pageText] of pageTextMap) {
+      if (C4_ANCHORS.some(anchor => pageText.toUpperCase().includes(anchor.toUpperCase()))) {
+        const actualPage = pageOffset > 0 ? pageNum + pageOffset : pageNum;
+        const existing = pageClassifications.find(pc => pc.page === actualPage);
+        if (existing && !existing.is_clinical) {
+          existing.is_clinical = true;
+          existing.encounter = 'C-4 Form -- Workers\' Compensation';
+          existing.reason = '';
+          c4PagesRescued++;
+          console.log('C-4 protection: rescued page', actualPage, 'as clinical');
+        }
+      }
+    }
+    if (c4PagesRescued > 0) {
+      console.log('C-4 protection: rescued', c4PagesRescued, 'pages as clinical for', aws_document_id);
     }
   }
 
