@@ -930,86 +930,48 @@ const generateSummaryWorker = async (event) => {
         file_key: fileKey,
         file_size: doc.file_size || 0,
         page_classifications: partClassif,
-        extracted_text: doc.extracted_text || '',  // for VI pre-pass (text path)
+        extracted_text: doc.extracted_text || '',  // kept for fallback reference
+        encounter_index: Array.isArray(doc.encounter_index) ? doc.encounter_index : [],  // from classify VI pre-pass
       });
     }
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
 
-    // ── 3. VI pre-pass (VI_CONCURRENCY=4) ────────────────────────────────────
+    // ── 3. Read encounter_index from DynamoDB (written by classifyJobWorker VI pre-pass) ────
+    // No Bedrock call needed here — classify already ran VI pre-pass and stored results.
+    // encounter_index = [{ date, provider, facility, visit_type, pages, source_doc_id? }]
     let knownVisits = [];
     let patientName = patient_name;
     let caseNumber  = '';
     try {
-      await setJobStatus(job_id, 'Building visit checklist (pre-pass)...');
-      const VI_CONCURRENCY = 4;
-      const viResults = new Array(allParts.length).fill(null);
-      const viSchema = {
-        type: 'object',
-        properties: {
-          patient_name: { type: 'string' },
-          visits: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                date:             { type: 'string' },
-                provider:         { type: 'string' },
-                facility:         { type: 'string' },
-                visit_type:       { type: 'string' },
-                source_doc_id:    { type: 'string' },
-                source_part_label:{ type: 'string' },
-                pages:            { type: 'array', items: { type: 'integer' }, description: 'Page numbers (1-based) where this encounter appears' },
-              },
-            },
-          },
-        },
+      await setJobStatus(job_id, 'Loading pre-pass encounter index...');
+      const normalizeDate = (raw) => {
+        let d = (raw || '').trim();
+        if (!d) return '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+        const mmddyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (mmddyyyy) return `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
+        const parsed = new Date(d);
+        return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
       };
-      for (let vi = 0; vi < allParts.length; vi += VI_CONCURRENCY) {
-        const viChunk = allParts.slice(vi, vi + VI_CONCURRENCY);
-        await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
-          const partIdx = vi + chunkIdx;
-          try {
-            // Use Textract extracted_text (with page markers) if available — free, no vision tokens.
-            // Fall back to PDF vision call if extracted_text is missing or too short.
-            const hasText = viPart.extracted_text && viPart.extracted_text.length > 200;
-            const viResult = hasText
-              ? await callBedrockText(viPart.extracted_text, buildVisitIndexPrompt(), viSchema, regionOrder)
-              : await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema, regionOrder);
-            console.log(`VI: ${viPart.label} using ${hasText ? 'Textract text' : 'PDF vision'} (${(viPart.extracted_text || '').length} chars)`);
-            if (Array.isArray(viResult.visits)) {
-              viResults[partIdx] = viResult.visits
-                .map(v => {
-                  // Normalize date to YYYY-MM-DD — try common formats before discarding
-                  let d = (v.date || '').trim();
-                  if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) {
-                    // Try MM/DD/YYYY
-                    const mmddyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-                    if (mmddyyyy) d = `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
-                    // Try Month DD, YYYY (e.g. "July 16, 2024")
-                    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
-                      const parsed = new Date(d);
-                      if (!isNaN(parsed.getTime())) {
-                        d = parsed.toISOString().slice(0, 10);
-                      } else {
-                        d = ''; // truly unparseable — drop date but keep visit
-                      }
-                    }
-                  }
-                  const pages = Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [];
-                  return { ...v, date: d, source_doc_id: viPart.id, source_part_label: viPart.label, pages };
-                })
-                .filter(v => v.date); // only keep visits with a resolved date
-            }
-            console.log(`VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
-          } catch (e) {
-            console.warn(`VI pre-pass failed for ${viPart.id}: ${e.message}`);
-          }
-        }));
+
+      for (const part of allParts) {
+        const ei = Array.isArray(part.encounter_index) ? part.encounter_index : [];
+        if (ei.length === 0) {
+          console.log(`coordinator: part ${part.label} has no encounter_index — will use full-document fallback`);
+          continue;
+        }
+        const partVisits = ei.map(v => ({
+          ...v,
+          date: normalizeDate(v.date),
+          source_doc_id: part.id,
+          source_part_label: part.label,
+          pages: Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [],
+        })).filter(v => v.date);
+        knownVisits = knownVisits.concat(partVisits);
+        console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits from encounter_index`);
       }
-      for (const tagged of viResults) {
-        if (tagged) knownVisits = knownVisits.concat(tagged);
-      }
-      // Deduplicate by date+provider
+
+      // Deduplicate by date+provider across all parts
       const viSeen = new Set();
       knownVisits = knownVisits.filter(v => {
         const k = `${v.date}|${(v.provider || '').toLowerCase()}`;
@@ -1020,9 +982,9 @@ const generateSummaryWorker = async (event) => {
       knownVisits = knownVisits.filter(v =>
         !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
       );
-      console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
+      console.log(`coordinator: encounter_index loaded — ${knownVisits.length} unique visits across all parts`);
     } catch (viErr) {
-      console.warn('VI pre-pass failed (non-fatal):', viErr.message);
+      console.warn('coordinator: encounter_index read failed (non-fatal):', viErr.message);
       knownVisits = [];
     }
 
@@ -1322,6 +1284,7 @@ const generateSummaryWorker = async (event) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // BUILD VISIT INDEX — reuses all existing infrastructure, stops after VI pre-pass
+// Updated: 2026-05-16 — VI pre-pass moved to classify step; coordinator reads encounter_index from DynamoDB
 // Updated: 2026-04-28 — replaces standalone build_visit_index.js entirely
 // ═══════════════════════════════════════════════════════════════════════════════
 
