@@ -1030,7 +1030,17 @@ RULES:
 - CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
 - Keep it fast and simple -- no clinical content needed, just date/provider/facility/type.
 - If a date appears in a document header but no provider is identifiable, still include the entry with provider as "Not Documented".
-- For each encounter, return the pages field: a list of 1-based page numbers where that encounter's content appears. The document text contains explicit page boundary markers in the format '--- PAGE N ---'. Use these markers to determine which page numbers each encounter spans (e.g. a consult note that begins after '--- PAGE 12 ---' and ends before '--- PAGE 15 ---' -> pages: [12,13,14]). If you cannot determine exact pages, return an empty array [].
+- For each encounter, return the pages field: a list of 1-based page numbers where that encounter's PHYSICIAN/PROVIDER narrative appears. The document text contains explicit page boundary markers in the format '--- PAGE N ---'. Use these markers.
+  CRITICAL PAGE RULE: Only include pages that contain the actual physician/provider authored content for this encounter (HPI, exam, assessment, plan, operative note, radiology report, discharge summary narrative). Do NOT include pages that merely fall between the start and end of an encounter — each page must be individually verified to contain physician-authored clinical content.
+  Pages to EXCLUDE from the pages array even if they appear within an encounter's date range:
+    - Nursing assessment/flowsheet pages
+    - Medication administration records (MAR)
+    - Order set pages (VTE prophylaxis, diet orders, lab orders)
+    - Vital signs flowsheets
+    - Patient safety checklists
+    - Intake/output logs
+  A typical office visit note = 1-3 pages. A typical ED physician note = 1-4 pages. An operative report = 1-3 pages. A discharge summary = 2-5 pages. If your page count for a single encounter exceeds these ranges, re-examine each page.
+  If you cannot determine exact pages, return an empty array [].
 
 HOSPITAL RADIOLOGY REPORTS -- CRITICAL:
 Large hospital records often contain embedded radiology reports formatted with a header block like:
