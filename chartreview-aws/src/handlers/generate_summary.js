@@ -1,4 +1,3 @@
-// Updated: 2026-05-15 — Fix 1: pre/post-op radiology sort tiers; Fix 2: rule 4a self-check + C-4 exception; Fix 3: C-4 3-condition ID + enforceOneC4 convert; Fix 4: consultation facility naming
 // Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
@@ -452,30 +451,14 @@ const sanitizeVisits = (visits, patientName) => {
     });
 };
 
-// Updated: 2026-05-15 — convert extra C-4s to office visits instead of dropping them
 const enforceOneC4 = (visitList) => {
-  const isC4 = v => (v.practice_setting || '').toLowerCase().includes('c-4');
-  const c4s = visitList.filter(isC4);
+  const c4s = visitList.filter(v => (v.practice_setting || '').toLowerCase().includes('c-4'));
   if (c4s.length <= 1) return visitList;
-  // Keep the earliest C-4; pick richest content among ties
-  const sorted = [...c4s].sort((a, b) => {
-    const dateCmp = parseDateSortKey(a.visit_date).localeCompare(parseDateSortKey(b.visit_date));
-    if (dateCmp !== 0) return dateCmp;
-    const aLen = Object.values(a).join('').length;
-    const bLen = Object.values(b).join('').length;
-    return bLen - aLen; // most content wins among same-date ties
-  });
-  const keep = sorted[0];
-  return visitList.map(v => {
-    if (!isC4(v) || v === keep) return v;
-    // Convert extra C-4 to a plain office visit so no data is lost
-    return {
-      ...v,
-      practice_setting: (v.practice_setting || '')
-        .replace(/c-4 workers'? compensation report/i, '')
-        .replace(/\(c-4 report\)/i, '')
-        .trim() || 'Office Visit',
-    };
+  const sorted = [...c4s].sort((a, b) => (a.visit_date || '').localeCompare(b.visit_date || ''));
+  const keepId = sorted[0];
+  return visitList.filter(v => {
+    if ((v.practice_setting || '').toLowerCase().includes('c-4')) return v === keepId;
+    return true;
   });
 };
 
@@ -552,12 +535,7 @@ D) AMBULANCE / EMS REPORTS (pre-hospital care records):
    - visit_date: the date of the incident/transport
 
 E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as a C-4 if ALL THREE of the following conditions are true:
-    1. The actual text of the C-4 form is physically present in this document — you must see the WCB Form C-4 header, title block, or form fields in the text itself (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report", form field labels like "Date of Injury", "Last Day Worked", "Supervisor Name" in a structured form layout). Do NOT infer or assume a C-4 exists based on the visit being workers' comp related.
-    2. The visit date is at or near the EARLIEST date in the entire document set — the C-4 is the intake form completed at the FIRST visit for the industrial accident. There is only ONE C-4 per case.
-    3. Do NOT label any follow-up visits, post-operative visits, or subsequent office visits as C-4, even if those notes reference the workers' comp claim or injury. Only the initial treating visit generates a C-4 form.
-    If you find C-4 form text at multiple dates, include ONLY the one with the earliest date and treat all others as regular office visits.
-    If no actual C-4 form text is found anywhere in the documents, do not create a C-4 entry at all.
+    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official WCB Form C-4 header, title block, or reference number (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or injury reports as C-4 unless the actual form is present.
 
     For ACTUAL C-4 forms only:
     - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
@@ -641,13 +619,12 @@ CRITICAL EXTRACTION RULES:
 (2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists anywhere in the text for that encounter. A visit with only date/provider and empty content fields is almost always an error — go back and fill it in.
 (3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
 (4) NEVER hallucinate — only use information explicitly in the text.
-(4a) STRICT DOCUMENT ISOLATION: Each visit entry must ONLY contain information explicitly written in THAT provider's document. Do NOT carry over, infer, or borrow content from other documents in the batch — even if those documents describe the same patient encounter. If a field says "see patient's chart", "see above", "per nursing notes", or similar deferral language, return an EMPTY STRING for that field. Do NOT fill it in from another document. SELF-CHECK before finalizing each visit entry: if the HPI you wrote (a) names a provider who is NOT the author of this document, (b) references a patient transfer or admission that this document does not itself describe, or (c) contains clinical details that do not appear anywhere in this document's own text — delete that content. These are signals you are blending documents. EXCEPTION — C-4 FORMS ONLY: If the C-4 form is handwritten or illegible for the rendering_provider name or impression_diagnosis fields only, you MAY look at other documents in the batch dated the same day to fill those two fields. You may NOT borrow hpi_summary, physical_exam_findings, or treatment_plan from another document for a C-4 entry. All other non-C-4 visits remain under strict isolation with no exceptions.
+(4a) STRICT DOCUMENT ISOLATION: Each visit entry must ONLY contain information explicitly written in THAT provider's document. Do NOT carry over, infer, or borrow content from other documents in the batch — even if those documents describe the same patient encounter. If a field says "see patient's chart", "see above", "per nursing notes", or similar deferral language, return an EMPTY STRING for that field. Do NOT fill it in from another document.
 (5) Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
 (6) If information is truly not available, return an empty string "".
 (7) The icd10_codes field must always be an array of strings (can be empty []).
 (8) PHYSICAL/OCCUPATIONAL THERAPY VISITS: Extract EVERY individual PT/OT session as its own separate record. Do NOT collapse multiple PT sessions into one. Do NOT summarize a series of visits as a single entry. Each visit date = one record. PT notes are often brief one-liners (date, therapist initials, modalities, exercise sets) -- each one is a separate visit and must be extracted individually. If a page contains 10 PT visit dates, return 10 separate visit records.
 (9) For PT visits: practice_setting should be the full facility name (e.g. "Dignity Health Physical Therapy", "Nevada Rehabilitation Institute"). Do NOT abbreviate to just "PT" or "Physical Therapy". Consistent facility naming across all records is critical.
-(10) CONSULTATION REPORTS: The practice_setting for a consultation must be "[Facility Name] – Consultation Report" — where [Facility Name] is extracted from the document's own header or letterhead (e.g. "SUNRISE HOSPITAL AND MEDICAL CENTER" in the header → "Sunrise Hospital and Medical Center – Consultation Report"). Do NOT use just "Consultation Report" as the practice_setting — always include the facility. If the document header names no facility, use the facility referenced in the body of the note.
 
 Return ALL entries found across ALL documents as separate entries in the visits array.
 
@@ -1204,39 +1181,21 @@ const parseDateSortKey = (d) => {
   return `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
 };
 
-// Updated: 2026-05-15 — split radiology into pre-op (tier 2) and post-op (tier 5)
-// Post-op radiology is detected by content keywords in imaging_findings or hpi_summary.
-const POST_OP_RADIOLOGY_KEYWORDS = /\bstatus\s+post\b|\bs\/p\b|\borif\b|\bhardware\b|\blocking\s+plate\b|\bimplant\b|\barthroplasty\b|\bpost.?operative\s+change|\bpost.?op\b|\binternally\s+fixed\b|\bscrews?\s+in\s+place\b|\bplate\s+in\s+place\b/i;
-
-const isRadiologyVisit = (visit) =>
-  /radiology|imaging\s+report|\bx.?ray\b report|\bxr\b report|\bmri\b report|\bct\b report|\bultrasound\b report/i.test(visit.practice_setting || '');
-
-const isPostOpRadiology = (visit) => {
-  const haystack = ((visit.imaging_findings || '') + ' ' + (visit.hpi_summary || '')).toLowerCase();
-  return POST_OP_RADIOLOGY_KEYWORDS.test(haystack);
-};
-
-// Tier 0: C-4 / workers comp
-// Tier 1: ER / urgent care
-// Tier 2: Pre-op radiology
-// Tier 3: Consultation
-// Tier 4: Operative report / surgical
-// Tier 5: Post-op radiology
-// Tier 6: Progress note / hospitalist
-// Tier 7: Discharge
-// Tier 8: H&P (inpatient — typically same-day as ER, sorts after)
-// Tier 9: Unknown
+const CLINICAL_DOC_ORDER = [
+  /c-4|workers.*comp/i,
+  /emergency\s+department|urgent\s+care/i,
+  /history\s*(&|and)\s*physical|\bh&p\b/i,
+  /consultation/i,
+  /operative\s+report|surgical\s+report/i,
+  /progress\s+note|hospitalist/i,
+  /discharge/i,
+];
 const clinicalDocRank = (visit) => {
-  const s = (visit.practice_setting || '');
-  if (/c-4|workers.*comp/i.test(s))                              return 0;
-  if (/emergency\s+department|urgent\s+care/i.test(s))          return 1;
-  if (isRadiologyVisit(visit))                                    return isPostOpRadiology(visit) ? 5 : 2;
-  if (/consultation/i.test(s))                                   return 3;
-  if (/operative\s+report|surgical\s+report/i.test(s))          return 4;
-  if (/progress\s+note|hospitalist/i.test(s))                    return 6;
-  if (/discharge/i.test(s))                                      return 7;
-  if (/history\s*(&|and)\s*physical|\bh&p\b/i.test(s))        return 8;
-  return 9;
+  const s = (visit.practice_setting || '').toLowerCase();
+  for (let i = 0; i < CLINICAL_DOC_ORDER.length; i++) {
+    if (CLINICAL_DOC_ORDER[i].test(s)) return i;
+  }
+  return CLINICAL_DOC_ORDER.length; // unknown doc type goes last
 };
 
 const visitSortComparator = (a, b) => {
