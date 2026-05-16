@@ -1035,10 +1035,14 @@ RULES:
   Pages to EXCLUDE from the pages array even if they appear within an encounter's date range:
     - Nursing assessment/flowsheet pages
     - Medication administration records (MAR)
+    - Order audit trail pages
+    - Pharmacy log/dispensing record pages
     - Order set pages (VTE prophylaxis, diet orders, lab orders)
     - Vital signs flowsheets
     - Patient safety checklists
     - Intake/output logs
+    - Discharge planning/coordination pages
+    - Insurance/billing documentation
   A typical office visit note = 1-3 pages. A typical ED physician note = 1-4 pages. An operative report = 1-3 pages. A discharge summary = 2-5 pages. If your page count for a single encounter exceeds these ranges, re-examine each page.
   If you cannot determine exact pages, return an empty array [].
 
