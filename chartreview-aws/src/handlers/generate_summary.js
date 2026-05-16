@@ -1,3 +1,5 @@
+// Updated: 2026-05-15 — Fix 4: correct buildPrompt call site args (were shifted since BATCH_SIZE changed to 1)
+//   rawChunkText='', docCount=1, chunkLabel=batchLabel, knownVisitsChecklist=knownVisitsChecklist
 // Updated: 2026-05-15 — Fix 3: temperature: 0 in bedrockPayload for deterministic extraction
 // Updated: 2026-05-15 — Fix 1: __consultation__ + __radiology__ dedup keys prevent same-day same-provider cross-doc merge
 // Updated: 2026-05-15 — Fix 2: EXCLUDED_PATTERNS += inpatient orders / inpatient/surgery entries
@@ -818,12 +820,12 @@ const generateSummaryChunkWorker = async (event) => {
     const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
     try {
       const ptCtx = batch.length === 1 ? (batch[0].pt_session_context || '') : '';
-      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], ptCtx), fullSchema, regionOrder);
+      const result = await callBedrock(fileKeys, buildPrompt('', 1, batchLabel, knownVisitsChecklist, [], ptCtx), fullSchema, regionOrder);
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
-        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], ptCtx), simplifiedSchema, regionOrder);
+        const result = await callBedrock(fileKeys, buildPrompt('', 1, batchLabel, knownVisitsChecklist, [], ptCtx), simplifiedSchema, regionOrder);
         return result;
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
