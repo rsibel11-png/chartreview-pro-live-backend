@@ -1097,13 +1097,18 @@ const saveViPrepassToDoc = async (aws_document_id, viResult, doc, pageOffset = 0
 
   // Build page -> encounter label map
   const pageToEncounter = new Map();
+  let totalPagesTagged = 0;
   for (const v of visits) {
     const label = [v.visit_type, v.provider, v.date].filter(Boolean).join(' -- ');
-    for (const p of (v.pages || [])) {
+    const vPages = Array.isArray(v.pages) ? v.pages.filter(p => typeof p === 'number' && p > 0) : [];
+    console.log('saveViPrepassToDoc visit:', label, '| pages:', JSON.stringify(vPages));
+    for (const p of vPages) {
       const actualPage = pageOffset > 0 ? p + pageOffset : p;
       pageToEncounter.set(actualPage, label);
+      totalPagesTagged++;
     }
   }
+  console.log('saveViPrepassToDoc: pageToEncounter has', pageToEncounter.size, 'pages tagged from', visits.length, 'visits, pageOffset=', pageOffset, 'pageCount=', pageCount);
 
   // Build page_classifications for every page in the document
   const pageClassifications = [];
