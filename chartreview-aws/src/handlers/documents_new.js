@@ -1033,12 +1033,15 @@ RULES:
 - For each encounter, return the pages field: a list of 1-based page numbers where that encounter's PHYSICIAN/PROVIDER narrative appears. The document text contains explicit page boundary markers in the format '--- PAGE N ---'. Use these markers.
   CRITICAL PAGE RULE: Only include pages that contain the actual physician/provider authored content for this encounter (HPI, exam, assessment, plan, operative note, radiology report, discharge summary narrative). Do NOT include pages that merely fall between the start and end of an encounter — each page must be individually verified to contain physician-authored clinical content.
   PROTECTED PAGE TYPES — Always mark these as CLINICAL even if they contain structured/formatted data:
-    - ED Discharge Summary pages where a physician (MD/DO/PA/NP) is listed as the primary author or ED Physician at the top
+    - ED Discharge Summary pages where a physician (MD/DO/PA/NP) is listed as the primary author or ED Physician at the top (e.g. "ED Physician: Tall, Samantha M MD")
     - Emergency physician notes (HPI, assessment, plan authored by MD/DO)
-    - Discharge summaries with physician narrative
+    - Discharge summaries with physician narrative content (not just blank templates)
     - Radiology report pages with physician-interpreted findings
     - Operative/anesthesia notes authored by a physician or CRNA
+    - Physician-signed discharge instructions that include clinical content (weight-bearing status, wound care, activity restrictions, follow-up plan) — these are authored by the treating MD, not nursing
+    - Discharge medication lists with physician signature (prescribed medications at discharge)
     If a page has BOTH physician-authored content AND nursing-style structured fields, classify it as CLINICAL.
+    If a page is a BLANK template or form with no clinical content filled in, classify it as NON-CLINICAL.
 
   Pages to EXCLUDE from the pages array even if they appear within an encounter's date range:
     - Nursing assessment/flowsheet pages (authored only by RN/nursing staff with no physician narrative)
