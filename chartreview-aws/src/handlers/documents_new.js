@@ -1270,6 +1270,9 @@ const classifyStartHandler = async (event) => {
 
     const requestBody = JSON.parse(event.body || '{}');
     const page_offset = typeof requestBody.page_offset === 'number' ? requestBody.page_offset : 0;
+    // sibling_parts: array of { aws_document_id, part_index, page_count } for ALL parts of this document
+    // When provided, the worker concatenates all parts and runs ONE VI pre-pass across the full document
+    const sibling_parts = Array.isArray(requestBody.sibling_parts) ? requestBody.sibling_parts : null;
 
     // Write job record
     const job_id = randomUUID();
@@ -1288,16 +1291,17 @@ const classifyStartHandler = async (event) => {
       },
     }));
 
-    // Clear relevance_assessed so UI knows it is being re-processed
-    await dynamo.send(new UpdateCommand({
+    // Clear relevance_assessed on ALL sibling parts so UI knows they are being re-processed
+    const docIdsToReset = sibling_parts ? sibling_parts.map(s => s.aws_document_id) : [aws_document_id];
+    await Promise.all(docIdsToReset.map(did => dynamo.send(new UpdateCommand({
       TableName: TABLE,
-      Key: { aws_document_id },
+      Key: { aws_document_id: did },
       UpdateExpression: 'SET relevance_assessed = :ra, updated_at = :now',
       ExpressionAttributeValues: { ':ra': false, ':now': now },
-    }));
+    }))));
 
     // Fire classifyWorker async
-    const workerPayload = JSON.stringify({ __classifyJob: true, job_id, aws_document_id, org_id: orgId, page_offset });
+    const workerPayload = JSON.stringify({ __classifyJob: true, job_id, aws_document_id, org_id: orgId, page_offset, sibling_parts });
     if (process.env.CLASSIFY_QUEUE_URL) {
       await sqs.send(new SendMessageCommand({
         QueueUrl: process.env.CLASSIFY_QUEUE_URL,
@@ -1323,8 +1327,8 @@ const classifyStartHandler = async (event) => {
 // --- CLASSIFY JOB WORKER (async, no HTTP timeout) ---------------------------
 // Triggered by SQS classifyJobQueue or direct Lambda invoke.
 // Does the full Bedrock Vision classification pass and writes results.
-const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 0) => {
-  console.log('classifyJobWorker started: job_id=' + job_id + ' doc=' + aws_document_id + ' pageOffset=' + page_offset);
+const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 0, sibling_parts = null) => {
+  console.log('classifyJobWorker started: job_id=' + job_id + ' doc=' + aws_document_id + ' pageOffset=' + page_offset + ' siblings=' + (sibling_parts ? sibling_parts.length : 0));
   const now = () => new Date().toISOString();
 
   // Mark job running
@@ -1337,11 +1341,63 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
   }));
 
   try {
+    // --- MULTI-PART FULL-DOCUMENT VI PRE-PASS ---
+    // When sibling_parts is provided, fetch ALL parts, concatenate their extracted_text
+    // in part_index order, and run ONE VI pre-pass across the entire document.
+    // This matches the original summary-time VI pre-pass behavior and gives the model
+    // full document context -- eliminating per-chunk isolation and non-determinism.
+    if (sibling_parts && sibling_parts.length > 1) {
+      console.log('classifyJobWorker: multi-part mode -- fetching', sibling_parts.length, 'parts');
+
+      // Fetch all parts sorted by part_index
+      const sortedParts = [...sibling_parts].sort((a, b) => (a.part_index || 0) - (b.part_index || 0));
+      const partDocs = await Promise.all(sortedParts.map(async (s) => {
+        const r = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id: s.aws_document_id } }));
+        return { ...s, doc: r.Item };
+      }));
+
+      // Concatenate extracted_text in order -- PAGE N markers are already globally numbered
+      const fullText = partDocs.map(p => p.doc?.extracted_text || '').join('
+');
+      console.log('classifyJobWorker: concatenated text length=' + fullText.length);
+
+      if (fullText.length < 200) {
+        throw new Error('classifyJobWorker: concatenated extracted_text too short (' + fullText.length + ' chars)');
+      }
+
+      // ONE Bedrock call across full document
+      const classifyResult = await runViPrepass(fullText, aws_document_id);
+
+      // Write results back to EACH part's DynamoDB record
+      let anyRejected = true;
+      for (const p of partDocs) {
+        if (!p.doc) continue;
+        const partRejected = await saveViPrepassToDoc(p.aws_document_id, classifyResult, p.doc, 0);
+        if (!partRejected) anyRejected = false;
+      }
+
+      // Mark job complete
+      await dynamo.send(new UpdateCommand({
+        TableName: JOBS_TABLE,
+        Key: { job_id },
+        UpdateExpression: 'SET #s = :s, #r = :r, updated_at = :now',
+        ExpressionAttributeNames: { '#s': 'status', '#r': 'result' },
+        ExpressionAttributeValues: {
+          ':s': 'complete',
+          ':r': { aws_document_id, is_rejected: anyRejected, multi_part: true, part_count: sortedParts.length },
+          ':now': now(),
+        },
+      }));
+      console.log('classifyJobWorker multi-part complete: job_id=' + job_id);
+      return;
+    }
+
+    // --- SINGLE-PART MODE (fallback for single-part documents) ---
     const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     const doc = docResult.Item;
     if (!doc) throw new Error('Document not found: ' + aws_document_id);
 
-    // Text-density check (same as processWorker)
+    // Text-density check
     const SPARSE_CHARS_PER_PAGE = 30;
     const extractedTextLen = (doc.extracted_text || '').length;
     const docPageCount = doc.page_count || 1;
@@ -1350,15 +1406,8 @@ const classifyJobWorker = async (job_id, aws_document_id, org_id, page_offset = 
     let classifyResult;
     if (charsPerPage < SPARSE_CHARS_PER_PAGE && extractedTextLen < 500) {
       console.log('classifyJobWorker: sparse doc, auto-rejecting without Bedrock');
-      const autoLowPages = Array.from({ length: docPageCount }, (_, i) => ({
-        page_number: i + 1 + page_offset,
-        reason: 'photo/image-only page (no extractable text)',
-      }));
-      // Sparse/image-only doc -- no encounters identified
       classifyResult = { visits: [] };
     } else {
-      // VI pre-pass uses extracted_text from DynamoDB (Textract output with --- PAGE N --- markers).
-      // No S3 PDF fetch needed -- pure text Bedrock call.
       const extractedText = doc.extracted_text || '';
       if (!extractedText || extractedText.length < 200) {
         throw new Error('classifyJobWorker: extracted_text too short or missing for ' + aws_document_id + ' (' + extractedText.length + ' chars)');
@@ -1409,13 +1458,13 @@ const classifyJobQueueHandler = async (event) => {
   if (event.Records && event.Records[0] && event.Records[0].body) {
     const msg = JSON.parse(event.Records[0].body);
     if (msg.__classifyJob) {
-      await classifyJobWorker(msg.job_id, msg.aws_document_id, msg.org_id, msg.page_offset || 0);
+      await classifyJobWorker(msg.job_id, msg.aws_document_id, msg.org_id, msg.page_offset || 0, msg.sibling_parts || null);
       return;
     }
   }
   // Direct Lambda invoke fallback
   if (event.__classifyJob) {
-    await classifyJobWorker(event.job_id, event.aws_document_id, event.org_id, event.page_offset || 0);
+    await classifyJobWorker(event.job_id, event.aws_document_id, event.org_id, event.page_offset || 0, event.sibling_parts || null);
     return;
   }
   console.warn('classifyJobQueueHandler: no __classifyJob flag in event');
@@ -1432,7 +1481,7 @@ const classifyJobWorkerHandler = async (event) => {
     // SQS path
     payload = JSON.parse(event.Records[0].body);
   }
-  await classifyJobWorker(payload.job_id, payload.aws_document_id, payload.org_id, payload.page_offset || 0);
+  await classifyJobWorker(payload.job_id, payload.aws_document_id, payload.org_id, payload.page_offset || 0, payload.sibling_parts || null);
 };
 
 module.exports = {
