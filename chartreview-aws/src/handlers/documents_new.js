@@ -1036,7 +1036,6 @@ RULES:
     - ED Discharge Summary pages where a physician (MD/DO/PA/NP) is listed as the primary author or ED Physician at the top
     - Emergency physician notes (HPI, assessment, plan authored by MD/DO)
     - Discharge summaries with physician narrative
-    - Lab results pages (CBC, BMP, CMP, coagulation, blood bank) — even though formatted as tables, these are clinical data
     - Radiology report pages with physician-interpreted findings
     - Operative/anesthesia notes authored by a physician or CRNA
     If a page has BOTH physician-authored content AND nursing-style structured fields, classify it as CLINICAL.
@@ -1051,6 +1050,7 @@ RULES:
     - Patient safety checklists
     - Intake/output logs
     - Discharge planning/coordination pages authored only by nurses or case managers
+    - Lab results pages (CBC, BMP, CMP, coagulation, blood bank results in tabular format)
     - Insurance/billing/administrative correspondence
     - Pre-op nursing documentation (safety checklists, universal protocol by RN)
     - PACU nursing assessments and vital sign flowsheets
