@@ -539,19 +539,25 @@ D) AMBULANCE / EMS REPORTS (pre-hospital care records):
    - visit_date: the date of the incident/transport
 
 E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official WCB Form C-4 header, title block, or reference number (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or injury reports as C-4 unless the actual form is present.
+    STRICT IDENTIFICATION: Only treat as a C-4 if ALL of the following are true:
+    1. The actual text of the C-4 form is physically present in the document you are reading — you must see the WCB Form C-4 header, title block, or form fields in the text itself (e.g., "Form C-4", "EMPLOYEE'S CLAIM FOR COMPENSATION", "Workers' Compensation Board", "WCB Report", form field labels like "Date of Injury", "Last Day Worked", "Supervisor Name" in a structured form layout). Do NOT infer or assume a C-4 exists based on the visit being workers' comp related.
+    2. The visit date is at or near the EARLIEST date in the entire document set — the C-4 is the intake form completed at the FIRST visit for the industrial accident. There is only ONE C-4 per case. It will typically be found embedded within the initial ER or first office visit records, not in follow-up notes.
+    3. Do NOT label any follow-up visits, post-operative visits, or subsequent office visits as C-4, even if those notes reference the workers' comp claim or injury. Only the initial treating visit generates a C-4 form.
 
-    For ACTUAL C-4 forms only:
+    If you find what appears to be C-4 form text at multiple dates, include ONLY the one with the earliest date and treat all others as regular office visits.
+    If no actual C-4 form text is found anywhere in the documents, do not create a C-4 entry at all.
+
+    For the ONE C-4 entry:
     - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
     - practice_setting: "C-4 Workers' Compensation Report"
     - impression_diagnosis: diagnosis only — ICD codes if present, otherwise the written diagnosis
-    - visit_date: the date the form was completed or the examination date — this is CRITICAL to extract even if the rest of the form is illegible
+    - visit_date: the date the form was completed or the examination date — look in the BOTTOM provider-completed section of the form for the service date. This is CRITICAL to extract even if the rest of the form is illegible.
     - hpi_summary: leave empty
     - chief_complaint: leave empty
     - physical_exam_findings: leave empty
     - treatment_plan: leave empty
-    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set, use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields. Explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit").
-    - ORDERING: The C-4 entry must use the same visit_date as the corresponding office visit so it appears together in chronological order. In the visits array, place the C-4 entry BEFORE the regular office visit entry of the same date.
+    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set, use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields. The provider name on a C-4 is often a cursive signature — cross-reference the same-date ED note or office visit for the printed provider name. Explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit").
+    - ORDERING: Place the C-4 entry BEFORE the regular office visit entry of the same date.
 
 DEDUPLICATION RULE - Physician Progress Reports vs. Office Visits:
 If the same date has BOTH a physician progress report AND an office visit from the SAME provider, IGNORE the physician progress report and ONLY include the office visit. The office visit record contains the actual clinical information, while the progress report is typically a summary/administrative document.
