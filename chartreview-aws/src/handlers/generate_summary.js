@@ -1038,6 +1038,11 @@ const generateSummaryWorker = async (event) => {
     }
 
     // Fire all chunk workers simultaneously (Event = async, no wait)
+    // Strip extracted_text from batch parts before Lambda invocation —
+    // extracted_text can be hundreds of KB per doc and blows the 1MB async payload limit.
+    const stripText = (batches) => batches.map(batch =>
+      batch.map(({ extracted_text: _et, ...rest }) => rest)
+    );
     await Promise.all(batchChunks.map(async (chunkBatches, ci) => {
       const batchOffset = ci * CHUNK_SIZE;
       await lambda.send(new InvokeCommand({
@@ -1046,7 +1051,7 @@ const generateSummaryWorker = async (event) => {
         Payload: Buffer.from(JSON.stringify({
           job_id,
           chunk_job_id: chunkJobIds[ci],
-          batches: chunkBatches,
+          batches: stripText(chunkBatches),
           knownVisits,
           patientNameHint: patientName,
           chunkIndex: ci,
