@@ -1,5 +1,5 @@
 // Updated: 2026-05-15 — Fix 1: __consultation__ + __radiology__ dedup keys prevent same-day same-provider cross-doc merge
-// Updated: 2026-05-15 — Fix 2: EXCLUDED_PATTERNS += inpatient orders / COCSZ / inpatient/surgery entries
+// Updated: 2026-05-15 — Fix 2: EXCLUDED_PATTERNS += inpatient orders / inpatient/surgery entries
 // Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
@@ -420,7 +420,6 @@ const EXCLUDED_PATTERNS = [
   /\boperative\s+note\b(?!.*report)/i,
   // Inpatient order entries (medication/telephone orders, not clinical notes)
   /inpatient\s+orders?/i,
-  /\bcocsz\b.*inpatient/i,
   /inpatient\s*\/\s*surgery(?!.*report|.*progress|.*discharge)/i,
 ];
 
