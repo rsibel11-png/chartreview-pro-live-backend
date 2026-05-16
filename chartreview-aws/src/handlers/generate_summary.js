@@ -615,7 +615,7 @@ CRITICAL FORMATTING RULES:
 - ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER on separate lines.
 
 CRITICAL EXTRACTION RULES:
-(1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
+(1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any. RADIOLOGY REPORTS: If a radiology or imaging report (X-ray, MRI, CT, ultrasound) appears as its own document signed by a named radiologist (e.g. "Blake, Lindsey C MD", "Alford, Kevin B MD"), it MUST be returned as its own separate visit entry — do NOT fold its findings into the imaging_findings of the adjacent ER or office visit. The radiologist is the rendering_provider. The signing/read date is the visit_date. The impression is the imaging_findings. The ER note may reference the same XR findings in its own text — that is fine, include them in the ER note too — but ALSO create a separate radiology visit entry for the standalone report.
 (2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists anywhere in the text for that encounter. A visit with only date/provider and empty content fields is almost always an error — go back and fill it in.
 (3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
 (4) NEVER hallucinate — only use information explicitly in the text.
