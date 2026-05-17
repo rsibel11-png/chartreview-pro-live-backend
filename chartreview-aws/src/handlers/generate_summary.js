@@ -435,19 +435,38 @@ const normalizeProviderForDedup = (raw) => {
     .split(' ').filter(Boolean).sort().join(' ').trim();
 };
 
+// Normalize practice_setting to a canonical document-type bucket for dedup.
+// Handles common variants: "Operative Note - Full" → "operative report",
+// "Consultation Report – Sunrise Hospital" → "consultation report", etc.
+const normalizeSettingForDedup = (raw) => {
+  const s = (raw || '').toLowerCase().replace(/[-–—]/g, ' ').trim();
+  if (s.includes('operative note') || s.includes('operative report') || s.includes('op report')) return 'operative report';
+  if (s.includes('consultation report') || s.includes('consult report')) return 'consultation report';
+  if (s.includes('history & physical') || s.includes('history and physical') || s.includes('h&p') || s.includes('h & p')) return 'history and physical';
+  if (s.includes('discharge summary') || s.includes('discharge report') || s.includes('ed discharge')) return 'discharge summary';
+  if (s.includes('hospitalist progress') || s.includes('progress note')) return 'progress note';
+  if (s.includes('emergency department') || s.includes('emergency provider') || s.includes('ed visit')) return 'emergency department';
+  if (s.includes('radiology report') || s.includes('radiology')) return 'radiology report';
+  if (s.includes('c-4') || s.includes('c4 ') || s.includes("employee's claim")) return 'c4';
+  // For office visits and anything else, use full normalized string so same-date same-provider office visits dedup
+  return s.replace(/\s+/g, ' ').trim();
+};
+
 const deduplicateVisits = (visits) => {
   const visitList = visits || [];
 
-  // Exact dedup: same date + normalized-provider + normalized-setting
-  // Two entries with genuinely different setting types (e.g. Consult vs Operative) are NOT duplicates.
+  // Exact dedup: same date + normalized-provider + canonical-setting-type
   const exactKeys = new Set();
   const deduped = visitList.filter((visit) => {
     const dateKey     = (visit.visit_date || '').trim();
     const providerKey = normalizeProviderForDedup(visit.rendering_provider);
-    const settingKey  = (visit.practice_setting || '').trim().toLowerCase();
+    const settingKey  = normalizeSettingForDedup(visit.practice_setting);
     if (!dateKey && !providerKey) return true;
     const key = `${dateKey}|${providerKey}|${settingKey}`;
-    if (exactKeys.has(key)) return false;
+    if (exactKeys.has(key)) {
+      console.log(`deduplicateVisits: dropping duplicate ${dateKey} ${visit.rendering_provider} [${visit.practice_setting}]`);
+      return false;
+    }
     exactKeys.add(key);
     return true;
   });
@@ -474,14 +493,25 @@ const sanitizeVisits = (visits, patientName) => {
     }
     return clean;
   }).filter(visit => {
-    // Code-level safety net: drop PPR forms even if the model extracted them
+    // Code-level safety net: drop non-clinical document types even if the model extracted them
     const setting = (visit.practice_setting || '').toLowerCase();
+    const provider = (visit.rendering_provider || '').toLowerCase();
     const isPPR = setting.includes("physician's progress report") ||
                   setting.includes("physicians progress report") ||
                   setting.includes("physician progress report") ||
                   setting === 'ppr';
-    if (isPPR) console.log(`sanitizeVisits: dropping PPR entry (${visit.visit_date} ${visit.rendering_provider})`);
-    return !isPPR;
+    const isCodingSummary = setting.includes('coding summary') ||
+                            setting.includes('coding abstract') ||
+                            provider.includes('abstractor') ||
+                            provider.includes('cacuser') ||
+                            provider.includes('coder:');
+    const isAdminOnly = setting.includes('appointment reminder') ||
+                        setting.includes('face sheet') ||
+                        setting.includes('authorization request') ||
+                        setting.includes('fax cover');
+    const skip = isPPR || isCodingSummary || isAdminOnly;
+    if (skip) console.log(`sanitizeVisits: dropping non-clinical entry [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
+    return !skip;
   });
 };
 
@@ -700,6 +730,7 @@ CRITICAL EXTRACTION RULES:
 (10) LABORATORY REPORTS: Do NOT extract a standalone laboratory report as a visit. Lab panels are not clinical encounters. If you see a document that is solely a laboratory result printout (CBC, BMP, CMP, urinalysis panels, etc.), skip it entirely — do not produce a visit entry for it.
 (11) PHYSICIAN'S PROGRESS REPORTS (PPR): Do NOT extract a Physician's Progress Report as a visit. These are pre-printed workers' comp forms with checkboxes and structured fields. They are always paired with a dictated office note from the same provider/date that contains all the same information. Skip the PPR form; keep the dictated note.
 (12) APPOINTMENT REMINDERS / FACE SHEETS: Do NOT extract appointment reminder slips, return visit scheduling notices, demographic face sheets, or authorization request forms as visits. These contain no clinical encounter content.
+(13) CODING SUMMARIES / BILLING ABSTRACTS: Do NOT extract hospital coding summaries, DRG abstracts, or billing abstraction records as visits. These are administrative billing documents generated by coders (not clinicians) and contain no independent clinical encounter content. Identifiable by headers like "Coding Summary", "Discharge Abstract", "DRG Assignment", or provider listed as "Coder", "Abstractor", or a system name like "Cacuser".
 
 Return ALL entries found across ALL documents as separate entries in the visits array.
 

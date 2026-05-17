@@ -73,7 +73,7 @@ const updateHandler = async (event) => {
     const vals  = { ':u': now };
 
     const fields = [
-      'patient_name','case_number','visits','notes','status',
+      'patient_name','case_number','visits','visit_count','notes','status',
       'header_note','footer_note','ime_note','chart_review_note',
       'discussion_note','physical_examination_note',
       'document_ids','document_id','summary_content','include_document_list',
