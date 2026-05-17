@@ -422,16 +422,28 @@ const toTitleCase = (str) => {
 
 // ─── Original app logic (verbatim from chartreview-pro) + Claude 4.x brevity constraints ──
 
+// Normalize provider name for dedup: strips credentials, punctuation,
+// and sorts name tokens so "Chan, Holman MD" == "Holman Chan, MD"
+const normalizeProviderForDedup = (raw) => {
+  return (raw || '')
+    .toLowerCase()
+    .replace(/\b(md|do|pa-?c?|np|rn|dpt|ot|pt|lcsw|psyd|phd|ms|jr|sr|ii|iii)\b/gi, '')
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .split(' ').filter(Boolean).sort().join(' ').trim();
+};
+
 const deduplicateVisits = (visits) => {
   const visitList = visits || [];
 
-  // Step 1: Remove exact duplicates (same date + provider + setting)
+  // Exact dedup: same date + normalized-provider + normalized-setting
+  // Two entries with genuinely different setting types (e.g. Consult vs Operative) are NOT duplicates.
   const exactKeys = new Set();
-  const deduped = visitList.filter((visit, idx) => {
-    const dateKey = (visit.visit_date || '').trim().toLowerCase();
-    const providerKey = (visit.rendering_provider || '').trim().toLowerCase();
-    const settingKey = (visit.practice_setting || '').trim().toLowerCase();
-    if (!dateKey && !providerKey) return true; // no identifying info, keep
+  const deduped = visitList.filter((visit) => {
+    const dateKey     = (visit.visit_date || '').trim();
+    const providerKey = normalizeProviderForDedup(visit.rendering_provider);
+    const settingKey  = (visit.practice_setting || '').trim().toLowerCase();
+    if (!dateKey && !providerKey) return true;
     const key = `${dateKey}|${providerKey}|${settingKey}`;
     if (exactKeys.has(key)) return false;
     exactKeys.add(key);
@@ -459,6 +471,15 @@ const sanitizeVisits = (visits, patientName) => {
       clean.practice_setting = '';
     }
     return clean;
+  }).filter(visit => {
+    // Code-level safety net: drop PPR forms even if the model extracted them
+    const setting = (visit.practice_setting || '').toLowerCase();
+    const isPPR = setting.includes("physician's progress report") ||
+                  setting.includes("physicians progress report") ||
+                  setting.includes("physician progress report") ||
+                  setting === 'ppr';
+    if (isPPR) console.log(`sanitizeVisits: dropping PPR entry (${visit.visit_date} ${visit.rendering_provider})`);
+    return !isPPR;
   });
 };
 
@@ -593,8 +614,9 @@ If the same provider has both a Consultation Report and an Operative Report on t
 - The Operative Report entry: use the operative note's own content — procedure performed, surgical technique, intraoperative findings, post-op disposition.
 - These are NOT duplicates. They document different clinical activities that happened to occur on the same day.
 
-DEDUPLICATION RULE - Physician Progress Reports vs. Office Visits:
-If the same date has BOTH a physician progress report AND an office visit note from the SAME provider documenting the SAME encounter, include only the more complete record. However: a Discharge Summary, Operative Report, Consultation Report, or H&P is NEVER a duplicate of an office visit — each is its own distinct document type and must be extracted separately.
+PHYSICIAN'S PROGRESS REPORT (PPR) — SKIP ENTIRELY:
+In workers' compensation cases, providers routinely generate a Physician's Progress Report (PPR) — a standard pre-printed WC form. The PPR always accompanies a separately dictated/typed office note from the same provider on the same date. The dictated note contains ALL the same clinical information, written more completely.
+RULE: If you identify a document as a Physician's Progress Report or PPR form (typically identified by the "PHYSICIAN'S PROGRESS REPORT" header, structured checkboxes for disability status and restrictions, and a pre-printed form layout), do NOT extract it as a visit entry. Skip it. The dictated note for that date captures the clinical encounter.
 
 CRITICAL: If the document(s) contain MULTIPLE visits or encounters, you MUST extract each as a separate entry in the visits array.
 
@@ -661,6 +683,8 @@ CRITICAL EXTRACTION RULES:
 (8) PHYSICAL/OCCUPATIONAL THERAPY VISITS: Extract EVERY individual PT/OT session as its own separate record. Each visit date = one record.
 (9) For PT visits: practice_setting should be the full facility name. Do NOT abbreviate to "PT" or "Physical Therapy". Consistent naming is critical.
 (10) LABORATORY REPORTS: Do NOT extract a standalone laboratory report as a visit. Lab panels are not clinical encounters. If you see a document that is solely a laboratory result printout (CBC, BMP, CMP, urinalysis panels, etc.), skip it entirely — do not produce a visit entry for it.
+(11) PHYSICIAN'S PROGRESS REPORTS (PPR): Do NOT extract a Physician's Progress Report as a visit. These are pre-printed workers' comp forms with checkboxes and structured fields. They are always paired with a dictated office note from the same provider/date that contains all the same information. Skip the PPR form; keep the dictated note.
+(12) APPOINTMENT REMINDERS / FACE SHEETS: Do NOT extract appointment reminder slips, return visit scheduling notices, demographic face sheets, or authorization request forms as visits. These contain no clinical encounter content.
 
 Return ALL entries found across ALL documents as separate entries in the visits array.
 
