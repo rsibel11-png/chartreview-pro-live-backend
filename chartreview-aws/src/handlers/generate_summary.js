@@ -562,63 +562,85 @@ E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
     - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set, use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields. Explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit").
     - ORDERING: The C-4 entry must use the same visit_date as the corresponding office visit so it appears together in chronological order. In the visits array, place the C-4 entry BEFORE the regular office visit entry of the same date.
 
-DEDUPLICATION RULE - Physician Progress Reports vs. Office Visits:
-If the same date has BOTH a physician progress report AND an office visit from the SAME provider, IGNORE the physician progress report and ONLY include the office visit. The office visit record contains the actual clinical information, while the progress report is typically a summary/administrative document.
+SAME-DATE DOCUMENT ISOLATION — ABSOLUTE RULE:
+A single calendar date can contain MULTIPLE DISTINCT DOCUMENTS that are each their own separate clinical encounter:
+- A Consultation Report and an Operative Report on the same date are TWO separate visits.
+- A History & Physical (H&P) and a Discharge Summary on the same date are TWO separate visits.
+- A Hospitalist Progress Note and a Surgical Operative Note on the same date are TWO separate visits.
+- A Radiology Report and the ED note that references it on the same date are TWO separate visits.
+EACH DOCUMENT TYPE IS ITS OWN ENTRY. Do NOT collapse them because they share a date.
+The practice_setting for each entry MUST reflect the actual document type:
+  - "Consultation Report" (NOT "Office Visit") for consult letters
+  - "Operative Report" (NOT "Office Visit") for surgical operative notes
+  - "History & Physical" for inpatient H&P documents
+  - "Discharge Summary" or "Discharge Report" for discharge documents
+  - "Hospitalist Progress Note" for inpatient progress notes
+  - "Emergency Department" for ED visit notes
+  - "Radiology Report" for radiologist-signed imaging reports
 
-CRITICAL: If the document(s) contain MULTIPLE office visits or patient encounters, you MUST extract each visit separately as individual entries in the visits array.
+CONTENT ISOLATION — ABSOLUTE RULE:
+When extracting any single visit/document, you MUST use ONLY the content within that specific document.
+- A Consultation Report's HPI must come ONLY from the consultation document — NOT from the operative note, NOT from the ED note, NOT from any other same-date document.
+- An Operative Report's HPI must come ONLY from the operative note itself.
+- A Discharge Summary must come ONLY from the discharge document.
+- NEVER borrow, import, or infer content from a different document even if it is the same date and same provider.
+- If the consult note HPI is brief, keep it brief — do NOT pad it with content from the operative report.
+- Each document stands alone. Extract only what is written in that document. Period.
+
+DOCUMENT TYPE RECOGNITION — SAME PROVIDER, SAME DATE:
+If the same provider has both a Consultation Report and an Operative Report on the same date:
+- The Consultation Report entry: use the consult document's own HPI, exam findings, and plan — typically the pre-operative evaluation and clinical reasoning.
+- The Operative Report entry: use the operative note's own content — procedure performed, surgical technique, intraoperative findings, post-op disposition.
+- These are NOT duplicates. They document different clinical activities that happened to occur on the same day.
+
+DEDUPLICATION RULE - Physician Progress Reports vs. Office Visits:
+If the same date has BOTH a physician progress report AND an office visit note from the SAME provider documenting the SAME encounter, include only the more complete record. However: a Discharge Summary, Operative Report, Consultation Report, or H&P is NEVER a duplicate of an office visit — each is its own distinct document type and must be extracted separately.
+
+CRITICAL: If the document(s) contain MULTIPLE visits or encounters, you MUST extract each as a separate entry in the visits array.
 
 CRITICAL DATE AND TIMELINE ACCURACY:
 - Pay EXTREME attention to dates mentioned in the documents
-- Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES - treat each as a separate visit
+- Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES — treat each as a separate visit
 - Match ALL findings, exams, and imaging to the CORRECT visit date they were documented on
 - NEVER include information from a future visit in an earlier visit
-- NEVER reference events (like accidents or injuries) that haven't occurred yet chronologically
-- If a location appears multiple times with different dates, create separate visit entries for each date
+- NEVER reference events that have not occurred yet chronologically
 - Double-check that all information in a visit entry actually occurred on or before that visit date
 
-For EACH entry found across ALL documents, extract the following information:
+For EACH entry found, extract the following:
 
-IMPORTANT: Summarize and condense information - do NOT simply transcribe. Extract only the most relevant and pertinent information.
+IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most relevant clinical information.
 
-1. Visit date (if mentioned) - BE PRECISE, this is critical for timeline accuracy
-2. Rendering provider name - extract the doctor's name only, not the patient name
-3. Practice/setting - for expert reports use "Medical Expert Report", "Independent Medical Examination", or "Chart Review" as appropriate
-4. Chief complaint - brief statement of visit purpose or report purpose
+1. Visit date — BE PRECISE, this is critical for timeline accuracy
+2. Rendering provider name — the physician/provider who authored THIS document
+3. Practice/setting — use the EXACT document type label (see SAME-DATE DOCUMENT ISOLATION above)
+4. Chief complaint — brief statement of visit or document purpose
 
-5. History of Present Illness (HPI) - SUMMARIZE CONCISELY:
-   - Key presenting symptoms and their onset
-   - Injury date if applicable (only on first visit) - VERIFY this injury date is BEFORE or ON the visit date
-   - Pain scale where provided (e.g., "7/10")
-   - Mechanism of injury (brief)
-   - Whether symptoms are improved, the same, or worse from prior examinations
-   - Relevant past medical history only if directly related
-   - For expert reports: summarize the expert's review of the history
-   - Keep this section focused and concise, 2-3 sentences maximum. No filler phrases, no restating the obvious. Distill only what is clinically material.
-   - DO NOT mention future events or injuries
+5. History of Present Illness (HPI) — SUMMARIZE CONCISELY, FROM THIS DOCUMENT ONLY:
+   - Key presenting symptoms and onset AS DOCUMENTED IN THIS SPECIFIC DOCUMENT
+   - Injury date if applicable (only on first visit) — VERIFY injury date is BEFORE or ON the visit date
+   - Pain scale where provided
+   - Mechanism of injury (brief, first visit only)
+   - Whether symptoms are improved, same, or worse
+   - CRITICAL: Only use content from THIS document. Do NOT import language from a same-date consult, operative note, ED note, or any other document.
+   - Keep to 2-3 sentences maximum. Distill only what is clinically material.
 
-6. Physical Examination Findings - SUMMARIZE KEY PERTINENT POSITIVES ONLY:
-   - ONLY include findings documented on THIS specific visit/report date
-   - Pain (location, severity) - only mention if significant
-   - Loss of motion/range of motion limitations with specific measurements
-   - Deformity, scar formation - only if present
-   - Neurological findings (numbness, tingling, burning) - only if present
-   - Swelling, tenderness - only if notable
-   - Do NOT list normal findings
-   - Keep concise, bullet-point style, 3 key findings maximum. Abnormal findings only — omit all normal/unremarkable results.
-   - For expert reports with no physical exam: leave empty
+6. Physical Examination Findings — SUMMARIZE KEY PERTINENT POSITIVES ONLY, FROM THIS DOCUMENT:
+   - ONLY findings documented in THIS specific document
+   - Abnormal findings only — omit normal/unremarkable results
+   - 3 key findings maximum
+   - For operative notes: intraoperative findings, not pre-op exam
+   - For consultation notes: the consulting physician's own exam findings only
 
-7. Imaging findings (X-ray, MRI, CT scans) - include EXACTLY as written, do NOT summarize these, ONLY if performed or reviewed on THIS visit/report date
-8. Lab findings (bloodwork panels) - ONLY include if labs were actually performed on THIS visit date, otherwise return empty string
-9. Impression/diagnosis - for expert reports include expert opinions, causation analysis, and conclusions with ICD-10 codes where applicable
-10. Treatment Plan / Recommendations - SUMMARIZE CONCISELY (2-3 items max, no elaboration):
-   - Main treatment interventions prescribed or performed
-   - Medications prescribed (name, dosage if stated)
-   - For expert reports: expert's recommendations, causation opinions, prognosis
-   - Activity restrictions if any
-   - Follow-up timeline
-   - Keep to 2-4 key points, omit routine instructions
+7. Imaging findings — ONLY if performed or interpreted in THIS document. Do NOT re-report imaging from a co-occurring radiology report.
+8. Lab findings — return empty string always. Laboratory panels are captured separately and are not needed in the summary.
+9. Impression/diagnosis — from THIS document's own conclusions. ICD-10 codes inline in parentheses.
+10. Treatment Plan — CONCISE, 2-4 items max:
+   - Interventions performed or prescribed IN THIS document
+   - Medications (name, dose)
+   - Activity restrictions
+   - Follow-up plan
 
-Be thorough but RUTHLESSLY CONCISE. Every field should read like a tight, professional medical-legal summary — not a transcription. Omit anything a reviewing attorney already knows or can infer. No filler. No restating headers as content.
+Be RUTHLESSLY CONCISE. Every field reads like a tight medical-legal summary. No filler. No restating headers.
 
 CRITICAL FORMATTING RULES:
 - Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
@@ -629,15 +651,16 @@ CRITICAL FORMATTING RULES:
 
 CRITICAL EXTRACTION RULES:
 (1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
-(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports formatted with their own header block (facility name, exam type, procedure, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry even if the same imaging findings are mentioned inside the ED note or H&P. The radiologist who signed the report is the rendering_provider. Do NOT collapse these into the ED visit. If the knownVisitsChecklist includes a radiologist entry (visit_type: Radiology), you MUST produce a separate entry for that radiologist regardless of whether the findings appear elsewhere.
-(2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists anywhere in the text for that encounter. A visit with only date/provider and empty content fields is almost always an error — go back and fill it in.
+(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports with their own header block (facility, exam type, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry. The radiologist who signed it is the rendering_provider. Do NOT collapse into the ED note. If the knownVisitsChecklist includes a radiologist entry, you MUST produce a separate entry for that radiologist.
+(2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists in THIS document.
 (3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
-(4) NEVER hallucinate — only use information explicitly in the text.
+(4) NEVER hallucinate — only use information explicitly written in THIS document.
 (5) Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
 (6) If information is truly not available, return an empty string "".
 (7) The icd10_codes field must always be an array of strings (can be empty []).
-(8) PHYSICAL/OCCUPATIONAL THERAPY VISITS: Extract EVERY individual PT/OT session as its own separate record. Do NOT collapse multiple PT sessions into one. Do NOT summarize a series of visits as a single entry. Each visit date = one record. PT notes are often brief one-liners (date, therapist initials, modalities, exercise sets) -- each one is a separate visit and must be extracted individually. If a page contains 10 PT visit dates, return 10 separate visit records.
-(9) For PT visits: practice_setting should be the full facility name (e.g. "Dignity Health Physical Therapy", "Nevada Rehabilitation Institute"). Do NOT abbreviate to just "PT" or "Physical Therapy". Consistent facility naming across all records is critical.
+(8) PHYSICAL/OCCUPATIONAL THERAPY VISITS: Extract EVERY individual PT/OT session as its own separate record. Each visit date = one record.
+(9) For PT visits: practice_setting should be the full facility name. Do NOT abbreviate to "PT" or "Physical Therapy". Consistent naming is critical.
+(10) LABORATORY REPORTS: Do NOT extract a standalone laboratory report as a visit. Lab panels are not clinical encounters. If you see a document that is solely a laboratory result printout (CBC, BMP, CMP, urinalysis panels, etc.), skip it entirely — do not produce a visit entry for it.
 
 Return ALL entries found across ALL documents as separate entries in the visits array.
 
