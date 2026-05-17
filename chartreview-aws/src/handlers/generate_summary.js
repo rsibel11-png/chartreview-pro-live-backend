@@ -474,6 +474,58 @@ const deduplicateVisits = (visits) => {
   return deduped;
 };
 
+
+// ── ED visit date corrector ───────────────────────────────────────────────────
+// Hospital ED notes are often signed the following day. The model uses the header
+// (signature) date. This function scans the treatment_plan for medication
+// administration timestamps and uses the earliest one if it precedes the visit date.
+// Example: note signed 10/02, meds show "(10/01 1937)" → corrected to 2025-10-01.
+const correctEdVisitDates = (visits) => {
+  return visits.map(visit => {
+    const visitType = (visit.visit_type || '').toLowerCase();
+    const setting   = (visit.practice_setting || '').toLowerCase();
+    const isED = visitType.includes('er') || visitType.includes('emergency') ||
+                 setting.includes('emergency') || setting.includes(' ed ') || setting.includes('ed -');
+    if (!isED || !visit.visit_date) return visit;
+
+    const textToSearch = (visit.treatment_plan || '') + ' ' + (visit.hpi_summary || '');
+
+    // Match timestamps like "(10/01 1937)", "10/01/2025 19:37", "(10/01/25 2210)"
+    const tsPattern = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?[\s,]+\d{3,4}\b/g;
+    const currentDate = visit.visit_date; // YYYY-MM-DD
+    const [cy, cm, cd] = currentDate.split('-').map(Number);
+
+    let earliestDate = null;
+    let m;
+    while ((m = tsPattern.exec(textToSearch)) !== null) {
+      const month = parseInt(m[1], 10);
+      const day   = parseInt(m[2], 10);
+      // Infer year from visit_date year (same year, or previous year if month > visit month)
+      let year = cy;
+      if (m[3]) {
+        const rawYear = parseInt(m[3], 10);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      } else if (month > cm) {
+        year = cy - 1; // timestamp month is later — must be prior year
+      }
+      const candidate = new Date(year, month - 1, day);
+      const current   = new Date(cy, cm - 1, cd);
+      // Only accept if candidate is 1-3 days before the signed date (avoid false positives)
+      const diffDays = (current - candidate) / (1000 * 60 * 60 * 24);
+      if (diffDays >= 1 && diffDays <= 3) {
+        if (!earliestDate || candidate < earliestDate) earliestDate = candidate;
+      }
+    }
+
+    if (earliestDate) {
+      const corrected = earliestDate.toISOString().split('T')[0];
+      console.log(`correctEdVisitDates: ${visit.rendering_provider} ${currentDate} → ${corrected} (earliest med timestamp)`);
+      return { ...visit, visit_date: corrected };
+    }
+    return visit;
+  });
+};
+
 const sanitizeVisits = (visits, patientName) => {
   const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
   const validProgressions = ['improved','same','worse','not_documented'];
@@ -975,7 +1027,7 @@ const generateSummaryChunkWorker = async (event) => {
         if (!result) continue;
         if (!patientName && result.patient_name) patientName = result.patient_name;
         if (!caseNumber  && result.case_number)  caseNumber  = result.case_number;
-        const clean = sanitizeVisits(result.visits || [], patientName);
+        const clean = sanitizeVisits(correctEdVisitDates(result.visits || []), patientName);
         chunkVisits.push(...clean);
       }
     }
@@ -1296,7 +1348,7 @@ const generateSummaryWorker = async (event) => {
             try {
               const recResult = await callBedrock([recFileKey], recPrompt, recSchema, regionOrder);
               if (Array.isArray(recResult.visits) && recResult.visits.length > 0) {
-                const recClean = sanitizeVisits(recResult.visits, patientName);
+                const recClean = sanitizeVisits(correctEdVisitDates(recResult.visits || []), patientName);
                 allVisits = allVisits.concat(recClean);
                 console.log(`Recovery: recovered ${recClean.length} visit(s) from ${srcDocId}`);
               }
