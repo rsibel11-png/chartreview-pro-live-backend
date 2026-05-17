@@ -505,15 +505,20 @@ const sanitizeVisits = (visits, patientName) => {
                             provider.includes('abstractor') ||
                             provider.includes('cacuser') ||
                             provider.includes('coder:');
-    const isAdminOnly = setting.includes('appointment reminder') ||
+    // C-4 forms are ALWAYS clinical — exempt before any other check
+    const isC4 = setting.includes('c-4') || setting.includes('c4 ') ||
+                 setting.includes("workers' compensation report") ||
+                 (visit.visit_type || '').toLowerCase().includes('c-4');
+    const isAdminOnly = !isC4 && (
+                        setting.includes('appointment reminder') ||
                         setting.includes('face sheet') ||
                         setting.includes('authorization request') ||
                         setting.includes('fax cover') ||
                         setting.includes('authorization for operative') ||
                         setting.includes('consent for') ||
                         setting.includes('surgical consent') ||
-                        setting.includes('informed consent');
-    const skip = isPPR || isCodingSummary || isAdminOnly;
+                        setting.includes('informed consent'));
+    const skip = !isC4 && (isPPR || isCodingSummary || isAdminOnly);
     if (skip) console.log(`sanitizeVisits: dropping non-clinical entry [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
     return !skip;
   });
