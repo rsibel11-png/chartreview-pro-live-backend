@@ -926,6 +926,20 @@ const generateSummaryWorker = async (event) => {
   const { job_id, doc_ids, patient_name = '', org_id } = event;
   console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length}`);
 
+  // ── Idempotency guard — Lambda async invocation has at-least-once delivery.
+  // If this job_id already has a summary_id stamped on it, a previous invocation
+  // already completed successfully. Exit immediately to avoid creating a duplicate.
+  try {
+    const existingJob = await dynamo.send(new GetCommand({ TableName: JOBS_TABLE, Key: { job_id } }));
+    if (existingJob.Item && existingJob.Item.summary_id) {
+      console.log(`coordinator: job ${job_id} already has summary_id ${existingJob.Item.summary_id} — duplicate invocation, exiting`);
+      return;
+    }
+  } catch (guardErr) {
+    console.warn(`coordinator: idempotency check failed (non-fatal):`, guardErr.message);
+    // Continue — better to risk a duplicate than to silently fail
+  }
+
   // Pre-fetch region order once for entire coordinator run
   const regionOrder = await getRegionOrder();
   console.log(`coordinator regionOrder: ${regionOrder.map(r => r.region).join(' → ')}`);
@@ -1269,6 +1283,17 @@ const generateSummaryWorker = async (event) => {
       },
     }));
     console.log(`coordinator: summary saved as 'polishing' — aws_summary_id=${aws_summary_id}`);
+
+    // Stamp summary_id onto the job record — idempotency guard for duplicate Lambda invocations
+    try {
+      await dynamo.send(new UpdateCommand({
+        TableName: JOBS_TABLE, Key: { job_id },
+        UpdateExpression: 'SET summary_id = :sid, updated_at = :now',
+        ExpressionAttributeValues: { ':sid': aws_summary_id, ':now': new Date().toISOString() },
+      }));
+    } catch (stampErr) {
+      console.warn('coordinator: failed to stamp summary_id on job (non-fatal):', stampErr.message);
+    }
 
     // Fire polish worker async — coordinator does NOT wait
     try {
