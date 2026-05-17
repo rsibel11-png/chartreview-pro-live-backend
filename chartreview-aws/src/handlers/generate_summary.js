@@ -229,6 +229,7 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder, pageScope = nu
   const bedrockPayload = {
     anthropic_version: 'bedrock-2023-05-31',
     max_tokens: 8000,
+    system: EXTRACTION_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: contentBlocks }],
     tools: [{
       name: 'structured_output',
@@ -292,6 +293,7 @@ const callBedrockText = async (textContent, prompt, schema, regionOrder) => {
   const bedrockPayload = {
     anthropic_version: 'bedrock-2023-05-31',
     max_tokens: 8000,
+    system: EXTRACTION_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: [
       { type: 'text', text: `DOCUMENT TEXT:\n\`\`\`\n${textContent}\n\`\`\`` },
       { type: 'text', text: prompt },
@@ -494,6 +496,19 @@ const enforceOneC4 = (visitList) => {
   });
 };
 
+
+// ── Forensic analyst system prompt ───────────────────────────────────────────
+// Injected as the Bedrock `system` field on every extraction call.
+// This sets Claude's operating mode before it reads a single word of document content.
+const EXTRACTION_SYSTEM_PROMPT = `You are a forensic medical document analyst specializing in workers' compensation and personal injury litigation. Your work product is read by attorneys and used in legal proceedings — precision and fidelity to the source document are paramount.
+
+Your operating principles:
+1. DOCUMENT BOUNDARIES ARE ABSOLUTE. Each document in a medical record is a discrete, bounded unit. You extract information from the document you are currently reading — never from an adjacent, co-occurring, or same-date document. If you find yourself writing language that does not appear in the specific document you are extracting, stop and delete it.
+2. YOU DO NOT INFER. You report only what is explicitly written. If a field is not documented, return an empty string. A missing value is always better than a hallucinated one.
+3. YOU DO NOT MERGE. Two documents on the same date from the same provider are two documents. A consultation note and an operative note are different documents. A History & Physical and a Discharge Summary are different documents. You extract each separately, completely, and independently.
+4. YOU ARE CONSERVATIVE WITH CLINICAL LANGUAGE. Do not paraphrase in ways that change meaning. Do not upgrade or downgrade clinical severity. Report findings as documented.
+5. YOU SELF-CHECK FOR BLEED. Before finalizing any visit entry, ask yourself: "Does any language in this entry come from a document other than the one I am currently extracting?" If yes, remove it.`;
+
 const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
   const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
   const multiDocNote = docCount > 1
@@ -510,7 +525,7 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
     ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from pages: ${skipPages.join(', ')})`
     : '';
 
-  return `You are a medical-legal document analyst. Be ruthlessly concise. Eliminate all filler. Mirror the brevity of a high-quality medical-legal summary — every word must earn its place. Analyze these ${docCount} medical document(s)${chunkLabel} and extract ALL entries (office visits, expert reports, IME reports, chart reviews, etc.) across ALL documents.
+  return `Your task: analyze these medical document(s) and extract every clinical encounter into a structured JSON array. Be ruthlessly concise — every word must earn its place.
 ${multiDocNote}
 
 DOCUMENT TYPE HANDLING:
