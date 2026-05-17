@@ -682,8 +682,12 @@ For EACH entry found, extract the following:
 IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most relevant clinical information.
 
 1. Visit date — BE PRECISE, this is critical for timeline accuracy
-   - For ED/hospital visits: use the date the encounter BEGAN (admission date, triage date, "Date of Service", "SERVICE DT", "Admit Date"), NOT the date the note was electronically signed or finalized. A note signed 10/02 for a visit that started 10/01 should be recorded as 10/01.
-   - Look for: "Admit:", "Admit Date:", "SERVICE DT:", "Date of Service:", "Triage Date:", "Visit Date:" in the document header or vitals table — these take priority over signature date.
+   - For ED/hospital visits: use the date the encounter BEGAN, NOT the date the note was electronically signed or finalized.
+   - Priority order for ED visit date (highest to lowest):
+     (a) Explicit admit/triage labels: "Admit:", "Admit Date:", "SERVICE DT:", "Date of Service:", "Triage Date:", "Visit Date:" — use the date in these fields.
+     (b) Medication administration timestamps: if the treatment plan lists medications with timestamps (e.g. "Morphine 4mg IV x1 (10/01 1937)"), and the EARLIEST medication timestamp is a different date than the signature date, use the earlier date — that is when the encounter began.
+     (c) Document header date / signature date — use ONLY if no earlier signal exists.
+   - Example: note signed 10/02, but medications administered starting 10/01 at 19:37 → visit_date = 2025-10-01.
 2. Rendering provider name — the physician/provider who authored THIS document
 3. Practice/setting — use the EXACT document type label (see SAME-DATE DOCUMENT ISOLATION above)
 4. Chief complaint — brief statement of visit or document purpose
