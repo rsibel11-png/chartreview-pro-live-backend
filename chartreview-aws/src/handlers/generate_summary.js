@@ -432,7 +432,10 @@ const normalizeProviderForDedup = (raw) => {
     .replace(/\b(md|do|pa-?c?|np|rn|dpt|ot|pt|lcsw|psyd|phd|ms|jr|sr|ii|iii)\b/gi, '')
     .replace(/[^a-z\s]/g, ' ')
     .replace(/\s+/g, ' ')
-    .split(' ').filter(Boolean).sort().join(' ').trim();
+    .split(' ')
+    .filter(t => t.length > 1)   // strip single-letter initials (e.g. "B" middle initial)
+    .sort()
+    .join(' ').trim();
 };
 
 // Normalize practice_setting to a canonical document-type bucket for dedup.
@@ -484,34 +487,39 @@ const correctEdVisitDates = (visits) => {
   return visits.map(visit => {
     const visitType = (visit.visit_type || '').toLowerCase();
     const setting   = (visit.practice_setting || '').toLowerCase();
+    // Match any ED / ER / hospital emergency encounter
     const isED = visitType.includes('er') || visitType.includes('emergency') ||
-                 setting.includes('emergency') || setting.includes(' ed ') || setting.includes('ed -');
+                 visitType.includes('ed') || setting.includes('emergency') ||
+                 setting.includes(' ed ') || setting.includes('ed -') ||
+                 setting.includes('ed discharge') || setting.includes('emergency department') ||
+                 setting.includes('emergency provider');
     if (!isED || !visit.visit_date) return visit;
 
     const textToSearch = (visit.treatment_plan || '') + ' ' + (visit.hpi_summary || '');
-
-    // Match timestamps like "(10/01 1937)", "10/01/2025 19:37", "(10/01/25 2210)"
-    const tsPattern = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?[\s,]+\d{3,4}\b/g;
     const currentDate = visit.visit_date; // YYYY-MM-DD
     const [cy, cm, cd] = currentDate.split('-').map(Number);
+
+    // Match timestamps in multiple formats:
+    //   (10/01 1937)   (10/01/25 2210)   10/01/2025 19:37   10/01 at 19:37
+    const tsPattern = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?:[\s,]+(?:at\s+)?)(\d{1,2}:\d{2}|\d{3,4})\b/gi;
 
     let earliestDate = null;
     let m;
     while ((m = tsPattern.exec(textToSearch)) !== null) {
       const month = parseInt(m[1], 10);
       const day   = parseInt(m[2], 10);
-      // Infer year from visit_date year (same year, or previous year if month > visit month)
+      if (month < 1 || month > 12 || day < 1 || day > 31) continue;
       let year = cy;
       if (m[3]) {
         const rawYear = parseInt(m[3], 10);
         year = rawYear < 100 ? 2000 + rawYear : rawYear;
       } else if (month > cm) {
-        year = cy - 1; // timestamp month is later — must be prior year
+        year = cy - 1;
       }
       const candidate = new Date(year, month - 1, day);
       const current   = new Date(cy, cm - 1, cd);
-      // Only accept if candidate is 1-3 days before the signed date (avoid false positives)
-      const diffDays = (current - candidate) / (1000 * 60 * 60 * 24);
+      const diffDays  = (current - candidate) / (1000 * 60 * 60 * 24);
+      // Accept if candidate is 1-3 days before signed date
       if (diffDays >= 1 && diffDays <= 3) {
         if (!earliestDate || candidate < earliestDate) earliestDate = candidate;
       }
