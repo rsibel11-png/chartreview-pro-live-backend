@@ -429,6 +429,8 @@ const toTitleCase = (str) => {
 const normalizeProviderForDedup = (raw) => {
   return (raw || '')
     .toLowerCase()
+    .replace(/\(.*?\)/g, ' ')                    // strip parentheticals e.g. "(interpreted by Thomas Boeding DO)"
+    .replace(/\b(interpreted|supervising|on behalf of)\b.*$/i, '') // strip trailing attribution clauses
     .replace(/\b(md|do|pa-?c?|np|rn|dpt|ot|pt|lcsw|psyd|phd|ms|jr|sr|ii|iii)\b/gi, '')
     .replace(/[^a-z\s]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -640,8 +642,17 @@ const sanitizeVisits = (visits, patientName) => {
                         setting.includes('authorization for operative') ||
                         setting.includes('consent for') ||
                         setting.includes('surgical consent') ||
-                        setting.includes('informed consent'));
-    const skip = !isC4 && (isPPR || isCodingSummary || isAdminOnly);
+                        setting.includes('informed consent') ||
+                        setting.includes('discharge planning') ||
+                        setting.includes('case management note'));
+    // Drop "on behalf of" entries — these are admin/auth submissions, not clinical encounters
+    const isOnBehalfOf = provider.includes('on behalf of');
+    // Drop ghost entries: no provider AND no meaningful clinical content
+    const hasNoProvider = !visit.rendering_provider || visit.rendering_provider.trim() === '';
+    const hasNoClinicalContent = !visit.hpi_summary && !visit.chief_complaint &&
+                                  !visit.physical_exam_findings && !visit.treatment_plan;
+    const isGhost = hasNoProvider && hasNoClinicalContent;
+    const skip = !isC4 && (isPPR || isCodingSummary || isAdminOnly || isOnBehalfOf || isGhost);
     if (skip) console.log(`sanitizeVisits: dropping non-clinical entry [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
     return !skip;
   });
@@ -680,7 +691,7 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
   // being sent to Claude, so no page-focus instruction is needed in the prompt.
   const checklistSection = knownVisitsChecklist.length > 0
     ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
-      knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
+      knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''} [USE THIS DATE: ${v.date}]`).join('\n') +
       `\n\nCRITICAL: Every entry in the checklist above MUST appear in your output visits array. This includes Radiology entries — even if the same imaging findings appear inside an ED note or H&P, the radiologist's report is a SEPARATE encounter and must be extracted as its own entry. If you cannot find clinical detail for a checklist entry, still include it with date, provider, and facility populated. Do NOT omit any checklist entry.`
     : '';
   const skipPagesSection = skipPages.length > 0
