@@ -746,8 +746,14 @@ D) AMBULANCE / EMS REPORTS (pre-hospital care records):
    - treatment_plan: treatment administered on scene and during transport (IV, medications, immobilization, oxygen, etc.), and destination facility
    - visit_date: the date of the incident/transport
 
-E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official WCB Form C-4 header, title block, or reference number (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or injury reports as C-4 unless the actual form is present.
+E) C-4 FORMS (Workers' Compensation Doctor's Report):
+    STRICT IDENTIFICATION: Treat as a C-4 if the document EXPLICITLY shows ANY of these markers:
+    - "Form C-4", "WCB Form C-4", "Workers' Compensation Board"
+    - "EMPLOYEE'S CLAIM FOR COMPENSATION"
+    - "C-4" anywhere in the document title or header block
+    - "Doctor's Initial Report", "Treating Physician's Report", "First Report of Injury" on a state WC form
+    - Any state workers' compensation physician report form (Nevada, New York, California, etc.)
+    Do NOT label regular office visit notes or injury reports as C-4 unless the actual WC form is present.
 
     For ACTUAL C-4 forms only:
     - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
