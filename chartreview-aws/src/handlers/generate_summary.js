@@ -1094,9 +1094,14 @@ const generateSummaryChunkWorker = async (event) => {
         if (!result) continue;
         if (!patientName && result.patient_name) patientName = result.patient_name;
         if (!caseNumber  && result.case_number)  caseNumber  = result.case_number;
-        // Narrative fields only — structural merge happens in coordinator
-        // where extracted_text (rawText) is available from allParts
-        const narrativeVisits = sanitizeNarrativeVisits(result.visits || []);
+        // Narrative fields only — structural merge happens in coordinator.
+        // Tag each narrative result with the knownVisit from this batch
+        // so the coordinator can do a direct 1:1 join (no index guessing).
+        const batchKnownVisit = (batch[0] && batch[0]._knownVisit) ? batch[0]._knownVisit : null;
+        const narrativeVisits = sanitizeNarrativeVisits(result.visits || []).map(nv => ({
+          ...nv,
+          _knownVisit: batchKnownVisit,    // carries provenance through to coordinator
+        }));
         chunkVisits.push(...narrativeVisits);
       }
     }
@@ -1241,12 +1246,12 @@ const generateSummaryWorker = async (event) => {
       const partVisits = knownVisits.filter(v => v.source_doc_id === part.id && Array.isArray(v.pages) && v.pages.length > 0);
       if (partVisits.length > 0) {
         for (const encounter of partVisits) {
-          batches.push([{ ...part, pageScope: encounter.pages }]);
+          batches.push([{ ...part, pageScope: encounter.pages, _knownVisit: encounter }]);
         }
         console.log(`coordinator: part ${part.label} → ${partVisits.length} encounter-scoped batches`);
       } else {
         // No VI page data — fall back to full-document extraction
-        batches.push([{ ...part, pageScope: null }]);
+        batches.push([{ ...part, pageScope: null, _knownVisit: null }]);
         console.log(`coordinator: part ${part.label} → full-document batch (no VI page data)`);
       }
     }
@@ -1288,6 +1293,8 @@ const generateSummaryWorker = async (event) => {
     const stripText = (batches) => batches.map(batch =>
       batch.map(({ extracted_text: _et, ...rest }) => rest)
     );
+  // Note: _knownVisit is preserved through stripText (it's on the part object
+  // and is not extracted_text). It travels with the batch to the chunkWorker.
     await Promise.all(batchChunks.map(async (chunkBatches, ci) => {
       const batchOffset = ci * CHUNK_SIZE;
       await lambda.send(new InvokeCommand({
@@ -1350,56 +1357,33 @@ const generateSummaryWorker = async (event) => {
     }
 
     // ── 8. Structural merge: bolt deterministic fields onto narrative results ────
-    // For each narrative visit from chunkWorkers, find the matching knownVisit
-    // (by encounter_index position or date+provider fallback) and the rawText
-    // from allParts to run extractStructuredFields deterministically.
+    // Each narrative visit carries _knownVisit embedded by the chunkWorker —
+    // no index math, no position guessing. Direct 1:1 join.
     await setJobStatus(job_id, 'Merging structured fields with narrative...');
 
-    // Build a lookup: source_doc_id → extracted_text (available in coordinator allParts)
+    // Build rawText lookup: source_doc_id → extracted_text
     const rawTextByDocId = {};
     for (const part of allParts) {
       rawTextByDocId[part.id] = part.extracted_text || '';
     }
 
-    // Match narrative results to knownVisits using encounter_index when available,
-    // otherwise fall back to position-based or date+provider matching.
-    // Risk 5 mitigation: defensive matching, never crash on mismatch.
     const mergedVisits = [];
     allVisits.forEach((narrativeVisit, idx) => {
-      // Find the best-match knownVisit
-      let matched = null;
+      // _knownVisit is the exact encounter this narrative result came from
+      const kv = narrativeVisit._knownVisit || null;
 
-      // Try encounter_index match first (reliable for page-scoped batches)
-      if (typeof narrativeVisit.encounter_index === 'number' && narrativeVisit.encounter_index > 0) {
-        matched = knownVisits[narrativeVisit.encounter_index - 1] || null;
-      }
-
-      // Fall back: date+provider match if we have those fields from LLM (shouldn't happen
-      // in new model, but defensive for partial schema fallback results)
-      if (!matched && narrativeVisit.visit_date && narrativeVisit.rendering_provider) {
-        const normProv = normalizeProviderForDedup(narrativeVisit.rendering_provider);
-        matched = knownVisits.find(kv =>
-          kv.date === narrativeVisit.visit_date &&
-          normalizeProviderForDedup(kv.provider) === normProv
-        ) || null;
-      }
-
-      // Fall back: position match (last resort for full-document batches)
-      if (!matched && knownVisits.length > 0) {
-        matched = knownVisits[idx] || knownVisits[0];
-      }
-
-      if (!matched) {
-        // No known visit to match — can happen for full-doc batches with no VI data.
-        // Keep raw narrative output with empty structural fields.
-        console.warn(`coordinator: no knownVisit match for narrative entry ${idx} — using raw output`);
+      if (!kv) {
+        // Full-document batch with no VI data — no structural anchor available.
+        // Keep the raw narrative result; structural fields will be empty.
+        // This is the expected behavior for documents without an encounter_index.
+        console.warn(`coordinator: no _knownVisit for narrative entry ${idx} — keeping raw narrative`);
         const rawVisit = sanitizeVisits([narrativeVisit], patientName);
         if (rawVisit.length) mergedVisits.push(rawVisit[0]);
         return;
       }
 
-      const rawText = rawTextByDocId[matched.source_doc_id] || '';
-      const merged  = mergeStructuredWithNarrative(matched, narrativeVisit, rawText);
+      const rawText = rawTextByDocId[kv.source_doc_id] || '';
+      const merged  = mergeStructuredWithNarrative(kv, narrativeVisit, rawText);
       const cleaned = sanitizeVisits([merged], patientName);
       if (cleaned.length) mergedVisits.push(cleaned[0]);
     });
