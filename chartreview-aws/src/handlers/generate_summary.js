@@ -228,7 +228,7 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder, pageScope = nu
   const bedrockPayload = {
     anthropic_version: 'bedrock-2023-05-31',
     max_tokens: 8000,
-    system: EXTRACTION_SYSTEM_PROMPT,
+    system: NARRATIVE_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: contentBlocks }],
     tools: [{
       name: 'structured_output',
@@ -292,7 +292,7 @@ const callBedrockText = async (textContent, prompt, schema, regionOrder) => {
   const bedrockPayload = {
     anthropic_version: 'bedrock-2023-05-31',
     max_tokens: 8000,
-    system: EXTRACTION_SYSTEM_PROMPT,
+    system: NARRATIVE_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: [
       { type: 'text', text: `DOCUMENT TEXT:\n\`\`\`\n${textContent}\n\`\`\`` },
       { type: 'text', text: prompt },
@@ -410,6 +410,210 @@ const setJobStatus = async (job_id, status_msg) => {
 
 // Normalize provider name for dedup: strips credentials, punctuation,
 // and sorts name tokens so "Chan, Holman MD" == "Holman Chan, MD"
+// ─── sanitizeNarrativeVisits ──────────────────────────────────────────────────
+// Lightweight cleaner for raw LLM narrative output from chunkWorker.
+// Only cleans narrative fields — structural fields are NOT present yet at this stage.
+// Full structural merge (mergeStructuredWithNarrative) runs in the coordinator
+// where extracted_text is available.
+const sanitizeNarrativeVisits = (visits) => {
+  const narrativeFields = ['hpi_summary','chief_complaint','physical_exam_findings',
+                           'imaging_findings','treatment_plan','pain_scale'];
+  const validProgressions = ['improved','same','worse','not_documented'];
+  return (visits || []).filter(v => v && typeof v === 'object').map(v => {
+    const clean = { ...v };
+    narrativeFields.forEach(f => {
+      if (clean[f] === null || clean[f] === undefined) clean[f] = '';
+      else if (typeof clean[f] !== 'string') clean[f] = String(clean[f]);
+    });
+    if (!validProgressions.includes(clean.symptom_progression)) {
+      clean.symptom_progression = 'not_documented';
+    }
+    if (typeof clean.encounter_index !== 'number') {
+      clean.encounter_index = null;
+    }
+    // Drop entries that are explicitly admin-only based on any hint the LLM returns
+    // (shouldn't happen since we told it not to, but safety net)
+    return clean;
+  });
+};
+
+
+// ─── extractStructuredFields ──────────────────────────────────────────────────
+// Pure regex extraction of deterministic fields from raw Textract extracted_text.
+// No LLM involved. Called per-encounter in the coordinator BEFORE Bedrock fires.
+// Returns: { date, diagnosis, icd10 }
+//   date      — YYYY-MM-DD string, or null if no labeled field found
+//   diagnosis — plain text string, or null if not found
+//   icd10     — array of ICD-10 code strings (may be empty)
+//
+// Fallback hierarchy:
+//   date: labeled EMR field (SERVICE DT etc.) > null (VI pre-pass date used instead)
+//   diagnosis: labeled section header > null (LLM not used as fallback for diagnosis)
+//
+// Risk 2 mitigation: multi-line diagnosis captured (up to 5 continuation lines).
+// Risk 3 mitigation: extra patterns for C-4 forms, radiology IMPRESSION.
+
+const LABELED_DATE_PATTERNS = [
+  /SERVICE\s*DT\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+  /ADMIT\s*(?:DATE|DT)\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+  /TRIAGE\s*(?:DATE|DT)\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+  /DATE\s*OF\s*SERVICE\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+  /ENCOUNTER\s*DATE\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+  /REP\s*SRV\s*DT\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+  /VISIT\s*DATE\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+];
+
+// Diagnosis patterns: capture label + multi-line content (stop at next section header
+// or blank line). Risk 2 + 3 mitigation.
+const DIAGNOSIS_PATTERNS = [
+  /(?:^|\n)[ \t]*(?:FINAL\s+)?DIAGNOSIS(?:\s*(?:OR NATURE OF ILLNESS\/INJURY)?)?\s*[:\-]\s*([\s\S]+?)(?=\n[ \t]*[A-Z][A-Z ]{2,}[:\-]|\n\n|$)/im,
+  /(?:^|\n)[ \t]*ASSESSMENT(?:\s*AND\s*PLAN)?\s*[:\-]\s*([\s\S]+?)(?=\n[ \t]*[A-Z][A-Z ]{2,}[:\-]|\n\n|$)/im,
+  /(?:^|\n)[ \t]*IMPRESSION\s*[:\-]\s*([\s\S]+?)(?=\n[ \t]*[A-Z][A-Z ]{2,}[:\-]|\n\n|$)/im,
+  /(?:^|\n)[ \t]*CLINICAL\s*IMPRESSION\s*[:\-]\s*([\s\S]+?)(?=\n[ \t]*[A-Z][A-Z ]{2,}[:\-]|\n\n|$)/im,
+  /(?:^|\n)[ \t]*RADIOLOGIC\s*(?:IMPRESSION|DIAGNOSIS)\s*[:\-]\s*([\s\S]+?)(?=\n[ \t]*[A-Z][A-Z ]{2,}[:\-]|\n\n|$)/im,
+];
+
+const parseDateString = (raw) => {
+  if (!raw) return null;
+  const s = raw.trim();
+  const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m1) {
+    let [, mm, dd, yy] = m1;
+    let year = parseInt(yy, 10);
+    if (year < 100) year += 2000;
+    const month = parseInt(mm, 10);
+    const day   = parseInt(dd, 10);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+  }
+  return null;
+};
+
+const extractStructuredFields = (rawText, providerHint) => {
+  if (!rawText || typeof rawText !== 'string') return {};
+
+  // ── DATE ──────────────────────────────────────────────────────────────────
+  // Anchor to provider name if available; otherwise scan first 3000 chars
+  let searchWindow = rawText.slice(0, 3000);
+  if (providerHint) {
+    const lastName = (providerHint.split(/[,\s]+/)[0] || '').replace(/[^a-zA-Z]/g, '');
+    if (lastName.length > 2) {
+      const idx = rawText.search(new RegExp(lastName, 'i'));
+      if (idx !== -1) {
+        const start = Math.max(0, idx - 2000);
+        const end   = Math.min(rawText.length, idx + 1000);
+        searchWindow = rawText.slice(start, end);
+      }
+    }
+  }
+
+  let extractedDate = null;
+  for (const pattern of LABELED_DATE_PATTERNS) {
+    const m = searchWindow.match(pattern);
+    if (m && m[1]) {
+      const parsed = parseDateString(m[1]);
+      if (parsed) {
+        // Take the EARLIEST labeled date found — handles multi-date headers
+        if (!extractedDate || parsed < extractedDate) {
+          extractedDate = parsed;
+        }
+      }
+    }
+  }
+
+  // ── DIAGNOSIS ─────────────────────────────────────────────────────────────
+  // Scan full text — diagnosis section can appear anywhere in the document
+  let extractedDiagnosis = null;
+  let extractedIcd10 = [];
+
+  for (const pattern of DIAGNOSIS_PATTERNS) {
+    const m = rawText.match(pattern);
+    if (m && m[1]) {
+      // Clean multi-line: collapse whitespace, trim, cap at 400 chars
+      const diagText = m[1].replace(/\s+/g, ' ').trim().slice(0, 400);
+      if (diagText.length > 2) {
+        extractedDiagnosis = diagText;
+        // ICD-10 codes: scan the diagnosis block ± surrounding context
+        const diagIdx = rawText.indexOf(m[1]);
+        const diagWindow = rawText.slice(Math.max(0, diagIdx - 50), diagIdx + m[1].length + 200);
+        const icdPat = /\b([A-TV-Z][0-9][0-9A-Z](?:\.[0-9A-Z]{1,4})?)\b/g;
+        const icdMatches = [];
+        let icdM;
+        while ((icdM = icdPat.exec(diagWindow)) !== null) {
+          icdMatches.push(icdM[1]);
+        }
+        extractedIcd10 = [...new Set(icdMatches)];
+        break; // use first matching pattern
+      }
+    }
+  }
+
+  return {
+    date:      extractedDate,       // YYYY-MM-DD string or null
+    diagnosis: extractedDiagnosis,  // string or null
+    icd10:     extractedIcd10,      // string[] (may be empty)
+  };
+};
+
+// ─── mergeStructuredWithNarrative ─────────────────────────────────────────────
+// Assembles the final visit record by bolting deterministic fields (from
+// encounter_index + extractStructuredFields) on top of LLM narrative output.
+// LLM output cannot override date, provider, facility, diagnosis, or ICD-10.
+//
+// Risk 5 mitigation: encounter_id matching is defensive — falls back to
+// position-based matching if encounter_id is missing or out of range.
+//
+// knownVisit: { date, provider, facility, visit_type, source_doc_id, pages }
+// narrativeResult: { encounter_index?, hpi_summary, chief_complaint,
+//                    physical_exam_findings, treatment_plan,
+//                    symptom_progression, pain_scale, imaging_findings }
+// rawText: extracted_text from the source document part (for date/diag extraction)
+
+const mergeStructuredWithNarrative = (knownVisit, narrativeResult, rawText) => {
+  // Step 1: Deterministic fields — locked, LLM cannot touch these
+  const structured = extractStructuredFields(rawText || '', knownVisit.provider);
+
+  // Date: prefer deterministic regex result; fall back to VI pre-pass date
+  const visit_date = structured.date || knownVisit.date || '';
+  if (structured.date && structured.date !== knownVisit.date) {
+    console.log(`mergeStructured: date corrected ${knownVisit.date} → ${structured.date} (labeled field) [${knownVisit.provider}]`);
+  }
+
+  // Provider / facility / visit_type: always from encounter_index (VI pre-pass)
+  const rendering_provider = (knownVisit.provider || '').trim();
+  const practice_setting   = (knownVisit.facility  || '').trim();
+  const visit_type         = (knownVisit.visit_type || '').trim();
+
+  // Diagnosis: from regex extraction; empty string if not found
+  // (LLM impression_diagnosis is no longer in the narrative schema)
+  const impression_diagnosis = structured.diagnosis || '';
+  const icd10_codes          = Array.isArray(structured.icd10) ? structured.icd10 : [];
+
+  // Step 2: Narrative fields from LLM (safe — only narrative content)
+  const nr = narrativeResult || {};
+  const validProgressions = ['improved', 'same', 'worse', 'not_documented'];
+  const symProg = nr.symptom_progression;
+
+  return {
+    visit_date,
+    rendering_provider,
+    practice_setting,
+    visit_type,
+    chief_complaint:         (nr.chief_complaint         || '').slice(0, 500),
+    hpi_summary:             (nr.hpi_summary             || '').slice(0, 2000),
+    injury_date:             '',
+    pain_scale:              (nr.pain_scale              || '').slice(0, 20),
+    symptom_progression:     validProgressions.includes(symProg) ? symProg : 'not_documented',
+    physical_exam_findings:  (nr.physical_exam_findings  || '').slice(0, 1000),
+    imaging_findings:        (nr.imaging_findings        || '').slice(0, 1000),
+    lab_findings:            '',
+    impression_diagnosis,
+    icd10_codes,
+    treatment_plan:          (nr.treatment_plan          || '').slice(0, 1000),
+  };
+};
+
+
 const normalizeProviderForDedup = (raw) => {
   return (raw || '')
     .toLowerCase()
@@ -530,56 +734,6 @@ const deduplicateVisits = (visits) => {
 // (signature) date. This function scans the treatment_plan for medication
 // administration timestamps and uses the earliest one if it precedes the visit date.
 // Example: note signed 10/02, meds show "(10/01 1937)" → corrected to 2025-10-01.
-const correctEdVisitDates = (visits) => {
-  return visits.map(visit => {
-    const visitType = (visit.visit_type || '').toLowerCase();
-    const setting   = (visit.practice_setting || '').toLowerCase();
-    // Match any ED / ER / hospital emergency encounter
-    const isED = visitType.includes('er') || visitType.includes('emergency') ||
-                 visitType.includes('ed') || setting.includes('emergency') ||
-                 setting.includes(' ed ') || setting.includes('ed -') ||
-                 setting.includes('ed discharge') || setting.includes('emergency department') ||
-                 setting.includes('emergency provider');
-    if (!isED || !visit.visit_date) return visit;
-
-    const textToSearch = (visit.treatment_plan || '') + ' ' + (visit.hpi_summary || '');
-    const currentDate = visit.visit_date; // YYYY-MM-DD
-    const [cy, cm, cd] = currentDate.split('-').map(Number);
-
-    // Match timestamps in multiple formats:
-    //   (10/01 1937)   (10/01/25 2210)   10/01/2025 19:37   10/01 at 19:37
-    const tsPattern = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?:[\s,]+(?:at\s+)?)(\d{1,2}:\d{2}|\d{3,4})\b/gi;
-
-    let earliestDate = null;
-    let m;
-    while ((m = tsPattern.exec(textToSearch)) !== null) {
-      const month = parseInt(m[1], 10);
-      const day   = parseInt(m[2], 10);
-      if (month < 1 || month > 12 || day < 1 || day > 31) continue;
-      let year = cy;
-      if (m[3]) {
-        const rawYear = parseInt(m[3], 10);
-        year = rawYear < 100 ? 2000 + rawYear : rawYear;
-      } else if (month > cm) {
-        year = cy - 1;
-      }
-      const candidate = new Date(year, month - 1, day);
-      const current   = new Date(cy, cm - 1, cd);
-      const diffDays  = (current - candidate) / (1000 * 60 * 60 * 24);
-      // Accept if candidate is 1-3 days before signed date
-      if (diffDays >= 1 && diffDays <= 3) {
-        if (!earliestDate || candidate < earliestDate) earliestDate = candidate;
-      }
-    }
-
-    if (earliestDate) {
-      const corrected = earliestDate.toISOString().split('T')[0];
-      console.log(`correctEdVisitDates: ${visit.rendering_provider} ${currentDate} → ${corrected} (earliest med timestamp)`);
-      return { ...visit, visit_date: corrected };
-    }
-    return visit;
-  });
-};
 
 const sanitizeVisits = (visits, patientName) => {
   const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
@@ -646,226 +800,87 @@ const enforceOneC4 = (visitList) => {
 // ── Forensic analyst system prompt ───────────────────────────────────────────
 // Injected as the Bedrock `system` field on every extraction call.
 // This sets Claude's operating mode before it reads a single word of document content.
-const EXTRACTION_SYSTEM_PROMPT = `You are a forensic medical document analyst specializing in workers' compensation and personal injury litigation. Your work product is read by attorneys and used in legal proceedings — precision and fidelity to the source document are paramount.
+const NARRATIVE_SYSTEM_PROMPT = `You are a medical narrative summarizer working on legal-quality medical record summaries. Your work product is read by attorneys in workers' compensation and personal injury proceedings.
 
-Your operating principles:
-1. DOCUMENT BOUNDARIES ARE ABSOLUTE. Each document in a medical record is a discrete, bounded unit. You extract information from the document you are currently reading — never from an adjacent, co-occurring, or same-date document. If you find yourself writing language that does not appear in the specific document you are extracting, stop and delete it.
-2. YOU DO NOT INFER. You report only what is explicitly written. If a field is not documented, return an empty string. A missing value is always better than a hallucinated one.
-3. YOU DO NOT MERGE. Two documents on the same date from the same provider are two documents. A consultation note and an operative note are different documents. A History & Physical and a Discharge Summary are different documents. You extract each separately, completely, and independently.
-4. YOU ARE CONSERVATIVE WITH CLINICAL LANGUAGE. Do not paraphrase in ways that change meaning. Do not upgrade or downgrade clinical severity. Report findings as documented.
-5. YOU SELF-CHECK FOR BLEED. Before finalizing any visit entry, ask yourself: "Does any language in this entry come from a document other than the one I am currently extracting?" If yes, remove it.`;
+Your sole task is to extract the narrative clinical content from each document — what the clinician observed, what the patient reported, and what was done. Nothing else.
 
-const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
-  const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
-  const multiDocNote = docCount > 1
-    ? `CRITICAL: You are analyzing a batch of documents (part of a larger set of ${docCount} total). These may be parts of a single medical record split across multiple files, or related records for the same patient. You MUST extract entries from ALL documents/files and combine them into a single comprehensive summary. Do not stop after the first document.`
+Absolute rules:
+1. Extract ONLY from the document you are currently reading. Never borrow language from adjacent or same-date documents.
+2. Do not infer. If a field is not documented, return an empty string.
+3. Do not include dates, provider names, diagnoses, ICD codes, or facility names in any narrative field — those are handled separately.
+4. Be ruthlessly concise. Every word must earn its place. No filler, no restatement of headers.
+5. If a document is a PPR, Coding Summary, Consent Form, or Appointment Reminder — return no entry for it.`;
+
+
+
+// ─── buildNarrativePrompt ─────────────────────────────────────────────────────
+// Replaces buildPrompt. Asks LLM ONLY for narrative content.
+// Structural fields (date, provider, facility, diagnosis, ICD-10) are excluded —
+// they are extracted deterministically by extractStructuredFields() and locked
+// from encounter_index before the LLM is ever invoked.
+const buildNarrativePrompt = (chunkLabel, knownVisits) => {
+  const visits = Array.isArray(knownVisits) ? knownVisits : [];
+  const multiDocNote = visits.length > 0
+    ? `You are analyzing ${visits.length} clinical encounter(s)${chunkLabel ? ' ' + chunkLabel : ''}. Extract narrative content for EACH encounter separately.`
+    : `You are analyzing one or more clinical documents${chunkLabel ? ' ' + chunkLabel : ''}. Extract narrative content for each encounter found.`;
+
+  // For page-scoped batches (single encounter), we include a simple encounter label
+  // so the LLM knows what document type it is reading (helps with C-4 / Radiology rules)
+  // but does NOT reveal date, provider, or diagnosis.
+  const encounterHints = visits.length > 0
+    ? `\n\nDOCUMENT TYPE HINTS (to guide extraction rules — do not echo these back):\n` +
+      visits.map((v, i) =>
+        `Encounter ${i + 1}: [${v.visit_type || 'Clinical Note'}]`
+      ).join('\n')
     : '';
-  // pageScopeNote removed — PDF is now pre-sliced to the relevant pages before
-  // being sent to Claude, so no page-focus instruction is needed in the prompt.
-  const checklistSection = knownVisitsChecklist.length > 0
-    ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
-      knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
-      `\n\nCRITICAL: Every entry in the checklist above MUST appear in your output visits array. This includes Radiology entries — even if the same imaging findings appear inside an ED note or H&P, the radiologist's report is a SEPARATE encounter and must be extracted as its own entry. If you cannot find clinical detail for a checklist entry, still include it with date, provider, and facility populated. Do NOT omit any checklist entry.`
-    : '';
-  const skipPagesSection = skipPages.length > 0
-    ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from pages: ${skipPages.join(', ')})`
-    : '';
 
-  return `Your task: analyze these medical document(s) and extract every clinical encounter into a structured JSON array. Be ruthlessly concise — every word must earn its place.
-${multiDocNote}
+  return `${multiDocNote}
 
-DOCUMENT TYPE HANDLING:
-You may encounter different types of documents. Handle each type as follows:
+WHAT YOU EXTRACT (narrative content only):
+For each clinical encounter in the document(s), return:
+1. hpi_summary — History of Present Illness as documented in THIS document only. Patient-reported symptoms, onset, mechanism, and progression. 2-3 sentences max. Do NOT include dates, provider names, or diagnoses.
+2. chief_complaint — One sentence. Stated reason for the visit or document purpose.
+3. physical_exam_findings — Key pertinent POSITIVE findings from the physical exam documented in THIS document. Abnormal findings only. 3 findings max. For operative notes: intraoperative findings. Empty string if no exam.
+4. treatment_plan — Interventions performed or prescribed, medications (name + dose), activity restrictions, follow-up. 2-4 items. From THIS document only.
+5. symptom_progression — One of exactly: "improved", "same", "worse", "not_documented"
+6. pain_scale — Numeric pain score if documented (e.g. "7/10"). Empty string if not documented.
+7. imaging_findings — Imaging performed or interpreted IN THIS document only. Empty string if none.
 
-A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
-    Extract each visit as a separate entry with all standard fields.
-    CRITICAL: Always extract and include the actual practice setting/facility name from the document. Do NOT default to generic "office visit" or leave practice_setting empty.
-    Examples of what to extract:
-    - If document says "Smith Family Medical Group", use "Smith Family Medical Group" as practice_setting
-    - If from "XYZ Orthopedic Associates", use "XYZ Orthopedic Associates" 
-    - If from "Community Hospital Emergency Department", use "Community Hospital Emergency Department"
-    - For ED notes: ALWAYS use "[Hospital Name] - Emergency Department" or "[Hospital Name] Emergency Department" — NEVER just "Emergency Department" alone
-    - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
+WHAT YOU DO NOT RETURN (handled deterministically — omit these fields entirely):
+- visit_date
+- rendering_provider
+- practice_setting
+- impression_diagnosis
+- icd10_codes
+- injury_date
+- lab_findings
 
-B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
-   Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize — use the specific type stated. Examples:
-   - If the document says "Independent Medical Examination" or "IME" → practice_setting: "Independent Medical Examination"
-   - If the document says "Consultation Report" or "Consultative Evaluation" → practice_setting: "Consultation Report"
-   - If the document says "Chart Review" or "Record Review" → practice_setting: "Chart Review"
-   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "Radiology Report" (or the specific modality, e.g., "MRI Report")
-   - If the document says "Narrative Report" or "Narrative Summary" → practice_setting: "Narrative Report"
-   - If the document says "Agreed Medical Examination" or "AME" → practice_setting: "Agreed Medical Examination"
-   - If the document says "Qualified Medical Evaluation" or "QME" → practice_setting: "Qualified Medical Evaluation"
-   - If none of the above apply, use the most accurate label based on what is stated in the document header or title
-   NEVER default to "Independent Medical Examination" unless those exact words (or "IME") appear in the document.
-   For all of these types:
-   - rendering_provider: the expert/reviewing physician's name
-   - chief_complaint: the stated purpose of the report
-   - hpi_summary: the expert's review of history and background as summarized in the report
-   - physical_exam_findings: examination findings if the expert physically examined the patient, otherwise leave empty
-   - impression_diagnosis: the expert's opinions, conclusions, and diagnoses
-   - treatment_plan: the expert's recommendations or causation opinions
-   - imaging_findings: any imaging reviewed or interpreted by the expert
-   - visit_date: the date the report was authored or the examination was performed
+ABSOLUTE RULES:
+- Each document is a bounded unit. Extract ONLY from the document you are currently reading.
+- Do NOT import language from adjacent, co-occurring, or same-date documents.
+- Do NOT include provider names, dates, or diagnoses anywhere in your narrative fields.
+- A Consultation Report and an Operative Report on the same date are TWO separate documents — extract each independently as its own encounter entry.
+- If information is not documented, return empty string "".
 
-C) POLICE REPORTS:
-   Treat as a single entry with:
-   - rendering_provider: the reporting officer's name and badge number if available
-   - practice_setting: "Police Report"
-   - chief_complaint: the incident type (e.g., "Motor Vehicle Collision", "Incident Report")
-   - hpi_summary: narrative description of the incident — how it occurred, parties involved, witness statements, road/weather conditions, and any citations issued. Summarize concisely.
-   - physical_exam_findings: any observations about injuries noted by the officer at the scene
-   - impression_diagnosis: officer's conclusions, fault determination, or citations issued
-   - treatment_plan: any emergency services dispatched or recommended at scene
-   - visit_date: the date of the incident or report
+DOCUMENT-TYPE EXTRACTION RULES:
+- PPR (Physician's Progress Report) — skip entirely, return no entry.
+- Coding Summary / Billing Abstract — skip entirely, return no entry.
+- Consent / Authorization Forms — skip entirely, return no entry.
+- Appointment Reminders / Face Sheets — skip entirely, return no entry.
+- C-4 Workers' Compensation Form — return entry with ALL narrative fields as empty strings.
+- Radiology Report — hpi_summary: clinical indication only. imaging_findings: radiologist findings + impression. treatment_plan: empty.
+- Police Report — hpi_summary: incident narrative. physical_exam_findings: officer scene observations. treatment_plan: emergency services dispatched.
+- Ambulance/EMS Report — hpi_summary: scene description and patient condition. physical_exam_findings: vitals + neuro status. treatment_plan: interventions during transport.
+${encounterHints}
 
-D) AMBULANCE / EMS REPORTS (pre-hospital care records):
-   Treat as a single entry with:
-   - rendering_provider: the paramedic/EMT name or unit number
-   - practice_setting: "Ambulance / EMS Report"
-   - chief_complaint: the patient's chief complaint at the scene
-   - hpi_summary: mechanism of injury, scene description, patient condition on arrival, and patient's reported symptoms. Summarize concisely.
-   - physical_exam_findings: vital signs (BP, HR, RR, O2 sat, GCS), physical findings, and neurological status at scene
-   - impression_diagnosis: EMS impression/working diagnosis
-   - treatment_plan: treatment administered on scene and during transport (IV, medications, immobilization, oxygen, etc.), and destination facility
-   - visit_date: the date of the incident/transport
+DOCUMENT TEXT:
+\`\`\`
+{DOCUMENT_TEXT}
+\`\`\`
 
-E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official WCB Form C-4 header, title block, or reference number (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or injury reports as C-4 unless the actual form is present.
-
-    For ACTUAL C-4 forms only:
-    - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
-    - practice_setting: "C-4 Workers' Compensation Report"
-    - impression_diagnosis: diagnosis only — ICD codes if present, otherwise the written diagnosis
-    - visit_date: the date the form was completed or the examination date — this is CRITICAL to extract even if the rest of the form is illegible
-    - hpi_summary: leave empty
-    - chief_complaint: leave empty
-    - physical_exam_findings: leave empty
-    - treatment_plan: leave empty
-    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set, use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields. Explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit").
-    - ORDERING: The C-4 entry must use the same visit_date as the corresponding office visit so it appears together in chronological order. In the visits array, place the C-4 entry BEFORE the regular office visit entry of the same date.
-
-SAME-DATE DOCUMENT ISOLATION — ABSOLUTE RULE:
-A single calendar date can contain MULTIPLE DISTINCT DOCUMENTS that are each their own separate clinical encounter:
-- A Consultation Report and an Operative Report on the same date are TWO separate visits.
-- A History & Physical (H&P) and a Discharge Summary on the same date are TWO separate visits.
-- A Hospitalist Progress Note and a Surgical Operative Note on the same date are TWO separate visits.
-- A Radiology Report and the ED note that references it on the same date are TWO separate visits.
-EACH DOCUMENT TYPE IS ITS OWN ENTRY. Do NOT collapse them because they share a date.
-The practice_setting for each entry MUST reflect the actual document type:
-  - "Consultation Report" (NOT "Office Visit") for consult letters
-  - "Operative Report" (NOT "Office Visit") for surgical operative notes
-  - "History & Physical" for inpatient H&P documents
-  - "Discharge Summary" or "Discharge Report" for discharge documents
-  - "Hospitalist Progress Note" for inpatient progress notes
-  - "[Full Hospital Name] - Emergency Department" for ED visit notes — ALWAYS include the specific hospital name from the document (e.g. "Sunrise Hospital and Medical Center - Emergency Department", "Centennial Hills Hospital Emergency Department"). NEVER just "Emergency Department" alone.
-  - "Radiology Report" for radiologist-signed imaging reports
-
-CONTENT ISOLATION — ABSOLUTE RULE:
-When extracting any single visit/document, you MUST use ONLY the content within that specific document.
-- A Consultation Report's HPI must come ONLY from the consultation document — NOT from the operative note, NOT from the ED note, NOT from any other same-date document.
-- An Operative Report's HPI must come ONLY from the operative note itself.
-- A Discharge Summary must come ONLY from the discharge document.
-- NEVER borrow, import, or infer content from a different document even if it is the same date and same provider.
-- If the consult note HPI is brief, keep it brief — do NOT pad it with content from the operative report.
-- Each document stands alone. Extract only what is written in that document. Period.
-
-DOCUMENT TYPE RECOGNITION — SAME PROVIDER, SAME DATE:
-If the same provider has both a Consultation Report and an Operative Report on the same date:
-- The Consultation Report entry: use the consult document's own HPI, exam findings, and plan — typically the pre-operative evaluation and clinical reasoning.
-- The Operative Report entry: use the operative note's own content — procedure performed, surgical technique, intraoperative findings, post-op disposition.
-- These are NOT duplicates. They document different clinical activities that happened to occur on the same day.
-
-PHYSICIAN'S PROGRESS REPORT (PPR) — SKIP ENTIRELY:
-In workers' compensation cases, providers routinely generate a Physician's Progress Report (PPR) — a standard pre-printed WC form. The PPR always accompanies a separately dictated/typed office note from the same provider on the same date. The dictated note contains ALL the same clinical information, written more completely.
-RULE: If you identify a document as a Physician's Progress Report or PPR form (typically identified by the "PHYSICIAN'S PROGRESS REPORT" header, structured checkboxes for disability status and restrictions, and a pre-printed form layout), do NOT extract it as a visit entry. Skip it. The dictated note for that date captures the clinical encounter.
-
-CRITICAL: If the document(s) contain MULTIPLE visits or encounters, you MUST extract each as a separate entry in the visits array.
-
-CRITICAL DATE AND TIMELINE ACCURACY:
-- Pay EXTREME attention to dates mentioned in the documents
-- Multiple visits can occur at the SAME LOCATION on DIFFERENT DATES — treat each as a separate visit
-- Match ALL findings, exams, and imaging to the CORRECT visit date they were documented on
-- NEVER include information from a future visit in an earlier visit
-- NEVER reference events that have not occurred yet chronologically
-- Double-check that all information in a visit entry actually occurred on or before that visit date
-
-For EACH entry found, extract the following:
-
-IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most relevant clinical information.
-
-1. Visit date — BE PRECISE, this is critical for timeline accuracy
-   - For ED/hospital visits: use the date the encounter BEGAN, NOT the date the note was electronically signed or finalized.
-   - Priority order for ED visit date (highest to lowest):
-     (a) Explicit admit/triage labels: "Admit:", "Admit Date:", "SERVICE DT:", "Date of Service:", "Triage Date:", "Visit Date:" — use the date in these fields.
-     (b) Medication administration timestamps: if the treatment plan lists medications with timestamps (e.g. "Morphine 4mg IV x1 (10/01 1937)"), and the EARLIEST medication timestamp is a different date than the signature date, use the earlier date — that is when the encounter began.
-     (c) Document header date / signature date — use ONLY if no earlier signal exists.
-   - Example: note signed 10/02, but medications administered starting 10/01 at 19:37 → visit_date = 2025-10-01.
-2. Rendering provider name — the physician/provider who authored THIS document
-3. Practice/setting — use the EXACT document type label (see SAME-DATE DOCUMENT ISOLATION above)
-4. Chief complaint — brief statement of visit or document purpose
-
-5. History of Present Illness (HPI) — SUMMARIZE CONCISELY, FROM THIS DOCUMENT ONLY:
-   - Key presenting symptoms and onset AS DOCUMENTED IN THIS SPECIFIC DOCUMENT
-   - Injury date if applicable (only on first visit) — VERIFY injury date is BEFORE or ON the visit date
-   - Pain scale where provided
-   - Mechanism of injury (brief, first visit only)
-   - Whether symptoms are improved, same, or worse
-   - CRITICAL: Only use content from THIS document. Do NOT import language from a same-date consult, operative note, ED note, or any other document.
-   - Keep to 2-3 sentences maximum. Distill only what is clinically material.
-
-6. Physical Examination Findings — SUMMARIZE KEY PERTINENT POSITIVES ONLY, FROM THIS DOCUMENT:
-   - ONLY findings documented in THIS specific document
-   - Abnormal findings only — omit normal/unremarkable results
-   - 3 key findings maximum
-   - For operative notes: intraoperative findings, not pre-op exam
-   - For consultation notes: the consulting physician's own exam findings only
-
-7. Imaging findings — ONLY if performed or interpreted in THIS document. Do NOT re-report imaging from a co-occurring radiology report.
-8. Lab findings — return empty string always. Laboratory panels are captured separately and are not needed in the summary.
-9. Impression/diagnosis — from THIS document's own conclusions. ICD-10 codes inline in parentheses.
-10. Treatment Plan — CONCISE, 2-4 items max:
-   - Interventions performed or prescribed IN THIS document
-   - Medications (name, dose). For ED visits: include the timestamp of the FIRST medication administered verbatim (e.g. "Morphine 4mg IV (10/01 1937)") — this helps establish the true encounter start time.
-   - Activity restrictions
-   - Follow-up plan
-
-Be RUTHLESSLY CONCISE. Every field reads like a tight medical-legal summary. No filler. No restating headers.
-
-CRITICAL FORMATTING RULES:
-- Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
-- If information is not available for a field, return an empty string "".
-- The icd10_codes field must always be an array of strings (can be empty []).
-- visit_date MUST be in YYYY-MM-DD format always (e.g. 2026-01-20). Never return any other date format.
-- ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER on separate lines.
-
-CRITICAL EXTRACTION RULES:
-(1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
-(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports with their own header block (facility, exam type, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry. The radiologist who signed it is the rendering_provider. Do NOT collapse into the ED note. If the knownVisitsChecklist includes a radiologist entry, you MUST produce a separate entry for that radiologist.
-(2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists in THIS document.
-(3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
-(4) NEVER hallucinate — only use information explicitly written in THIS document.
-(5) Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
-(6) If information is truly not available, return an empty string "".
-(7) The icd10_codes field must always be an array of strings (can be empty []).
-(8) PHYSICAL/OCCUPATIONAL THERAPY VISITS: Extract EVERY individual PT/OT session as its own separate record. Each visit date = one record.
-(9) For PT visits: practice_setting should be the full facility name. Do NOT abbreviate to "PT" or "Physical Therapy". Consistent naming is critical.
-(10) LABORATORY REPORTS: Do NOT extract a standalone laboratory report as a visit. Lab panels are not clinical encounters. If you see a document that is solely a laboratory result printout (CBC, BMP, CMP, urinalysis panels, etc.), skip it entirely — do not produce a visit entry for it.
-(11) PHYSICIAN'S PROGRESS REPORTS (PPR): Do NOT extract a Physician's Progress Report as a visit. These are pre-printed workers' comp forms with checkboxes and structured fields. They are always paired with a dictated office note from the same provider/date that contains all the same information. Skip the PPR form; keep the dictated note.
-(12) CONSENT FORMS / AUTHORIZATION FORMS: Do NOT extract surgical consent forms, "Authorization for Operative and Other Procedure(s)" documents, or any other consent signature pages as visits. These are administrative paperwork — the clinical content (the surgery itself) is captured in the Operative Report. Identifiable by headers like "Authorization for Operative and Other Procedures", "Informed Consent", "Surgical Consent Form".
-(13-admin) APPOINTMENT REMINDERS / FACE SHEETS: Do NOT extract appointment reminder slips, return visit scheduling notices, demographic face sheets, or authorization request forms as visits. These contain no clinical encounter content.
-(13) CODING SUMMARIES / BILLING ABSTRACTS: Do NOT extract hospital coding summaries, DRG abstracts, or billing abstraction records as visits. These are administrative billing documents generated by coders (not clinicians) and contain no independent clinical encounter content. Identifiable by headers like "Coding Summary", "Discharge Abstract", "DRG Assignment", or provider listed as "Coder", "Abstractor", or a system name like "Cacuser".
-
-Return ALL entries found across ALL documents as separate entries in the visits array.
-
-Also extract:
-- Patient name (should be consistent across documents)
-- Case number (should be consistent across documents)
-
-${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
-${checklistSection}
-${skipPagesSection}`;
+Return JSON: { "visits": [ { "encounter_index": 1, "hpi_summary": "", "chief_complaint": "", "physical_exam_findings": "", "treatment_plan": "", "symptom_progression": "not_documented", "pain_scale": "", "imaging_findings": "" } ] }`;
 };
+
 
 
 const buildVisitIndexPrompt = () => {
@@ -993,26 +1008,18 @@ const generateSummaryChunkWorker = async (event) => {
   const fullSchema = {
     type: 'object',
     properties: {
-      patient_name: { type: 'string' },
-      case_number:  { type: 'string' },
       visits: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            visit_date:            { type: 'string' },
-            rendering_provider:    { type: 'string' },
-            practice_setting:      { type: 'string' },
+            encounter_index:       { type: 'integer' },
             chief_complaint:       { type: 'string' },
             hpi_summary:           { type: 'string' },
-            injury_date:           { type: 'string' },
             pain_scale:            { type: 'string' },
             symptom_progression:   { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
             physical_exam_findings:{ type: 'string' },
             imaging_findings:      { type: 'string' },
-            lab_findings:          { type: 'string' },
-            impression_diagnosis:  { type: 'string' },
-            icd10_codes:           { type: 'array', items: { type: 'string' } },
             treatment_plan:        { type: 'string' },
           },
         },
@@ -1028,12 +1035,9 @@ const generateSummaryChunkWorker = async (event) => {
         items: {
           type: 'object',
           properties: {
-            visit_date:           { type: 'string' },
-            rendering_provider:   { type: 'string' },
-            practice_setting:     { type: 'string' },
-            hpi_summary:          { type: 'string' },
-            impression_diagnosis: { type: 'string' },
-            treatment_plan:       { type: 'string' },
+            encounter_index:  { type: 'integer' },
+            hpi_summary:      { type: 'string' },
+            treatment_plan:   { type: 'string' },
           },
         },
       },
@@ -1054,12 +1058,12 @@ const generateSummaryChunkWorker = async (event) => {
       : null;
     if (scopeWithBuffer) console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: page scope [${scopeWithBuffer.join(',')}]`);
     try {
-      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), fullSchema, regionOrder, scopeWithBuffer);
+      const result = await callBedrock(fileKeys, buildNarrativePrompt(batchLabel, knownVisitsChecklist), fullSchema, regionOrder, scopeWithBuffer);
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
-        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), simplifiedSchema, regionOrder, scopeWithBuffer);
+        const result = await callBedrock(fileKeys, buildNarrativePrompt(batchLabel, knownVisitsChecklist), simplifiedSchema, regionOrder, scopeWithBuffer);
         return result;
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
@@ -1090,8 +1094,10 @@ const generateSummaryChunkWorker = async (event) => {
         if (!result) continue;
         if (!patientName && result.patient_name) patientName = result.patient_name;
         if (!caseNumber  && result.case_number)  caseNumber  = result.case_number;
-        const clean = sanitizeVisits(correctEdVisitDates(result.visits || []), patientName);
-        chunkVisits.push(...clean);
+        // Narrative fields only — structural merge happens in coordinator
+        // where extracted_text (rawText) is available from allParts
+        const narrativeVisits = sanitizeNarrativeVisits(result.visits || []);
+        chunkVisits.push(...narrativeVisits);
       }
     }
 
@@ -1343,14 +1349,72 @@ const generateSummaryWorker = async (event) => {
       }
     }
 
-    // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
-    await setJobStatus(job_id, 'Merging and deduplicating visits...');
+    // ── 8. Structural merge: bolt deterministic fields onto narrative results ────
+    // For each narrative visit from chunkWorkers, find the matching knownVisit
+    // (by encounter_index position or date+provider fallback) and the rawText
+    // from allParts to run extractStructuredFields deterministically.
+    await setJobStatus(job_id, 'Merging structured fields with narrative...');
+
+    // Build a lookup: source_doc_id → extracted_text (available in coordinator allParts)
+    const rawTextByDocId = {};
+    for (const part of allParts) {
+      rawTextByDocId[part.id] = part.extracted_text || '';
+    }
+
+    // Match narrative results to knownVisits using encounter_index when available,
+    // otherwise fall back to position-based or date+provider matching.
+    // Risk 5 mitigation: defensive matching, never crash on mismatch.
+    const mergedVisits = [];
+    allVisits.forEach((narrativeVisit, idx) => {
+      // Find the best-match knownVisit
+      let matched = null;
+
+      // Try encounter_index match first (reliable for page-scoped batches)
+      if (typeof narrativeVisit.encounter_index === 'number' && narrativeVisit.encounter_index > 0) {
+        matched = knownVisits[narrativeVisit.encounter_index - 1] || null;
+      }
+
+      // Fall back: date+provider match if we have those fields from LLM (shouldn't happen
+      // in new model, but defensive for partial schema fallback results)
+      if (!matched && narrativeVisit.visit_date && narrativeVisit.rendering_provider) {
+        const normProv = normalizeProviderForDedup(narrativeVisit.rendering_provider);
+        matched = knownVisits.find(kv =>
+          kv.date === narrativeVisit.visit_date &&
+          normalizeProviderForDedup(kv.provider) === normProv
+        ) || null;
+      }
+
+      // Fall back: position match (last resort for full-document batches)
+      if (!matched && knownVisits.length > 0) {
+        matched = knownVisits[idx] || knownVisits[0];
+      }
+
+      if (!matched) {
+        // No known visit to match — can happen for full-doc batches with no VI data.
+        // Keep raw narrative output with empty structural fields.
+        console.warn(`coordinator: no knownVisit match for narrative entry ${idx} — using raw output`);
+        const rawVisit = sanitizeVisits([narrativeVisit], patientName);
+        if (rawVisit.length) mergedVisits.push(rawVisit[0]);
+        return;
+      }
+
+      const rawText = rawTextByDocId[matched.source_doc_id] || '';
+      const merged  = mergeStructuredWithNarrative(matched, narrativeVisit, rawText);
+      const cleaned = sanitizeVisits([merged], patientName);
+      if (cleaned.length) mergedVisits.push(cleaned[0]);
+    });
+
+    let allVisits2 = mergedVisits;
+
+    // ── 8b. Merge + dedup + sort ──────────────────────────────────────────────
+    await setJobStatus(job_id, 'Deduplicating and sorting visits...');
     try {
-      allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+      allVisits2 = mergeEdVisits(deduplicateVisits(allVisits2));
     } catch (mergeErr) {
       console.error('mergeEdVisits error (non-fatal, falling back to dedup only):', mergeErr.message);
-      allVisits = deduplicateVisits(allVisits);
+      allVisits2 = deduplicateVisits(allVisits2);
     }
+    allVisits = allVisits2;
     allVisits.sort((a, b) => {
       if (!a.visit_date) return 1;
       if (!b.visit_date) return -1;
@@ -1363,7 +1427,7 @@ const generateSummaryWorker = async (event) => {
       return 0;
     });
 
-    // ── 9. Recovery pass (same as before) ────────────────────────────────────
+    // ── 9. Recovery pass ─────────────────────────────────────────────────────
     if (knownVisits.length > 0) {
       const foundDates   = new Set(allVisits.map(v => (v.visit_date || '').trim()).filter(Boolean));
       const missingVisits = knownVisits.filter(v => v.date && !foundDates.has(v.date));
@@ -1371,6 +1435,8 @@ const generateSummaryWorker = async (event) => {
       if (missingVisits.length > 0) {
         console.log(`Recovery pass: ${missingVisits.length} missing visits:`, missingVisits.map(v => v.date));
         await setJobStatus(job_id, `Recovery pass: searching for ${missingVisits.length} missing visit${missingVisits.length !== 1 ? 's' : ''}...`);
+
+        // Recovery uses narrative schema only — structural fields bolted on after
         const recSchema = {
           type: 'object',
           properties: {
@@ -1379,25 +1445,20 @@ const generateSummaryWorker = async (event) => {
               items: {
                 type: 'object',
                 properties: {
-                  visit_date:             { type: 'string' },
-                  rendering_provider:     { type: 'string' },
-                  practice_setting:       { type: 'string' },
-                  chief_complaint:        { type: 'string' },
-                  hpi_summary:            { type: 'string' },
-                  injury_date:            { type: 'string' },
-                  pain_scale:             { type: 'string' },
-                  symptom_progression:    { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
-                  physical_exam_findings: { type: 'string' },
-                  imaging_findings:       { type: 'string' },
-                  lab_findings:           { type: 'string' },
-                  impression_diagnosis:   { type: 'string' },
-                  icd10_codes:            { type: 'array', items: { type: 'string' } },
-                  treatment_plan:         { type: 'string' },
+                  encounter_index:       { type: 'integer' },
+                  chief_complaint:       { type: 'string' },
+                  hpi_summary:           { type: 'string' },
+                  pain_scale:            { type: 'string' },
+                  symptom_progression:   { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
+                  physical_exam_findings:{ type: 'string' },
+                  imaging_findings:      { type: 'string' },
+                  treatment_plan:        { type: 'string' },
                 },
               },
             },
           },
         };
+
         const bySourceDoc = {};
         for (const mv of missingVisits) {
           const srcId = mv.source_doc_id || 'unknown';
@@ -1411,15 +1472,22 @@ const generateSummaryWorker = async (event) => {
           await Promise.all(recChunk.map(async ([srcDocId, mvGroup]) => {
             const srcPart    = allParts.find(p => p.id === srcDocId);
             const recFileKey = srcPart?.file_key || allParts[0]?.file_key;
+            const recRawText = rawTextByDocId[srcDocId] || '';
             if (!recFileKey) return;
-            const visitList  = mvGroup.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''}`).join('\n');
-            const recPrompt  = `You are reviewing medical-legal documents. A specific clinical visit is known to exist in these records but was missed in the prior extraction pass.\n\nTARGET VISIT${mvGroup.length > 1 ? 'S' : ''}:\n${visitList}\n\nYour task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided document and extract full clinical details for ${mvGroup.length > 1 ? 'each one' : 'it'}. If you cannot find it, return an empty visits array. Do not extract any other visits.`;
+            const visitList  = mvGroup.map((v, i) => `${i+1}. [${v.visit_type || 'Clinical Note'}]`).join('\n');
+            const recPrompt  = `You are reviewing medical documents. The following clinical encounter(s) are known to exist but were missed in the prior extraction pass:\n\n${visitList}\n\nExtract narrative content only (HPI, exam findings, treatment) for these encounters. Do not extract structural fields (date, provider, diagnosis). Return narrative fields only.`;
             try {
               const recResult = await callBedrock([recFileKey], recPrompt, recSchema, regionOrder);
               if (Array.isArray(recResult.visits) && recResult.visits.length > 0) {
-                const recClean = sanitizeVisits(correctEdVisitDates(recResult.visits || []), patientName);
-                allVisits = allVisits.concat(recClean);
-                console.log(`Recovery: recovered ${recClean.length} visit(s) from ${srcDocId}`);
+                recResult.visits.forEach((narrativeVisit, ri) => {
+                  const kv = mvGroup[ri] || mvGroup[0];
+                  const merged  = mergeStructuredWithNarrative(kv, narrativeVisit, recRawText);
+                  const cleaned = sanitizeVisits([merged], patientName);
+                  if (cleaned.length) {
+                    allVisits = allVisits.concat(cleaned);
+                    console.log(`Recovery: added visit ${kv.date} ${kv.provider}`);
+                  }
+                });
               }
             } catch (recErr) {
               console.warn(`Recovery failed for ${srcDocId}:`, recErr.message);
@@ -1427,11 +1495,11 @@ const generateSummaryWorker = async (event) => {
           }));
         }
         try {
-      allVisits = mergeEdVisits(deduplicateVisits(allVisits));
-    } catch (mergeErr) {
-      console.error('mergeEdVisits error (non-fatal, falling back to dedup only):', mergeErr.message);
-      allVisits = deduplicateVisits(allVisits);
-    }
+          allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+        } catch (mergeErr) {
+          console.error('mergeEdVisits error (non-fatal):', mergeErr.message);
+          allVisits = deduplicateVisits(allVisits);
+        }
         allVisits.sort((a, b) => {
           if (!a.visit_date) return 1;
           if (!b.visit_date) return -1;
