@@ -1687,7 +1687,29 @@ const buildVisitIndexWorkerFn = async (event) => {
       }));
     }
 
-    let knownVisits = [];
+    // ── Write encounter_index back to each document part in DynamoDB ──────────
+    // This is the ONLY place structural fields (date, provider, facility, pages)
+    // are persisted. generateSummaryWorker reads this — LLM never touches these fields.
+    const eiWrites = allParts.map((part, idx) => {
+      const partVisits = viResults[idx] || [];
+      if (partVisits.length === 0) return Promise.resolve();
+      return dynamo.send(new UpdateCommand({
+        TableName: DOCS_TABLE,
+        Key: { aws_document_id: part.id },
+        UpdateExpression: 'SET encounter_index = :ei, updated_at = :now',
+        ExpressionAttributeValues: {
+          ':ei': partVisits,
+          ':now': new Date().toISOString(),
+        },
+      })).then(() => {
+        console.log(`VI: wrote encounter_index for ${part.label} (${partVisits.length} encounters)`);
+      }).catch(e => {
+        console.warn(`VI: failed to write encounter_index for ${part.label}: ${e.message}`);
+      });
+    });
+    await Promise.all(eiWrites);
+
+        let knownVisits = [];
     for (const tagged of viResults) { if (tagged) knownVisits = knownVisits.concat(tagged); }
 
     // Deduplicate
