@@ -1225,56 +1225,65 @@ const generateSummaryWorker = async (event) => {
         console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits from encounter_index`);
       }
 
-      // ── Raw-text ED admit date correction ─────────────────────────────────────
-      // The stored encounter_index may have the physician signature date (e.g. 10/02)
-      // rather than the actual encounter start date. Scan the raw Textract text for
-      // explicit admit/triage date fields and correct ED visit dates accordingly.
-      knownVisits = knownVisits.map(v => {
-        const isED = /er visit|emergency|ed visit/i.test(v.visit_type || '') ||
-                     /emergency/i.test(v.facility || '');
-        if (!isED || !v.date) return v;
+      // ── Page-header date correction for ED/hospital visits ──────────────────
+      // Hospital EMR notes print "Date: MM/DD/YY" in the patient header on every
+      // page. The first page carries the encounter date. The electronic signature
+      // (only source of "10/02" in Tall's note) is at the very end.
+      // Strategy: read the Date: field from the patient header on the first page
+      // of the encounter in the raw Textract text. If earlier than stored date, use it.
+      knownVisits = knownVisits.map(function(v) {
+        var isED = /er visit|emergency|ed visit/i.test(v.visit_type || '') ||
+                   /emergency/i.test(v.facility || '');
+        if (!isED || !v.date || !Array.isArray(v.pages) || v.pages.length === 0) return v;
 
-        // Find the source part's extracted text
-        const srcPart = allParts.find(p => p.id === v.source_doc_id);
-        const rawText = srcPart ? (srcPart.extracted_text || '') : '';
+        var srcPart = allParts.find(function(p) { return p.id === v.source_doc_id; });
+        var rawText = srcPart ? (srcPart.extracted_text || '') : '';
         if (!rawText) return v;
 
-        // Patterns for explicit admit/triage date fields in Textract output
-        // e.g. "Admit Date: 10/01/2025", "Triage Date: 10/01/25", "SERVICE DT 10/01/2025"
-        const admitPatterns = [
-          /(?:Admit(?:ted)?\s*Date|Triage\s*Date|Date\s*of\s*Service|SERVICE\s*DT|Encounter\s*Date|Visit\s*Date)[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/gi,
-        ];
+        var cy = parseInt(v.date.split('-')[0], 10);
+        var cm = parseInt(v.date.split('-')[1], 10);
+        var cd = parseInt(v.date.split('-')[2], 10);
+        var storedDate = new Date(cy, cm - 1, cd);
+        var earliestCandidate = null;
 
-        let earliestCandidate = null;
-        const [cy, cm, cd] = v.date.split('-').map(Number);
-        const currentDate = new Date(cy, cm - 1, cd);
+        // Check first 2 pages of encounter
+        var pagesToCheck = v.pages.slice(0, 2);
+        for (var pi = 0; pi < pagesToCheck.length; pi++) {
+          var pageNum = pagesToCheck[pi];
+          var markerIdx = rawText.indexOf('--- PAGE ' + pageNum + ' ---');
+          if (markerIdx === -1) continue;
 
-        for (const pat of admitPatterns) {
-          let m;
-          while ((m = pat.exec(rawText)) !== null) {
-            const raw = m[1];
-            const parts = raw.split(/[\/\-]/);
-            if (parts.length < 3) continue;
-            let month = parseInt(parts[0], 10);
-            let day   = parseInt(parts[1], 10);
-            let year  = parseInt(parts[2], 10);
-            if (year < 100) year += 2000;
-            if (month < 1 || month > 12 || day < 1 || day > 31) continue;
-            const candidate = new Date(year, month - 1, day);
-            const diffDays = (currentDate - candidate) / (1000 * 60 * 60 * 24);
-            // Accept if 1-5 days before the stored date (multi-day admits)
-            if (diffDays >= 1 && diffDays <= 5) {
-              if (!earliestCandidate || candidate < earliestCandidate) {
-                earliestCandidate = candidate;
-              }
+          // Grab 500 chars after the page marker (patient header block)
+          var block = rawText.slice(markerIdx, markerIdx + 500);
+
+          // Match bare "Date: MM/DD/YY" at line start or after newline
+          // Skips "Discharge Date", "Birth Date", "Signed...Date", etc.
+          var dateMatch = block.match(/(?:^|\n)Date:\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i);
+          if (!dateMatch) continue;
+
+          var rawDate = dateMatch[1];
+          var dp = rawDate.split(/[\/\-]/);
+          if (dp.length < 3) continue;
+          var month = parseInt(dp[0], 10);
+          var day   = parseInt(dp[1], 10);
+          var year  = parseInt(dp[2], 10);
+          if (year < 100) year += 2000;
+          if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+
+          var candidate = new Date(year, month - 1, day);
+          var diffDays = (storedDate - candidate) / (1000 * 60 * 60 * 24);
+          // Accept if 1-7 days before stored (signature) date
+          if (diffDays >= 1 && diffDays <= 7) {
+            if (!earliestCandidate || candidate < earliestCandidate) {
+              earliestCandidate = candidate;
             }
           }
         }
 
         if (earliestCandidate) {
-          const corrected = earliestCandidate.toISOString().split('T')[0];
-          console.log(`coordinator: ED admit correction ${v.provider} ${v.date} → ${corrected} (raw text admit/triage field)`);
-          return { ...v, date: corrected };
+          var corrected = earliestCandidate.toISOString().split('T')[0];
+          console.log('coordinator: ED page-header date fix ' + v.provider + ' ' + v.date + ' -> ' + corrected + ' (first-page Date: header, pages checked: ' + pagesToCheck.join(',') + ')');
+          return Object.assign({}, v, { date: corrected });
         }
         return v;
       });
