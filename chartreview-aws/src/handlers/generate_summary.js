@@ -1208,10 +1208,49 @@ const generateSummaryWorker = async (event) => {
         return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
       };
 
+      // VI schema for live fallback pre-pass
+      const viSchemaCoord = {
+        type: 'object',
+        properties: {
+          visits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                date:       { type: 'string' },
+                provider:   { type: 'string' },
+                facility:   { type: 'string' },
+                visit_type: { type: 'string' },
+                pages:      { type: 'array', items: { type: 'integer' } },
+              },
+            },
+          },
+        },
+      };
+
       for (const part of allParts) {
-        const ei = Array.isArray(part.encounter_index) ? part.encounter_index : [];
+        let ei = Array.isArray(part.encounter_index) ? part.encounter_index : [];
+
+        // ── Live VI pre-pass fallback when encounter_index is missing ────────────
+        // This fires for freshly uploaded documents that have not yet been through
+        // classify. Uses callBedrockText on the stored extracted_text (which has
+        // --- PAGE N --- markers) so page scoping and date correction both work.
+        if (ei.length === 0 && part.extracted_text && part.extracted_text.length > 100) {
+          console.log(`coordinator: no encounter_index for ${part.label} — running live VI pre-pass on extracted_text`);
+          try {
+            const regionOrder = await getRegionOrder();
+            const liveVi = await callBedrockText(part.extracted_text, buildVisitIndexPrompt(), viSchemaCoord, regionOrder);
+            if (Array.isArray(liveVi.visits) && liveVi.visits.length > 0) {
+              ei = liveVi.visits.filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
+              console.log(`coordinator: live VI pre-pass found ${ei.length} visits for ${part.label}`);
+            }
+          } catch (viErr) {
+            console.warn(`coordinator: live VI pre-pass failed for ${part.label} (non-fatal): ${viErr.message}`);
+          }
+        }
+
         if (ei.length === 0) {
-          console.log(`coordinator: part ${part.label} has no encounter_index — will use full-document fallback`);
+          console.log(`coordinator: part ${part.label} has no encounter_index and VI pre-pass yielded nothing — full-document fallback`);
           continue;
         }
         const partVisits = ei.map(v => ({
@@ -1222,7 +1261,7 @@ const generateSummaryWorker = async (event) => {
           pages: Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [],
         })).filter(v => v.date);
         knownVisits = knownVisits.concat(partVisits);
-        console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits from encounter_index`);
+        console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits`);
       }
 
       // ── Page-header date correction for ED/hospital visits ──────────────────
