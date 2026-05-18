@@ -1281,6 +1281,36 @@ const generateSummaryWorker = async (event) => {
         return v;
       });
 
+      // ── Persist encounter_index to DynamoDB ─────────────────────────────────
+      // Write knownVisits (now date-corrected) back to each source document record
+      // so that subsequent summary runs have page[] data for Layer 1 date correction.
+      // Group visits by source_doc_id and write encounter_index to each part.
+      try {
+        var visitsByDoc = {};
+        knownVisits.forEach(function(v) {
+          var docId = v.source_doc_id;
+          if (!docId) return;
+          if (!visitsByDoc[docId]) visitsByDoc[docId] = [];
+          visitsByDoc[docId].push(v);
+        });
+        var docIds = Object.keys(visitsByDoc);
+        await Promise.all(docIds.map(async function(docId) {
+          await dynamo.send(new UpdateCommand({
+            TableName: DOCUMENTS_TABLE,
+            Key: { aws_document_id: docId },
+            UpdateExpression: 'SET encounter_index = :ei, updated_at = :now',
+            ExpressionAttributeValues: {
+              ':ei': visitsByDoc[docId],
+              ':now': new Date().toISOString(),
+            },
+          }));
+        }));
+        console.log('coordinator: persisted encounter_index to ' + docIds.length + ' document(s)');
+      } catch (eiErr) {
+        // Non-fatal — log and continue
+        console.error('coordinator: failed to persist encounter_index:', eiErr.message);
+      }
+
       // Deduplicate by date+provider across all parts
       const viSeen = new Set();
       knownVisits = knownVisits.filter(v => {
