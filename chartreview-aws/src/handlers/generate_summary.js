@@ -895,19 +895,19 @@ const buildVisitIndexPrompt = () => {
 
 For each clinical encounter found, extract:
 1. date - the date of service (YYYY-MM-DD format). For ED/hospital visits use the encounter START date — NOT the electronic signature date.
-   PRIORITY ORDER for ED date (use the earliest you can find):
-   a) Explicit fields: "Admit Date", "Triage Date", "Date of Service", "SERVICE DT", "Encounter Date" in the document header or vitals block
-   b) Medication administration timestamps in the body (e.g. "Morphine 4mg IV (10/01 1937)" — this tells you the patient was present on 10/01)
-   c) Nursing assessment timestamps (e.g. "VS at 2145 on 10/01")
-   d) LAST resort: document header date (which is often the physician signature date, not the encounter start)
-   EXAMPLE: Note header says "10/02/2025" but treatment plan shows "Morphine 4mg IV (10/01 1937)" → use 2025-10-01.
-   A note signed 10/02 for a visit starting 10/01 → use 2025-10-01.
+   PRIORITY ORDER for ED date:
+   a) "Date:" field in the patient header block at the top of each page (most reliable — printed on every page of the note)
+   b) Explicit fields: "Admit Date", "Triage Date", "Date of Service", "SERVICE DT", "Encounter Date" in the document header
+   c) LAST resort: document header date (which is often the physician signature date, not the encounter start)
+   DO NOT use medication administration timestamps or nursing assessment times — these are ambiguous and can span multiple days.
+   EXAMPLE: Page header says "Date: 10/01/25" but note is signed "10/02/25" → use 2025-10-01.
 2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
 3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
 4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
 
 RULES:
 - Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
+- C-4 FORMS: Nevada and other state workers' compensation physician report forms are labeled "FORM C-4" and/or "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT". These are scanned handwritten forms. Identify them by the "FORM C-4" header or "EMPLOYEE'S CLAIM FOR COMPENSATION" title. Use visit_type "C-4 Form". The date is in the physician section of the form (bottom half), labeled "Date" near the provider signature.
 - Each unique date + provider combination is a separate entry.
 - Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
 - CRITICAL: The HPI section often mentions the date of injury -- this is NOT the visit date. The visit date is ALWAYS in the document header or vitals table.
