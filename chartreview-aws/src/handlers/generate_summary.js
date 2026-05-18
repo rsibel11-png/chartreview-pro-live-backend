@@ -887,7 +887,14 @@ const buildVisitIndexPrompt = () => {
   return `You are reviewing medical-legal documents. Your ONLY task is to extract a complete list of every clinical encounter date, provider name, and facility/location.
 
 For each clinical encounter found, extract:
-1. date - the date of service (YYYY-MM-DD format). For ED/hospital visits use the encounter START date (admit date, triage date, "SERVICE DT", "Admit Date", "Date of Service") — NOT the electronic signature date. A note signed 10/02 for a visit starting 10/01 → use 2025-10-01. PRIMARY SOURCE: document header or note title.
+1. date - the date of service (YYYY-MM-DD format). For ED/hospital visits use the encounter START date — NOT the electronic signature date.
+   PRIORITY ORDER for ED date (use the earliest you can find):
+   a) Explicit fields: "Admit Date", "Triage Date", "Date of Service", "SERVICE DT", "Encounter Date" in the document header or vitals block
+   b) Medication administration timestamps in the body (e.g. "Morphine 4mg IV (10/01 1937)" — this tells you the patient was present on 10/01)
+   c) Nursing assessment timestamps (e.g. "VS at 2145 on 10/01")
+   d) LAST resort: document header date (which is often the physician signature date, not the encounter start)
+   EXAMPLE: Note header says "10/02/2025" but treatment plan shows "Morphine 4mg IV (10/01 1937)" → use 2025-10-01.
+   A note signed 10/02 for a visit starting 10/01 → use 2025-10-01.
 2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
 3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
 4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
@@ -949,7 +956,7 @@ const CHUNK_FN          = process.env.GENERATE_CHUNK_WORKER_FUNCTION_NAME || 'ch
 // ── generateSummaryChunkWorker ────────────────────────────────────────────────
 // Processes a slice of batches, writes partial results to its chunk sub-job.
 
-// ─── generateSummaryStart — receives API call, creates job, fires worker async ── v2
+// ─── generateSummaryStart — receives API call, creates job, fires worker async ─
 const generateSummaryStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
   const { doc_ids, patient_name = '' } = body;
@@ -1352,7 +1359,12 @@ const generateSummaryWorker = async (event) => {
 
     // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
-    allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+    try {
+      allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+    } catch (mergeErr) {
+      console.error('mergeEdVisits error (non-fatal, falling back to dedup only):', mergeErr.message);
+      allVisits = deduplicateVisits(allVisits);
+    }
     allVisits.sort((a, b) => {
       if (!a.visit_date) return 1;
       if (!b.visit_date) return -1;
@@ -1428,7 +1440,12 @@ const generateSummaryWorker = async (event) => {
             }
           }));
         }
-        allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+        try {
+      allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+    } catch (mergeErr) {
+      console.error('mergeEdVisits error (non-fatal, falling back to dedup only):', mergeErr.message);
+      allVisits = deduplicateVisits(allVisits);
+    }
         allVisits.sort((a, b) => {
           if (!a.visit_date) return 1;
           if (!b.visit_date) return -1;
