@@ -1084,23 +1084,22 @@ const generateSummaryChunkWorker = async (event) => {
       // Update parent job status so frontend sees progress
       await setJobStatus(job_id, `Analyzing batches ${globalStart}–${globalEnd} of ${totalBatches}...`);
 
-      const results = await Promise.all(
-        slice.map((batch, j) => {
-          const batchPageScope = batch.length === 1 && batch[0].pageScope ? batch[0].pageScope : null;
-          return runBatch(batch, i + j, knownVisits || [], batchPageScope);
+      // Collect {result, knownVisit} pairs — keep _knownVisit in same closure as batch
+      const batchPairs = await Promise.all(
+        slice.map(async (batch, j) => {
+          const batchPageScope  = batch.length === 1 && batch[0].pageScope ? batch[0].pageScope : null;
+          const batchKnownVisit = (batch[0] && batch[0]._knownVisit) ? batch[0]._knownVisit : null;
+          const result = await runBatch(batch, i + j, knownVisits || [], batchPageScope);
+          return { result, batchKnownVisit };
         })
       );
-      for (const result of results) {
+      for (const { result, batchKnownVisit } of batchPairs) {
         if (!result) continue;
         if (!patientName && result.patient_name) patientName = result.patient_name;
         if (!caseNumber  && result.case_number)  caseNumber  = result.case_number;
-        // Narrative fields only — structural merge happens in coordinator.
-        // Tag each narrative result with the knownVisit from this batch
-        // so the coordinator can do a direct 1:1 join (no index guessing).
-        const batchKnownVisit = (batch[0] && batch[0]._knownVisit) ? batch[0]._knownVisit : null;
         const narrativeVisits = sanitizeNarrativeVisits(result.visits || []).map(nv => ({
           ...nv,
-          _knownVisit: batchKnownVisit,    // carries provenance through to coordinator
+          _knownVisit: batchKnownVisit,
         }));
         chunkVisits.push(...narrativeVisits);
       }
