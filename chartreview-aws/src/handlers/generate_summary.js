@@ -949,7 +949,7 @@ const CHUNK_FN          = process.env.GENERATE_CHUNK_WORKER_FUNCTION_NAME || 'ch
 // ── generateSummaryChunkWorker ────────────────────────────────────────────────
 // Processes a slice of batches, writes partial results to its chunk sub-job.
 
-// ─── generateSummaryStart — receives API call, creates job, fires worker async ─
+// ─── generateSummaryStart — receives API call, creates job, fires worker async ── v2
 const generateSummaryStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
   const { doc_ids, patient_name = '' } = body;
