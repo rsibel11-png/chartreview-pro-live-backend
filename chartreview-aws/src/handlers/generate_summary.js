@@ -1225,6 +1225,60 @@ const generateSummaryWorker = async (event) => {
         console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits from encounter_index`);
       }
 
+      // ── Raw-text ED admit date correction ─────────────────────────────────────
+      // The stored encounter_index may have the physician signature date (e.g. 10/02)
+      // rather than the actual encounter start date. Scan the raw Textract text for
+      // explicit admit/triage date fields and correct ED visit dates accordingly.
+      knownVisits = knownVisits.map(v => {
+        const isED = /er visit|emergency|ed visit/i.test(v.visit_type || '') ||
+                     /emergency/i.test(v.facility || '');
+        if (!isED || !v.date) return v;
+
+        // Find the source part's extracted text
+        const srcPart = allParts.find(p => p.id === v.source_doc_id);
+        const rawText = srcPart ? (srcPart.extracted_text || '') : '';
+        if (!rawText) return v;
+
+        // Patterns for explicit admit/triage date fields in Textract output
+        // e.g. "Admit Date: 10/01/2025", "Triage Date: 10/01/25", "SERVICE DT 10/01/2025"
+        const admitPatterns = [
+          /(?:Admit(?:ted)?\s*Date|Triage\s*Date|Date\s*of\s*Service|SERVICE\s*DT|Encounter\s*Date|Visit\s*Date)[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/gi,
+        ];
+
+        let earliestCandidate = null;
+        const [cy, cm, cd] = v.date.split('-').map(Number);
+        const currentDate = new Date(cy, cm - 1, cd);
+
+        for (const pat of admitPatterns) {
+          let m;
+          while ((m = pat.exec(rawText)) !== null) {
+            const raw = m[1];
+            const parts = raw.split(/[\/\-]/);
+            if (parts.length < 3) continue;
+            let month = parseInt(parts[0], 10);
+            let day   = parseInt(parts[1], 10);
+            let year  = parseInt(parts[2], 10);
+            if (year < 100) year += 2000;
+            if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+            const candidate = new Date(year, month - 1, day);
+            const diffDays = (currentDate - candidate) / (1000 * 60 * 60 * 24);
+            // Accept if 1-5 days before the stored date (multi-day admits)
+            if (diffDays >= 1 && diffDays <= 5) {
+              if (!earliestCandidate || candidate < earliestCandidate) {
+                earliestCandidate = candidate;
+              }
+            }
+          }
+        }
+
+        if (earliestCandidate) {
+          const corrected = earliestCandidate.toISOString().split('T')[0];
+          console.log(`coordinator: ED admit correction ${v.provider} ${v.date} → ${corrected} (raw text admit/triage field)`);
+          return { ...v, date: corrected };
+        }
+        return v;
+      });
+
       // Deduplicate by date+provider across all parts
       const viSeen = new Set();
       knownVisits = knownVisits.filter(v => {
