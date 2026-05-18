@@ -1184,31 +1184,85 @@ const generateSummaryWorker = async (event) => {
     }
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
 
-    // ── 3. Read encounter_index from DynamoDB (written by classifyJobWorker VI pre-pass) ────
-    // No Bedrock call needed here — classify already ran VI pre-pass and stored results.
-    // encounter_index = [{ date, provider, facility, visit_type, pages, source_doc_id? }]
+    // ── 3. VI pre-pass — runs every summary generation ──────────────────────────
+    // Always runs Bedrock VI pre-pass to get fresh encounter census.
+    // Results are written back to the documents table (encounter_index) so they
+    // are available for future runs without re-running Bedrock.
+    // Falls back to any previously stored encounter_index if pre-pass fails.
     let knownVisits = [];
     let patientName = patient_name;
     let caseNumber  = '';
+
+    const normalizeDate = (raw) => {
+      let d = (raw || '').trim();
+      if (!d) return '';
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+      const mmddyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (mmddyyyy) return `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
+      const parsed = new Date(d);
+      return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+    };
+
     try {
-      await setJobStatus(job_id, 'Loading pre-pass encounter index...');
-      const normalizeDate = (raw) => {
-        let d = (raw || '').trim();
-        if (!d) return '';
-        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-        const mmddyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-        if (mmddyyyy) return `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
-        const parsed = new Date(d);
-        return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+      await setJobStatus(job_id, 'Running visit index pre-pass...');
+
+      const coordViSchema = {
+        type: 'object',
+        properties: {
+          patient_name: { type: 'string' },
+          visits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                date:       { type: 'string' },
+                provider:   { type: 'string' },
+                facility:   { type: 'string' },
+                visit_type: { type: 'string' },
+                pages:      { type: 'array', items: { type: 'integer' } },
+              },
+            },
+          },
+        },
       };
 
-      for (const part of allParts) {
-        const ei = Array.isArray(part.encounter_index) ? part.encounter_index : [];
-        if (ei.length === 0) {
-          console.log(`coordinator: part ${part.label} has no encounter_index — will use full-document fallback`);
-          continue;
-        }
-        const partVisits = ei.map(v => ({
+      const viResults = new Array(allParts.length).fill(null);
+      for (let vi = 0; vi < allParts.length; vi += 4) {
+        const viChunk = allParts.slice(vi, vi + 4);
+        await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
+          const partIdx = vi + chunkIdx;
+          try {
+            const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), coordViSchema, regionOrder);
+            if (Array.isArray(viResult.visits)) {
+              const filtered = viResult.visits
+                .filter(v => v.date)
+                .map(v => ({ ...v, date: normalizeDate(v.date) }))
+                .filter(v => v.date);
+              viResults[partIdx] = filtered;
+              // Write fresh encounter_index back to documents table
+              if (filtered.length > 0) {
+                dynamo.send(new UpdateCommand({
+                  TableName: DOCS_TABLE,
+                  Key: { aws_document_id: viPart.id },
+                  UpdateExpression: 'SET encounter_index = :ei, updated_at = :now',
+                  ExpressionAttributeValues: { ':ei': filtered, ':now': new Date().toISOString() },
+                })).catch(e => console.warn(`coordinator VI: failed to persist encounter_index for ${viPart.label}: ${e.message}`));
+              }
+            }
+            if (viResult.patient_name && !patientName) patientName = viResult.patient_name;
+            console.log(`coordinator VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
+          } catch (e) {
+            console.warn(`coordinator VI: pre-pass failed for ${viPart.label}: ${e.message} — falling back to stored encounter_index`);
+            // Fall back to whatever was previously stored in DynamoDB for this part
+            viResults[partIdx] = Array.isArray(viPart.encounter_index) ? viPart.encounter_index : [];
+          }
+        }));
+      }
+
+      // Build knownVisits from fresh VI results, tagged with source_doc_id
+      for (let i = 0; i < allParts.length; i++) {
+        const part = allParts[i];
+        const partVisits = (viResults[i] || []).map(v => ({
           ...v,
           date: normalizeDate(v.date),
           source_doc_id: part.id,
@@ -1216,9 +1270,8 @@ const generateSummaryWorker = async (event) => {
           pages: Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [],
         })).filter(v => v.date);
         knownVisits = knownVisits.concat(partVisits);
-        console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits from encounter_index`);
+        console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits from VI pre-pass`);
       }
-
 
       // Deduplicate by date+provider across all parts
       const viSeen = new Set();
@@ -1231,9 +1284,9 @@ const generateSummaryWorker = async (event) => {
       knownVisits = knownVisits.filter(v =>
         !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
       );
-      console.log(`coordinator: encounter_index loaded — ${knownVisits.length} unique visits across all parts`);
+      console.log(`coordinator: VI pre-pass complete — ${knownVisits.length} unique visits across all parts`);
     } catch (viErr) {
-      console.warn('coordinator: encounter_index read failed (non-fatal):', viErr.message);
+      console.warn('coordinator: VI pre-pass failed (non-fatal):', viErr.message);
       knownVisits = [];
     }
 
