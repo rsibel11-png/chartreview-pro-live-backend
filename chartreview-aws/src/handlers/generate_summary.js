@@ -27,7 +27,6 @@ const JOBS_TABLE      = process.env.JOBS_TABLE            || 'chartreview-jobs-p
 const SUMMARIES_TABLE = process.env.SUMMARIES_TABLE       || 'chartreview-summaries-prod';
 const USAGE_TABLE   = process.env.BEDROCK_USAGE_TABLE   || 'chartreview-bedrock-usage';
 const WORKER_FN        = process.env.GENERATE_WORKER_FUNCTION_NAME       || 'chartreview-pro-prod-generateSummaryWorker';
-const POLISH_WORKER_FN = process.env.POLISH_WORKER_FUNCTION_NAME        || 'chartreview-pro-prod-generateSummaryPolishWorker';
 
 // ─── Multi-region Bedrock router ─────────────────────────────────────────────
 // Each region has an independent daily token quota. We track usage per region
@@ -191,7 +190,7 @@ const slicePdfPages = async (fileKey, pages) => {
   }
 
   const newDoc = await PDFDocument.create();
-  const copied = await newDoc.copyPages(srcDoc, indices);
+  const copied = await newDoc.copyPagesFrom(srcDoc, indices);
   copied.forEach(page => newDoc.addPage(page));
 
   const slicedBytes = await newDoc.save();
@@ -407,21 +406,6 @@ const setJobStatus = async (job_id, status_msg) => {
 
 // ─── Ported verbatim from v56 MedicalSummaries.jsx ───────────────────────────
 
-const toTitleCase = (str) => {
-  if (!str) return str;
-  const allCaps = str === str.toUpperCase() && /[A-Z]{2}/.test(str);
-  if (!allCaps) return str;
-  const credentialsPattern = /\b(MD|DO|PA|NP|RN|PT|OT|DC|DPT|LCSW|PhD|DDS|DMD|CRNA|CNS|APRN|EMT|RPA|MPH|MBA|JD|Esq|Jr|Sr|II|III|IV)\b/gi;
-  const credentialMatches = {};
-  str.replace(credentialsPattern, (m) => { credentialMatches[m.toUpperCase()] = m; });
-  return str.replace(/\b\w+/g, (word) => {
-    const upper = word.toUpperCase();
-    if (credentialMatches[upper]) return credentialMatches[upper];
-    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-  });
-};
-
-
 // ─── Original app logic (verbatim from chartreview-pro) + Claude 4.x brevity constraints ──
 
 // Normalize provider name for dedup: strips credentials, punctuation,
@@ -429,8 +413,6 @@ const toTitleCase = (str) => {
 const normalizeProviderForDedup = (raw) => {
   return (raw || '')
     .toLowerCase()
-    .replace(/\(.*?\)/g, ' ')                    // strip parentheticals e.g. "(interpreted by Thomas Boeding DO)"
-    .replace(/\b(interpreted|supervising|on behalf of)\b.*$/i, '') // strip trailing attribution clauses
     .replace(/\b(md|do|pa-?c?|np|rn|dpt|ot|pt|lcsw|psyd|phd|ms|jr|sr|ii|iii)\b/gi, '')
     .replace(/[^a-z\s]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -642,17 +624,8 @@ const sanitizeVisits = (visits, patientName) => {
                         setting.includes('authorization for operative') ||
                         setting.includes('consent for') ||
                         setting.includes('surgical consent') ||
-                        setting.includes('informed consent') ||
-                        setting.includes('discharge planning') ||
-                        setting.includes('case management note'));
-    // Drop "on behalf of" entries — these are admin/auth submissions, not clinical encounters
-    const isOnBehalfOf = provider.includes('on behalf of');
-    // Drop ghost entries: no provider AND no meaningful clinical content
-    const hasNoProvider = !visit.rendering_provider || visit.rendering_provider.trim() === '';
-    const hasNoClinicalContent = !visit.hpi_summary && !visit.chief_complaint &&
-                                  !visit.physical_exam_findings && !visit.treatment_plan;
-    const isGhost = hasNoProvider && hasNoClinicalContent;
-    const skip = !isC4 && (isPPR || isCodingSummary || isAdminOnly || isOnBehalfOf || isGhost);
+                        setting.includes('informed consent'));
+    const skip = !isC4 && (isPPR || isCodingSummary || isAdminOnly);
     if (skip) console.log(`sanitizeVisits: dropping non-clinical entry [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
     return !skip;
   });
@@ -691,7 +664,7 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
   // being sent to Claude, so no page-focus instruction is needed in the prompt.
   const checklistSection = knownVisitsChecklist.length > 0
     ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
-      knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''} [USE THIS DATE: ${v.date}]`).join('\n') +
+      knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
       `\n\nCRITICAL: Every entry in the checklist above MUST appear in your output visits array. This includes Radiology entries — even if the same imaging findings appear inside an ED note or H&P, the radiologist's report is a SEPARATE encounter and must be extracted as its own entry. If you cannot find clinical detail for a checklist entry, still include it with date, provider, and facility populated. Do NOT omit any checklist entry.`
     : '';
   const skipPagesSection = skipPages.length > 0
@@ -757,14 +730,8 @@ D) AMBULANCE / EMS REPORTS (pre-hospital care records):
    - treatment_plan: treatment administered on scene and during transport (IV, medications, immobilization, oxygen, etc.), and destination facility
    - visit_date: the date of the incident/transport
 
-E) C-4 FORMS (Workers' Compensation Doctor's Report):
-    STRICT IDENTIFICATION: Treat as a C-4 if the document EXPLICITLY shows ANY of these markers:
-    - "Form C-4", "WCB Form C-4", "Workers' Compensation Board"
-    - "EMPLOYEE'S CLAIM FOR COMPENSATION"
-    - "C-4" anywhere in the document title or header block
-    - "Doctor's Initial Report", "Treating Physician's Report", "First Report of Injury" on a state WC form
-    - Any state workers' compensation physician report form (Nevada, New York, California, etc.)
-    Do NOT label regular office visit notes or injury reports as C-4 unless the actual WC form is present.
+E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
+    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official WCB Form C-4 header, title block, or reference number (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or injury reports as C-4 unless the actual form is present.
 
     For ACTUAL C-4 forms only:
     - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
@@ -906,19 +873,19 @@ const buildVisitIndexPrompt = () => {
 
 For each clinical encounter found, extract:
 1. date - the date of service (YYYY-MM-DD format). For ED/hospital visits use the encounter START date — NOT the electronic signature date.
-   PRIORITY ORDER for ED date:
-   a) "Date:" field in the patient header block at the top of each page (most reliable — printed on every page of the note)
-   b) Explicit fields: "Admit Date", "Triage Date", "Date of Service", "SERVICE DT", "Encounter Date" in the document header
-   c) LAST resort: document header date (which is often the physician signature date, not the encounter start)
-   DO NOT use medication administration timestamps or nursing assessment times — these are ambiguous and can span multiple days.
-   EXAMPLE: Page header says "Date: 10/01/25" but note is signed "10/02/25" → use 2025-10-01.
+   PRIORITY ORDER for ED date (use the earliest you can find):
+   a) Explicit fields: "Admit Date", "Triage Date", "Date of Service", "SERVICE DT", "Encounter Date" in the document header or vitals block
+   b) Medication administration timestamps in the body (e.g. "Morphine 4mg IV (10/01 1937)" — this tells you the patient was present on 10/01)
+   c) Nursing assessment timestamps (e.g. "VS at 2145 on 10/01")
+   d) LAST resort: document header date (which is often the physician signature date, not the encounter start)
+   EXAMPLE: Note header says "10/02/2025" but treatment plan shows "Morphine 4mg IV (10/01 1937)" → use 2025-10-01.
+   A note signed 10/02 for a visit starting 10/01 → use 2025-10-01.
 2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
 3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
 4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
 
 RULES:
 - Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
-- C-4 FORMS: Nevada and other state workers' compensation physician report forms are labeled "FORM C-4" and/or "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT". These are scanned handwritten forms. Identify them by the "FORM C-4" header or "EMPLOYEE'S CLAIM FOR COMPENSATION" title. Use visit_type "C-4 Form". The date is in the physician section of the form (bottom half), labeled "Date" near the provider signature.
 - Each unique date + provider combination is a separate entry.
 - Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
 - CRITICAL: The HPI section often mentions the date of injury -- this is NOT the visit date. The visit date is ALWAYS in the document header or vitals table.
@@ -1225,49 +1192,10 @@ const generateSummaryWorker = async (event) => {
         return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
       };
 
-      // VI schema for live fallback pre-pass
-      const viSchemaCoord = {
-        type: 'object',
-        properties: {
-          visits: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                date:       { type: 'string' },
-                provider:   { type: 'string' },
-                facility:   { type: 'string' },
-                visit_type: { type: 'string' },
-                pages:      { type: 'array', items: { type: 'integer' } },
-              },
-            },
-          },
-        },
-      };
-
       for (const part of allParts) {
-        let ei = Array.isArray(part.encounter_index) ? part.encounter_index : [];
-
-        // ── Live VI pre-pass fallback when encounter_index is missing ────────────
-        // This fires for freshly uploaded documents that have not yet been through
-        // classify. Uses callBedrockText on the stored extracted_text (which has
-        // --- PAGE N --- markers) so page scoping and date correction both work.
-        if (ei.length === 0 && part.extracted_text && part.extracted_text.length > 100) {
-          console.log(`coordinator: no encounter_index for ${part.label} — running live VI pre-pass on extracted_text`);
-          try {
-            const regionOrder = await getRegionOrder();
-            const liveVi = await callBedrockText(part.extracted_text, buildVisitIndexPrompt(), viSchemaCoord, regionOrder);
-            if (Array.isArray(liveVi.visits) && liveVi.visits.length > 0) {
-              ei = liveVi.visits.filter(v => v.date && /^\d{4}-\d{2}-\d{2}$/.test(v.date));
-              console.log(`coordinator: live VI pre-pass found ${ei.length} visits for ${part.label}`);
-            }
-          } catch (viErr) {
-            console.warn(`coordinator: live VI pre-pass failed for ${part.label} (non-fatal): ${viErr.message}`);
-          }
-        }
-
+        const ei = Array.isArray(part.encounter_index) ? part.encounter_index : [];
         if (ei.length === 0) {
-          console.log(`coordinator: part ${part.label} has no encounter_index and VI pre-pass yielded nothing — full-document fallback`);
+          console.log(`coordinator: part ${part.label} has no encounter_index — will use full-document fallback`);
           continue;
         }
         const partVisits = ei.map(v => ({
@@ -1278,7 +1206,7 @@ const generateSummaryWorker = async (event) => {
           pages: Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [],
         })).filter(v => v.date);
         knownVisits = knownVisits.concat(partVisits);
-        console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits`);
+        console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits from encounter_index`);
       }
 
       // ── Page-header date correction for ED/hospital visits ──────────────────
@@ -1610,7 +1538,7 @@ const generateSummaryWorker = async (event) => {
 
     await setJobStatus(job_id, `Saving ${allVisits.length} visits...`);
 
-    // Save summary record with status 'polishing' — hidden from UI until polish pass completes
+    // Save summary record as 'draft' — immediately visible in UI
     const aws_summary_id = require('crypto').randomUUID();
     const org_id = docRecords[0]?.org_id || '';
     await dynamo.send(new PutCommand({
@@ -1623,12 +1551,12 @@ const generateSummaryWorker = async (event) => {
         visits:        allVisits,
         doc_count:     docRecords.length,
         visit_count:   allVisits.length,
-        status:        'polishing',
+        status:        'draft',
         created_at:    new Date().toISOString(),
         updated_at:    new Date().toISOString(),
       },
     }));
-    console.log(`coordinator: summary saved as 'polishing' — aws_summary_id=${aws_summary_id}`);
+    console.log(`coordinator: summary saved as draft — aws_summary_id=${aws_summary_id}`);
 
     // Stamp summary_id onto the job record — idempotency guard for duplicate Lambda invocations
     try {
@@ -1639,25 +1567,6 @@ const generateSummaryWorker = async (event) => {
       }));
     } catch (stampErr) {
       console.warn('coordinator: failed to stamp summary_id on job (non-fatal):', stampErr.message);
-    }
-
-    // Fire polish worker async — coordinator does NOT wait
-    try {
-      await lambda.send(new InvokeCommand({
-        FunctionName:   POLISH_WORKER_FN,
-        InvocationType: 'Event',
-        Payload:        Buffer.from(JSON.stringify({ aws_summary_id, org_id })),
-      }));
-      console.log(`coordinator: polish worker invoked for ${aws_summary_id}`);
-    } catch (invokeErr) {
-      // If invoke fails, flip status to draft so card still appears
-      console.error('coordinator: polish invoke failed — marking draft directly', invokeErr.message);
-      await dynamo.send(new UpdateCommand({
-        TableName: SUMMARIES_TABLE, Key: { aws_summary_id },
-        UpdateExpression: 'SET #s = :s, updated_at = :now',
-        ExpressionAttributeNames: { '#s': 'status' },
-        ExpressionAttributeValues: { ':s': 'draft', ':now': new Date().toISOString() },
-      }));
     }
 
     await markJobComplete(job_id, {
@@ -1678,7 +1587,7 @@ const generateSummaryWorker = async (event) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // BUILD VISIT INDEX — reuses all existing infrastructure, stops after VI pre-pass
-// Updated: 2026-05-16 — VI pre-pass moved to classify step; coordinator reads encounter_index from DynamoDB
+// Updated: 2026-05-16 — buildVisitIndex functions; VI pre-pass runs at classify time and stores encounter_index in DynamoDB
 // Updated: 2026-04-28 — replaces standalone build_visit_index.js entirely
 // ═══════════════════════════════════════════════════════════════════════════════
 
