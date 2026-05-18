@@ -663,9 +663,13 @@ const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsCheckli
   // pageScopeNote removed — PDF is now pre-sliced to the relevant pages before
   // being sent to Claude, so no page-focus instruction is needed in the prompt.
   const checklistSection = knownVisitsChecklist.length > 0
-    ? `\n\nKNOWN VISITS CHECKLIST (from pre-pass — ensure ALL are represented in your output):\n` +
+    ? `\n\nKNOWN VISITS CHECKLIST — AUTHORITATIVE ENCOUNTER DATES:\n` +
       knownVisitsChecklist.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''} | ${v.visit_type || ''}`).join('\n') +
-      `\n\nCRITICAL: Every entry in the checklist above MUST appear in your output visits array. This includes Radiology entries — even if the same imaging findings appear inside an ED note or H&P, the radiologist's report is a SEPARATE encounter and must be extracted as its own entry. If you cannot find clinical detail for a checklist entry, still include it with date, provider, and facility populated. Do NOT omit any checklist entry.`
+      `\n\nCRITICAL CHECKLIST RULES:` +
+      `\n(A) Every entry above MUST appear in your output visits array — do NOT omit any.` +
+      `\n(B) The date shown in each checklist entry is the VALIDATED ENCOUNTER DATE — the actual date the patient was seen. Use it as visit_date EXACTLY as shown.` +
+      `\n(C) Do NOT use the document header date, signature date, dictation date, or transcription date as visit_date if a checklist date is provided for that encounter.` +
+      `\n(D) Radiology entries are SEPARATE encounters — extract each radiologist as its own entry even if findings also appear inside an ED note or H&P.`
     : '';
   const skipPagesSection = skipPages.length > 0
     ? `\n\nSKIP THESE PAGES (non-clinical/administrative, confirmed by pre-classification — do not extract visits from pages: ${skipPages.join(', ')})`
@@ -836,7 +840,13 @@ CRITICAL FORMATTING RULES:
 - Every field must be a plain text string. NEVER return null, arrays, or objects for text fields.
 - If information is not available for a field, return an empty string "".
 - The icd10_codes field must always be an array of strings (can be empty []).
-- visit_date MUST be in YYYY-MM-DD format always (e.g. 2026-01-20). Never return any other date format.
+- visit_date is the ACTUAL DATE THE PATIENT WAS SEEN / TREATED. Use this strict priority order:
+  1. The date in the KNOWN VISITS CHECKLIST above (validated encounter date — highest authority).
+  2. Earliest clinical timestamp in the document: triage time, medication administered, nursing note, arrival time.
+  3. "Date of Service", "Service Date", "Seen On", or "Visit Date" field in the document header.
+  4. Last resort only: the document header date or "Date:" field.
+  NEVER use: physician signature date, "Date Signed", "Dictated On", "Transcribed On".
+- visit_date MUST be in YYYY-MM-DD format (e.g. 2026-01-20). Never return any other date format.
 - ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER on separate lines.
 
 CRITICAL EXTRACTION RULES:
