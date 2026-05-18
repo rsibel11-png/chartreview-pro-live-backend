@@ -286,101 +286,6 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder, pageScope = nu
   throw lastErr; // all regions + models exhausted
 };
 
-// Text-based Bedrock call — uses extracted_text string instead of PDF bytes.
-// No S3 fetch, no pdf-lib, no 100-page limit.
-// pageScope: optional array of 1-based page numbers — if provided, slices text
-// between matching '--- PAGE N ---' markers before sending.
-const callBedrockWithText = async (extractedText, prompt, schema, regionOrder, pageScope = null) => {
-  let textToSend = extractedText || '';
-
-  if (pageScope && pageScope.length > 0 && textToSend) {
-    // Slice extracted_text to only the pages in pageScope.
-    // Pages are marked with '--- PAGE N ---' lines injected by Textract processing.
-    const pageSet = new Set(pageScope);
-    const pageLines = textToSend.split('\n');
-    const slicedLines = [];
-    let currentPage = null;
-    let inScope = false;
-    for (const line of pageLines) {
-      const pageMarker = line.match(/^---\s*PAGE\s+(\d+)\s*---$/i);
-      if (pageMarker) {
-        currentPage = parseInt(pageMarker[1], 10);
-        inScope = pageSet.has(currentPage);
-        if (inScope) slicedLines.push(line);
-      } else if (inScope) {
-        slicedLines.push(line);
-      }
-    }
-    if (slicedLines.length > 0) {
-      textToSend = slicedLines.join('\n');
-      console.log(`callBedrockWithText: scoped to pages [${pageScope.join(',')}] → ${textToSend.length} chars`);
-    } else {
-      console.warn(`callBedrockWithText: page scope [${pageScope.join(',')}] matched no text, sending full text`);
-    }
-  }
-
-  const contentBlocks = [
-    { type: 'text', text: textToSend },
-    { type: 'text', text: prompt },
-  ];
-
-  const bedrockPayload = {
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 8000,
-    system: NARRATIVE_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: contentBlocks }],
-    tools: [{
-      name: 'structured_output',
-      description: 'Return structured data',
-      input_schema: schema,
-    }],
-    tool_choice: { type: 'tool', name: 'structured_output' },
-  };
-
-  const orderedRegions = regionOrder || selectBestRegions(await getRegionUsage());
-  let lastErr;
-  for (const candidate of orderedRegions) {
-    const { region, models } = candidate;
-    for (const modelId of models) {
-      try {
-        console.log(`callBedrockWithText: trying region=${region} model=${modelId}`);
-        const client = getBedrockClient(region);
-        const cmd = new InvokeModelCommand({
-          modelId,
-          contentType: 'application/json',
-          accept: 'application/json',
-          body: JSON.stringify(bedrockPayload),
-        });
-        const res = await client.send(cmd);
-        const parsed = JSON.parse(Buffer.from(res.body).toString('utf-8'));
-        const toolUse = parsed.content?.find(b => b.type === 'tool_use');
-        if (!toolUse) throw new Error('Bedrock returned no tool_use block');
-        console.log(`callBedrockWithText: success region=${region} model=${modelId}`);
-        console.log('callBedrockWithText input keys: ' + Object.keys(toolUse.input || {}).join(','));
-        await incrementRegionUsage(region, 5000);
-        return toolUse.input;
-      } catch (err) {
-        const isThrottle = err.message?.includes('Too many tokens') ||
-                           err.name === 'ThrottlingException' ||
-                           err.$metadata?.httpStatusCode === 429;
-        const isTooLong = err.message?.includes('Input is too long');
-        console.warn(`callBedrockWithText: region=${region} model=${modelId} failed — ${err.message}`);
-        lastErr = err;
-        if (isTooLong) throw err;
-        if (!isThrottle) throw err;
-      }
-    }
-    if (lastErr) {
-      const isRegionThrottled = lastErr.message?.includes('Too many tokens') ||
-                                lastErr.name === 'ThrottlingException' ||
-                                lastErr.$metadata?.httpStatusCode === 429;
-      if (isRegionThrottled) await saturateRegion(region);
-    }
-  }
-  throw lastErr;
-};
-
-
 // Text-only Bedrock call — no PDF, just a plain text prompt.
 // Used by VI pre-pass to read extracted_text from DynamoDB (free, no vision tokens).
 const callBedrockText = async (textContent, prompt, schema, regionOrder) => {
@@ -1140,36 +1045,25 @@ const generateSummaryChunkWorker = async (event) => {
   };
 
   const runBatch = async (batch, batchIndex, knownVisitsChecklist = [], pageScope = null) => {
-    const docId = batch[0] && batch[0].id;
-    if (!docId) {
-      console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: no doc id, skipping`);
+    const fileKeys = batch.map(p => p.file_key).filter(Boolean);
+    if (!fileKeys.length) {
+      console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: no valid file keys, skipping`);
       return null;
     }
     const globalBatchNum = batchOffset + batchIndex + 1;
     const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
-
     // Add ±1 page buffer so we don't miss content at encounter edges
     const scopeWithBuffer = pageScope && pageScope.length > 0
       ? [...new Set(pageScope.flatMap(p => [p - 1, p, p + 1]).filter(p => p > 0))].sort((a, b) => a - b)
       : null;
     if (scopeWithBuffer) console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: page scope [${scopeWithBuffer.join(',')}]`);
-
-    // Fetch extracted_text from DynamoDB — stripped from payload to stay under 1MB Lambda limit
-    let extractedText = '';
     try {
-      const docRec = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: docId } }));
-      extractedText = (docRec.Item && docRec.Item.extracted_text) || '';
-    } catch (fetchErr) {
-      console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: failed to fetch extracted_text for ${docId}: ${fetchErr.message}`);
-    }
-
-    try {
-      const result = await callBedrockWithText(extractedText, buildNarrativePrompt(batchLabel, knownVisitsChecklist), fullSchema, regionOrder, scopeWithBuffer);
+      const result = await callBedrock(fileKeys, buildNarrativePrompt(batchLabel, knownVisitsChecklist), fullSchema, regionOrder, scopeWithBuffer);
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
-        const result = await callBedrockWithText(extractedText, buildNarrativePrompt(batchLabel, knownVisitsChecklist), simplifiedSchema, regionOrder, scopeWithBuffer);
+        const result = await callBedrock(fileKeys, buildNarrativePrompt(batchLabel, knownVisitsChecklist), simplifiedSchema, regionOrder, scopeWithBuffer);
         return result;
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
@@ -1338,7 +1232,7 @@ const generateSummaryWorker = async (event) => {
         await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
           const partIdx = vi + chunkIdx;
           try {
-            const viResult = await callBedrockWithText(viPart.extracted_text || '', buildVisitIndexPrompt(), coordViSchema, regionOrder);
+            const viResult = await callBedrock([viPart.file_key], buildVisitIndexPrompt(), coordViSchema, regionOrder);
             if (Array.isArray(viResult.visits)) {
               const filtered = viResult.visits
                 .filter(v => v.date)
