@@ -690,18 +690,18 @@ A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
 B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
    Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize — use the specific type stated. Examples:
    - If the document says "Independent Medical Examination" or "IME" → practice_setting: "Independent Medical Examination"
-   - If the document says "Consultation Report" or "Consultative Evaluation" → practice_setting: "Consultation Report — [Facility Name]" if part of a hospital record, or "Consultation Report" if standalone
+   - If the document says "Consultation Report" or "Consultative Evaluation" → practice_setting: "[Facility Name] - Consultation Report" if part of a hospital record, or "Consultation Report" if standalone
    - If the document says "Chart Review" or "Record Review" → practice_setting: "Chart Review"
-   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "Radiology Report — [Facility Name]" if part of a hospital record, or "Radiology Report" if standalone
+   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "[Facility Name] - Radiology Report" if part of a hospital record, or "Radiology Report" if standalone
    - If the document says "Narrative Report" or "Narrative Summary" → practice_setting: "Narrative Report"
    - If the document says "Agreed Medical Examination" or "AME" → practice_setting: "Agreed Medical Examination"
    - If the document says "Qualified Medical Evaluation" or "QME" → practice_setting: "Qualified Medical Evaluation"
-   - If the document says "Operative Report" or "Operative Note" and it is part of a hospital record → practice_setting: "Operative Report — [Facility Name]"
-   - If the document says "History & Physical" or "H&P" and it is part of a hospital record → practice_setting: "History & Physical — [Facility Name]"
-   - If the document says "Discharge Summary" and it is part of a hospital record → practice_setting: "Discharge Summary — [Facility Name]"
+   - If the document says "Operative Report" or "Operative Note" and it is part of a hospital record → practice_setting: "[Facility Name] - Operative Report"
+   - If the document says "History & Physical" or "H&P" and it is part of a hospital record → practice_setting: "[Facility Name] - History & Physical"
+   - If the document says "Discharge Summary" and it is part of a hospital record → practice_setting: "[Facility Name] - Discharge Summary"
    - If none of the above apply, use the most accurate label based on what is stated in the document header or title
    NEVER default to "Independent Medical Examination" unless those exact words (or "IME") appear in the document.
-   FACILITY NAME RULE: When a document is embedded within a hospital or medical center record (i.e., the record originates from a named hospital/facility), always append " — [Facility Name]" to the document type label. Extract the facility name from the document header, letterhead, or routing stamp. Example: "Consultation Report — Sunrise Hospital and Medical Center", "Operative Report — Spring Valley Hospital", "Radiology Report — Sunrise Hospital and Medical Center".
+   FACILITY NAME RULE: When a document is embedded within a hospital or medical center record (i.e., the record originates from a named hospital/facility), always prepend the facility name: "[Facility Name] - [Document Type]". Extract the facility name from the document header, letterhead, or routing stamp. Example: "Sunrise Hospital and Medical Center - Consultation Report", "Spring Valley Hospital - Operative Report", "Sunrise Hospital and Medical Center - Radiology Report".
    For all of these types:
    - rendering_provider: the expert/reviewing physician's name
    - chief_complaint: the stated purpose of the report
