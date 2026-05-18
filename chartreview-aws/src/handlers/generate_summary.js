@@ -690,14 +690,18 @@ A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
 B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
    Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize — use the specific type stated. Examples:
    - If the document says "Independent Medical Examination" or "IME" → practice_setting: "Independent Medical Examination"
-   - If the document says "Consultation Report" or "Consultative Evaluation" → practice_setting: "Consultation Report"
+   - If the document says "Consultation Report" or "Consultative Evaluation" → practice_setting: "Consultation Report — [Facility Name]" if part of a hospital record, or "Consultation Report" if standalone
    - If the document says "Chart Review" or "Record Review" → practice_setting: "Chart Review"
-   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "Radiology Report" (or the specific modality, e.g., "MRI Report")
+   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "Radiology Report — [Facility Name]" if part of a hospital record, or "Radiology Report" if standalone
    - If the document says "Narrative Report" or "Narrative Summary" → practice_setting: "Narrative Report"
    - If the document says "Agreed Medical Examination" or "AME" → practice_setting: "Agreed Medical Examination"
    - If the document says "Qualified Medical Evaluation" or "QME" → practice_setting: "Qualified Medical Evaluation"
+   - If the document says "Operative Report" or "Operative Note" and it is part of a hospital record → practice_setting: "Operative Report — [Facility Name]"
+   - If the document says "History & Physical" or "H&P" and it is part of a hospital record → practice_setting: "History & Physical — [Facility Name]"
+   - If the document says "Discharge Summary" and it is part of a hospital record → practice_setting: "Discharge Summary — [Facility Name]"
    - If none of the above apply, use the most accurate label based on what is stated in the document header or title
    NEVER default to "Independent Medical Examination" unless those exact words (or "IME") appear in the document.
+   FACILITY NAME RULE: When a document is embedded within a hospital or medical center record (i.e., the record originates from a named hospital/facility), always append " — [Facility Name]" to the document type label. Extract the facility name from the document header, letterhead, or routing stamp. Example: "Consultation Report — Sunrise Hospital and Medical Center", "Operative Report — Spring Valley Hospital", "Radiology Report — Sunrise Hospital and Medical Center".
    For all of these types:
    - rendering_provider: the expert/reviewing physician's name
    - chief_complaint: the stated purpose of the report
@@ -731,7 +735,7 @@ D) AMBULANCE / EMS REPORTS (pre-hospital care records):
    - visit_date: the date of the incident/transport
 
 E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official WCB Form C-4 header, title block, or reference number (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or injury reports as C-4 unless the actual form is present.
+    IDENTIFICATION: Treat as a C-4 if the document contains ANY of the following: "Form C-4", "C-4", "Workers' Compensation Board", "WCB Report", "EMPLOYEE'S CLAIM FOR COMPENSATION", or "Doctor's Report of Initial Examination". These forms are often partially illegible or printed as scanned images — extract what you can. Do NOT label regular office visit notes as C-4 unless one of the above identifiers is present.
 
     For ACTUAL C-4 forms only:
     - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
