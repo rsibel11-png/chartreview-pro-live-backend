@@ -455,6 +455,69 @@ const normalizeSettingForDedup = (raw) => {
   return s.replace(/\s+/g, ' ').trim();
 };
 
+
+// ── Merge same-date ED visits ─────────────────────────────────────────────────
+// When multiple providers document the same ED encounter (e.g. attending + PA),
+// the model returns separate entries. Merge them: keep the richest content per field.
+const mergeEdVisits = (visits) => {
+  const edGroups = {};
+  const nonEd = [];
+
+  visits.forEach(v => {
+    const s = (v.practice_setting || '').toLowerCase();
+    const t = (v.visit_type || '').toLowerCase();
+    const isED = t.includes('er') || t.includes('emergency') || t.includes('ed') ||
+                 s.includes('emergency') || s.includes('emergency department') ||
+                 s.includes('emergency provider');
+    if (!isED || !v.visit_date) { nonEd.push(v); return; }
+
+    // Group by date + first word of facility (e.g. "Sunrise")
+    const facilityWord = (v.practice_setting || '').split(/[\s\-–—,]/)[0].toLowerCase();
+    const groupKey = `${v.visit_date}|${facilityWord}`;
+    if (!edGroups[groupKey]) edGroups[groupKey] = [];
+    edGroups[groupKey].push(v);
+  });
+
+  const merged = [];
+  Object.values(edGroups).forEach(group => {
+    if (group.length === 1) { merged.push(group[0]); return; }
+
+    // Pick the entry with the most content as base
+    const base = group.slice().sort((a, b) => {
+      const scoreA = ['hpi_summary','treatment_plan','impression_diagnosis','chief_complaint']
+        .reduce((s, f) => s + (a[f] || '').length, 0);
+      const scoreB = ['hpi_summary','treatment_plan','impression_diagnosis','chief_complaint']
+        .reduce((s, f) => s + (b[f] || '').length, 0);
+      return scoreB - scoreA;
+    })[0];
+
+    // Merge: for each field, keep the longer value
+    const result = { ...base };
+    const textFields = ['hpi_summary','treatment_plan','impression_diagnosis','chief_complaint','physical_examination','pain_scale'];
+    group.forEach(other => {
+      if (other === base) return;
+      textFields.forEach(f => {
+        if ((other[f] || '').length > (result[f] || '').length) result[f] = other[f];
+      });
+      // Merge providers: combine if different
+      const baseProvider = (result.rendering_provider || '').trim();
+      const otherProvider = (other.rendering_provider || '').trim();
+      if (otherProvider && !baseProvider.includes(otherProvider.split(',')[0])) {
+        result.rendering_provider = `${baseProvider} / ${otherProvider}`;
+      }
+      // Merge ICD codes
+      const codes = new Set([...(result.icd10_codes || []), ...(other.icd10_codes || [])]);
+      result.icd10_codes = Array.from(codes);
+    });
+
+    console.log(\`mergeEdVisits: merged \${group.length} ED entries on \${base.visit_date} into one\`);
+    merged.push(result);
+  });
+
+  // Re-sort by date after merge
+  return [...nonEd, ...merged].sort((a, b) => (a.visit_date || '').localeCompare(b.visit_date || ''));
+};
+
 const deduplicateVisits = (visits) => {
   const visitList = visits || [];
 
@@ -778,7 +841,7 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
 9. Impression/diagnosis — from THIS document's own conclusions. ICD-10 codes inline in parentheses.
 10. Treatment Plan — CONCISE, 2-4 items max:
    - Interventions performed or prescribed IN THIS document
-   - Medications (name, dose)
+   - Medications (name, dose). For ED visits: include the timestamp of the FIRST medication administered verbatim (e.g. "Morphine 4mg IV (10/01 1937)") — this helps establish the true encounter start time.
    - Activity restrictions
    - Follow-up plan
 
@@ -1289,7 +1352,7 @@ const generateSummaryWorker = async (event) => {
 
     // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
-    allVisits = deduplicateVisits(allVisits);
+    allVisits = mergeEdVisits(deduplicateVisits(allVisits));
     allVisits.sort((a, b) => {
       if (!a.visit_date) return 1;
       if (!b.visit_date) return -1;
@@ -1365,7 +1428,7 @@ const generateSummaryWorker = async (event) => {
             }
           }));
         }
-        allVisits = deduplicateVisits(allVisits);
+        allVisits = mergeEdVisits(deduplicateVisits(allVisits));
         allVisits.sort((a, b) => {
           if (!a.visit_date) return 1;
           if (!b.visit_date) return -1;
