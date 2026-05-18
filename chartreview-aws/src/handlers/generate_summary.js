@@ -700,6 +700,7 @@ A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
     - If document says "Smith Family Medical Group", use "Smith Family Medical Group" as practice_setting
     - If from "XYZ Orthopedic Associates", use "XYZ Orthopedic Associates" 
     - If from "Community Hospital Emergency Department", use "Community Hospital Emergency Department"
+    - For ED notes: ALWAYS use "[Hospital Name] - Emergency Department" or "[Hospital Name] Emergency Department" — NEVER just "Emergency Department" alone
     - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
 
 B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
@@ -773,7 +774,7 @@ The practice_setting for each entry MUST reflect the actual document type:
   - "History & Physical" for inpatient H&P documents
   - "Discharge Summary" or "Discharge Report" for discharge documents
   - "Hospitalist Progress Note" for inpatient progress notes
-  - "Emergency Department" for ED visit notes
+  - "[Full Hospital Name] - Emergency Department" for ED visit notes — ALWAYS include the specific hospital name from the document (e.g. "Sunrise Hospital and Medical Center - Emergency Department", "Centennial Hills Hospital Emergency Department"). NEVER just "Emergency Department" alone.
   - "Radiology Report" for radiologist-signed imaging reports
 
 CONTENT ISOLATION — ABSOLUTE RULE:
