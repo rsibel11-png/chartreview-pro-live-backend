@@ -510,7 +510,7 @@ const mergeEdVisits = (visits) => {
       result.icd10_codes = Array.from(codes);
     });
 
-    console.log(\`mergeEdVisits: merged \${group.length} ED entries on \${base.visit_date} into one\`);
+    console.log(`mergeEdVisits: merged ${group.length} ED entries on ${base.visit_date} into one`);
     merged.push(result);
   });
 
