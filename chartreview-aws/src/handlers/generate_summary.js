@@ -532,23 +532,28 @@ const deduplicateVisits = (visits) => {
 // Example: note signed 10/02, meds show "(10/01 1937)" → corrected to 2025-10-01.
 const correctEdVisitDates = (visits) => {
   return visits.map(visit => {
-    const visitType = (visit.visit_type || '').toLowerCase();
-    const setting   = (visit.practice_setting || '').toLowerCase();
-    // Match any ED / ER / hospital emergency encounter
-    const isED = visitType.includes('er') || visitType.includes('emergency') ||
-                 visitType.includes('ed') || setting.includes('emergency') ||
-                 setting.includes(' ed ') || setting.includes('ed -') ||
-                 setting.includes('ed discharge') || setting.includes('emergency department') ||
-                 setting.includes('emergency provider');
+    const visitType = (visit.practice_setting || '').toLowerCase() + ' ' + (visit.visit_type || '').toLowerCase();
+    // Only fire on ED/ER/hospital emergency encounters — prevents office visit dates being
+    // incorrectly back-corrected by prior-visit date references in the note
+    const isED = /er visit|emergency|ed visit|ed -|ed discharge|emergency department|emergency provider/.test(visitType);
     if (!isED || !visit.visit_date) return visit;
 
-    const textToSearch = (visit.treatment_plan || '') + ' ' + (visit.hpi_summary || '');
+    // Search all text fields — broader than just treatment_plan + hpi
+    const textToSearch = [
+      visit.treatment_plan   || '',
+      visit.hpi_summary      || '',
+      visit.chief_complaint  || '',
+      visit.physical_exam_findings || '',
+      visit.impression_diagnosis   || '',
+    ].join(' ');
+
     const currentDate = visit.visit_date; // YYYY-MM-DD
     const [cy, cm, cd] = currentDate.split('-').map(Number);
+    const current = new Date(cy, cm - 1, cd);
 
-    // Match timestamps in multiple formats:
-    //   (10/01 1937)   (10/01/25 2210)   10/01/2025 19:37   10/01 at 19:37
-    const tsPattern = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?:[\s,]+(?:at\s+)?)(\d{1,2}:\d{2}|\d{3,4})\b/gi;
+    // Match date+optional-time in multiple formats:
+    //   10/01/2025  10/01/25  10/01 1937  10/01 19:37  10-01-2025
+    const tsPattern = /\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?(?:[\s,]+(?:at\s+)?)?(\d{1,2}:?\d{2})?\b/gi;
 
     let earliestDate = null;
     let m;
@@ -561,20 +566,19 @@ const correctEdVisitDates = (visits) => {
         const rawYear = parseInt(m[3], 10);
         year = rawYear < 100 ? 2000 + rawYear : rawYear;
       } else if (month > cm) {
-        year = cy - 1;
+        year = cy - 1; // handles cross-year references
       }
       const candidate = new Date(year, month - 1, day);
-      const current   = new Date(cy, cm - 1, cd);
       const diffDays  = (current - candidate) / (1000 * 60 * 60 * 24);
-      // Accept if candidate is 1-3 days before signed date
-      if (diffDays >= 1 && diffDays <= 3) {
+      // Accept if 1-7 days before current date (wider window than before)
+      if (diffDays >= 1 && diffDays <= 7) {
         if (!earliestDate || candidate < earliestDate) earliestDate = candidate;
       }
     }
 
     if (earliestDate) {
       const corrected = earliestDate.toISOString().split('T')[0];
-      console.log(`correctEdVisitDates: ${visit.rendering_provider} ${currentDate} → ${corrected} (earliest med timestamp)`);
+      console.log(`correctEdVisitDates: ${visit.rendering_provider} ${currentDate} → ${corrected}`);
       return { ...visit, visit_date: corrected };
     }
     return visit;
