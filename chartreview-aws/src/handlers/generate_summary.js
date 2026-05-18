@@ -1406,6 +1406,37 @@ const generateSummaryWorker = async (event) => {
 
     let allVisits2 = mergedVisits;
 
+    // ── 8b. C-4 backfill — cross-reference same-date office visit ──────────────
+    // C-4 forms often have illegible or missing diagnosis fields.
+    // The old buildPrompt asked the LLM to cross-reference; now we do it in code.
+    // For each C-4 visit with an empty impression_diagnosis, find a same-date
+    // non-C-4 visit and copy over the diagnosis + ICD-10 codes.
+    mergedVisits.forEach(v => {
+      const isC4 = (v.practice_setting || '').toLowerCase().includes('c-4') ||
+                   (v.visit_type || '').toLowerCase().includes('c-4');
+      if (!isC4) return;
+      if (v.impression_diagnosis) return; // already has diagnosis, nothing to do
+
+      // Find a same-date office/clinical visit (not C-4, not radiology)
+      const sameDateVisit = mergedVisits.find(other => {
+        if (other === v) return false;
+        if (!other.visit_date || other.visit_date !== v.visit_date) return false;
+        const os = (other.practice_setting || '').toLowerCase();
+        const isOtherC4  = os.includes('c-4') || os.includes('c4 ');
+        const isRadiology = os.includes('radiology') || os.includes('mri') || os.includes('x-ray');
+        return !isOtherC4 && !isRadiology && other.impression_diagnosis;
+      });
+
+      if (sameDateVisit) {
+        v.impression_diagnosis = sameDateVisit.impression_diagnosis + ' (extrapolated from same-date visit)';
+        v.icd10_codes = Array.isArray(sameDateVisit.icd10_codes) ? [...sameDateVisit.icd10_codes] : [];
+        if (!v.rendering_provider && sameDateVisit.rendering_provider) {
+          v.rendering_provider = sameDateVisit.rendering_provider;
+        }
+        console.log(`C-4 backfill: ${v.visit_date} — filled from ${sameDateVisit.practice_setting} [${sameDateVisit.rendering_provider}]`);
+      }
+    });
+
     // ── 8b. Merge + dedup + sort ──────────────────────────────────────────────
     await setJobStatus(job_id, 'Deduplicating and sorting visits...');
     try {
