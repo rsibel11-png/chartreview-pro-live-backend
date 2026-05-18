@@ -1210,11 +1210,12 @@ const generateSummaryWorker = async (event) => {
       }
 
       // ── Page-header date correction for ED/hospital visits ──────────────────
-      // Hospital EMR notes print "Date: MM/DD/YY" in the patient header on every
-      // page. The first page carries the encounter date. The electronic signature
-      // (only source of "10/02" in Tall's note) is at the very end.
-      // Strategy: read the Date: field from the patient header on the first page
-      // of the encounter in the raw Textract text. If earlier than stored date, use it.
+      // Sunrise Hospital EMR format has multiple date fields per document:
+      //   First page: "SERVICE DT: 10/01/25" and "DATE:10/01/25 TIME: 1825" (inline, no newline before DATE:)
+      //   Running page headers (pages 2+): "Date: 10/01/25" at line start
+      //   Last page: "Electronically Signed by ... on 10/02/25" — the signature date (wrong one)
+      // Priority: SERVICE DT > REP SRV DT > bare Date: header
+      // If any of these is 1-7 days earlier than the stored date, use it.
       knownVisits = knownVisits.map(function(v) {
         var isED = /er visit|emergency|ed visit/i.test(v.visit_type || '') ||
                    /emergency/i.test(v.facility || '');
@@ -1237,12 +1238,20 @@ const generateSummaryWorker = async (event) => {
           var markerIdx = rawText.indexOf('--- PAGE ' + pageNum + ' ---');
           if (markerIdx === -1) continue;
 
-          // Grab 500 chars after the page marker (patient header block)
-          var block = rawText.slice(markerIdx, markerIdx + 500);
+          // Grab 800 chars after the page marker — SERVICE DT appears deeper in Sunrise EMR headers
+          var block = rawText.slice(markerIdx, markerIdx + 800);
 
-          // Match bare "Date: MM/DD/YY" at line start or after newline
-          // Skips "Discharge Date", "Birth Date", "Signed...Date", etc.
-          var dateMatch = block.match(/(?:^|\n)Date:\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i);
+          // Priority order for date fields (Sunrise EMR format):
+          // 1. SERVICE DT — the definitive service/treatment date field
+          // 2. REP SRV DT — report service date (same value, different label)
+          // 3. Bare "Date:" in running page headers (pages 2+ of the note)
+          //    Note: first page uses "DATE:10/01/25" inline (no newline before it),
+          //    so we do NOT require a newline anchor here.
+          // Explicitly skip: "Discharge Date", "Birth Date", "Electronically Signed...Date"
+          var dateMatch =
+            block.match(/SERVICE\s+DT:\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i) ||
+            block.match(/REP\s+SRV\s+DT:\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i) ||
+            block.match(/(?:^|\n|\s)Date:\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})(?!\s*of\s+[Bb]irth|\s*[Ss]igned|\s*[Dd]isch)/i);
           if (!dateMatch) continue;
 
           var rawDate = dateMatch[1];
