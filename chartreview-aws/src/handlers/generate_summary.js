@@ -594,6 +594,24 @@ const sanitizeVisits = (visits, patientName) => {
     });
     if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
     if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
+
+    // Scrub military-time-as-year artifacts: model sometimes writes "10/08/2033" when
+    // source has date "10/08" and military time "2033". Fix by replacing any date with
+    // year > 2030 in narrative fields with the correct visit year (or strip the year).
+    const visitYear = clean.visit_date ? clean.visit_date.slice(0, 4) : null;
+    if (visitYear) {
+      const badYearRe = /(\d{1,2}\/\d{1,2}\/)(20[3-9]\d|2[1-9]\d{2})/g;
+      const narrativeFields = ['hpi_summary','treatment_plan','physical_exam_findings','imaging_findings','impression_diagnosis','chief_complaint'];
+      narrativeFields.forEach(field => {
+        if (clean[field]) {
+          clean[field] = clean[field].replace(badYearRe, (match, datePart, badYear) => {
+            // Replace bad year with correct visit year
+            return datePart + visitYear;
+          });
+        }
+      });
+    }
+
     const patientLower = patientName?.toLowerCase();
     if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
       clean.practice_setting = '';
@@ -1297,6 +1315,45 @@ const generateSummaryWorker = async (event) => {
       console.warn('coordinator: encounter_index read failed (non-fatal):', viErr.message);
       knownVisits = [];
     }
+
+    // ── 3b. Service-date correction pass (free — regex on extracted_text) ─────
+    // The VI pre-pass sometimes returns ADM DT or signature date instead of
+    // SERVICE DT for hospital provider notes. Scan extracted_text around each
+    // provider's name for SERVICE DT / REP SRV DT / TRIAGE DATE and override
+    // if a different (earlier) date is found. No Bedrock call — pure regex.
+    const SERVICE_DATE_RE = /(?:SERVICE\s+DT|REP\s+SRV\s+DT|TRIAGE\s+DATE?|DATE\s+OF\s+SERVICE)[:\s]+([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{2,4})/i;
+    const parseMDY = (s) => {
+      const m = s.match(/^([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{2,4})$/);
+      if (!m) return null;
+      let yr = parseInt(m[3], 10);
+      if (yr < 100) yr += 2000;
+      const mo = m[1].padStart(2, '0');
+      const dy = m[2].padStart(2, '0');
+      return `${yr}-${mo}-${dy}`;
+    };
+    knownVisits = knownVisits.map(v => {
+      const srcPart = allParts.find(p => p.id === v.source_doc_id);
+      if (!srcPart || !srcPart.extracted_text) return v;
+      const text = srcPart.extracted_text;
+      // Anchor search on provider last name (first token before comma or space)
+      const lastName = (v.provider || '').split(/[,\s]/)[0].trim();
+      if (!lastName || lastName.length < 3) return v;
+      const nameIdx = text.indexOf(lastName);
+      if (nameIdx < 0) return v;
+      // Scan window: 3000 chars before and after provider name
+      const window = text.slice(Math.max(0, nameIdx - 3000), nameIdx + 3000);
+      const match = window.match(SERVICE_DATE_RE);
+      if (!match) return v;
+      const corrected = parseMDY(match[1]);
+      if (!corrected || corrected === v.date) return v;
+      // Only override if corrected date is within 7 days of original (sanity check)
+      const origMs = new Date(v.date).getTime();
+      const corrMs = new Date(corrected).getTime();
+      const diffDays = Math.abs(origMs - corrMs) / 86400000;
+      if (diffDays > 7) return v;
+      console.log(`coordinator: service-date correction ${v.provider} ${v.date} → ${corrected} (SERVICE DT found in extracted_text)`);
+      return { ...v, date: corrected };
+    });
 
     // ── 4. Build encounter-scoped batches using VI page data ─────────────────
     // Each VI visit with page data → its own scoped batch for that doc part.
