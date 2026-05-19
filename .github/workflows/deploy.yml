@@ -136,6 +136,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Create verifySummaryWorker Lambda if not exists
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-verifySummaryWorker --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-verifySummaryWorker \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/generate_summary.verifySummaryWorker \
+            --timeout 900 \
+            --memory-size 1024 \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
@@ -171,6 +188,7 @@ jobs:
             "chartreview-pro-prod-generateSummaryChunkWorker"
             "chartreview-pro-prod-buildVisitIndexStart"
             "chartreview-pro-prod-buildVisitIndexWorker"
+            "chartreview-pro-prod-verifySummaryWorker"
           )
           for FUNC in "${FUNCTIONS[@]}"; do
             echo "Updating $FUNC..."
