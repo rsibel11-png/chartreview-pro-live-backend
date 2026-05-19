@@ -1597,21 +1597,17 @@ const generateSummaryWorker = async (event) => {
       aws_summary_id,
     });
 
-    // ── Trigger verify worker (async, non-blocking) ───────────────────────────
+    // ── Run verify logic inline (no cross-Lambda invoke needed) ─────────────
     try {
-      await lambda.send(new InvokeCommand({
-        FunctionName:   VERIFY_FN,
-        InvocationType: 'Event',
-        Payload: Buffer.from(JSON.stringify({
-          job_id,
-          aws_summary_id,
-          doc_ids,
-          org_id: docRecords[0]?.org_id || '',
-        })),
-      }));
-      console.log(`coordinator: verify worker triggered for summary ${aws_summary_id}`);
+      await runVerifyInline({
+        job_id,
+        aws_summary_id,
+        doc_ids,
+        org_id: docRecords[0] && docRecords[0].org_id ? docRecords[0].org_id : '',
+      });
+      console.log(`coordinator: inline verify complete for summary ${aws_summary_id}`);
     } catch (verifyErr) {
-      console.warn('coordinator: failed to trigger verify worker (non-fatal):', verifyErr.message);
+      console.warn('coordinator: inline verify failed (non-fatal):', verifyErr.message);
     }
 
   } catch (err) {
@@ -1910,9 +1906,10 @@ const findServiceDate = (visit, extractedText) => {
 };
 
 // ── Main handler ──────────────────────────────────────────────────────────────
-const verifySummaryWorker = async (event) => {
-  const { job_id, aws_summary_id, doc_ids, org_id } = event;
-  console.log(`verifySummaryWorker start: job_id=${job_id} summary=${aws_summary_id}`);
+// ── Shared verify logic (called inline by coordinator AND by Lambda entrypoint) ──
+const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id }) => {
+  console.log(`runVerifyInline start: job_id=${job_id} summary=${aws_summary_id}`);
+
 
   try {
     // 1. Load the saved summary
@@ -2051,10 +2048,12 @@ const verifySummaryWorker = async (event) => {
       return sv;
     });
 
-    // 7. Re-sort corrected visits chronologically
-    const finalVisits = correctedVisits.sort((a, b) =>
-      (normalizeDate(a.date) || '').localeCompare(normalizeDate(b.date) || '')
-    );
+    // 7. Re-sort corrected visits chronologically (proper date comparison)
+    const finalVisits = correctedVisits.sort((a, b) => {
+      const da = new Date(normalizeDate(a.date) || '1900-01-01').getTime();
+      const db = new Date(normalizeDate(b.date) || '1900-01-01').getTime();
+      return da - db;
+    });
 
     // 8. Build verification result
     const verification_result = {
@@ -2121,7 +2120,10 @@ module.exports = {
   generateSummaryChunkWorker: generateSummaryChunkWorker,
   buildVisitIndexStart:       validateApiKey(buildVisitIndexStartHandler),
   buildVisitIndexWorker:      buildVisitIndexWorkerFn,
-  verifySummaryWorker:        verifySummaryWorker,
+  verifySummaryWorker:        async (event) => {
+    const { job_id, aws_summary_id, doc_ids, org_id } = event;
+    await runVerifyInline({ job_id, aws_summary_id, doc_ids, org_id });
+  },
 };
 
 
