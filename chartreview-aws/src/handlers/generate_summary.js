@@ -525,61 +525,7 @@ const deduplicateVisits = (visits) => {
 };
 
 
-// ── ED visit date corrector ───────────────────────────────────────────────────
-// Hospital ED notes are often signed the following day. The model uses the header
-// (signature) date. This function scans the treatment_plan for medication
-// administration timestamps and uses the earliest one if it precedes the visit date.
-// Example: note signed 10/02, meds show "(10/01 1937)" → corrected to 2025-10-01.
-const correctEdVisitDates = (visits) => {
-  return visits.map(visit => {
-    const visitType = (visit.visit_type || '').toLowerCase();
-    const setting   = (visit.practice_setting || '').toLowerCase();
-    // Match any ED / ER / hospital emergency encounter
-    const isED = visitType.includes('er') || visitType.includes('emergency') ||
-                 visitType.includes('ed') || setting.includes('emergency') ||
-                 setting.includes(' ed ') || setting.includes('ed -') ||
-                 setting.includes('ed discharge') || setting.includes('emergency department') ||
-                 setting.includes('emergency provider');
-    if (!isED || !visit.visit_date) return visit;
-
-    const textToSearch = (visit.treatment_plan || '') + ' ' + (visit.hpi_summary || '');
-    const currentDate = visit.visit_date; // YYYY-MM-DD
-    const [cy, cm, cd] = currentDate.split('-').map(Number);
-
-    // Match timestamps in multiple formats:
-    //   (10/01 1937)   (10/01/25 2210)   10/01/2025 19:37   10/01 at 19:37
-    const tsPattern = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?:[\s,]+(?:at\s+)?)(\d{1,2}:\d{2}|\d{3,4})\b/gi;
-
-    let earliestDate = null;
-    let m;
-    while ((m = tsPattern.exec(textToSearch)) !== null) {
-      const month = parseInt(m[1], 10);
-      const day   = parseInt(m[2], 10);
-      if (month < 1 || month > 12 || day < 1 || day > 31) continue;
-      let year = cy;
-      if (m[3]) {
-        const rawYear = parseInt(m[3], 10);
-        year = rawYear < 100 ? 2000 + rawYear : rawYear;
-      } else if (month > cm) {
-        year = cy - 1;
-      }
-      const candidate = new Date(year, month - 1, day);
-      const current   = new Date(cy, cm - 1, cd);
-      const diffDays  = (current - candidate) / (1000 * 60 * 60 * 24);
-      // Accept if candidate is 1-3 days before signed date
-      if (diffDays >= 1 && diffDays <= 3) {
-        if (!earliestDate || candidate < earliestDate) earliestDate = candidate;
-      }
-    }
-
-    if (earliestDate) {
-      const corrected = earliestDate.toISOString().split('T')[0];
-      console.log(`correctEdVisitDates: ${visit.rendering_provider} ${currentDate} → ${corrected} (earliest med timestamp)`);
-      return { ...visit, visit_date: corrected };
-    }
-    return visit;
-  });
-};
+// correctEdVisitDates removed — replaced by step 3b service-date scan
 
 const sanitizeVisits = (visits, patientName) => {
   const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
@@ -820,9 +766,7 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
    - For ED/hospital visits: use the date the encounter BEGAN, NOT the date the note was electronically signed or finalized.
    - Priority order for ED visit date (highest to lowest):
      (a) Explicit admit/triage labels: "Admit:", "Admit Date:", "SERVICE DT:", "Date of Service:", "Triage Date:", "Visit Date:" — use the date in these fields.
-     (b) Medication administration timestamps: if the treatment plan lists medications with timestamps (e.g. "Morphine 4mg IV x1 (10/01 1937)"), and the EARLIEST medication timestamp is a different date than the signature date, use the earlier date — that is when the encounter began.
-     (c) Document header date / signature date — use ONLY if no earlier signal exists.
-   - Example: note signed 10/02, but medications administered starting 10/01 at 19:37 → visit_date = 2025-10-01.
+     (b) Document header date / signature date — use ONLY if no explicit admit/triage label exists.
 2. Rendering provider name — the physician/provider who authored THIS document
 3. Practice/setting — use the EXACT document type label (see SAME-DATE DOCUMENT ISOLATION above)
 4. Chief complaint — brief statement of visit or document purpose
@@ -848,7 +792,7 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
 9. Impression/diagnosis — from THIS document's own conclusions. ICD-10 codes inline in parentheses.
 10. Treatment Plan — CONCISE, 2-4 items max:
    - Interventions performed or prescribed IN THIS document
-   - Medications (name, dose). For ED visits: include the timestamp of the FIRST medication administered verbatim (e.g. "Morphine 4mg IV (10/01 1937)") — this helps establish the true encounter start time.
+   - Medications (name, dose).
    - Activity restrictions
    - Follow-up plan
 
@@ -897,9 +841,7 @@ For each clinical encounter found, extract:
 1. date - the date of service (YYYY-MM-DD format). For ED/hospital visits use the encounter START date — NOT the electronic signature date.
    PRIORITY ORDER for ED/hospital date (use the FIRST matching rule):
    a) "SERVICE DT", "REP SRV DT", "Triage Date", "Date of Service", "Encounter Date" on the PROVIDER'S OWN PAGE — this is always the encounter date
-   b) Medication administration timestamps in the body (e.g. "Morphine 4mg IV (10/01 1937)" — this tells you the patient was present on 10/01)
-   c) Nursing assessment timestamps (e.g. "VS at 2145 on 10/01")
-   d) LAST resort: global document header date
+   b) LAST resort: global document header date
    CRITICAL — DO NOT USE THESE AS VISIT DATES:
    - "ADM DT" / "Admission Date" — this is the hospital admission date, NOT the encounter date for individual provider notes
    - "DISCH DT" / "Discharge Date" — this is the discharge date, not the encounter date
@@ -1117,7 +1059,7 @@ const generateSummaryChunkWorker = async (event) => {
         if (!result) continue;
         if (!patientName && result.patient_name) patientName = result.patient_name;
         if (!caseNumber  && result.case_number)  caseNumber  = result.case_number;
-        const clean = sanitizeVisits(correctEdVisitDates(result.visits || []), patientName);
+        const clean = sanitizeVisits(result.visits || [], patientName);
         chunkVisits.push(...clean);
       }
     }
@@ -1545,7 +1487,7 @@ const generateSummaryWorker = async (event) => {
             try {
               const recResult = await callBedrock([recFileKey], recPrompt, recSchema, regionOrder);
               if (Array.isArray(recResult.visits) && recResult.visits.length > 0) {
-                const recClean = sanitizeVisits(correctEdVisitDates(recResult.visits || []), patientName);
+                const recClean = sanitizeVisits(recResult.visits || [], patientName);
                 allVisits = allVisits.concat(recClean);
                 console.log(`Recovery: recovered ${recClean.length} visit(s) from ${srcDocId}`);
               }
