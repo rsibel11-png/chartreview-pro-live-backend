@@ -27,6 +27,7 @@ const JOBS_TABLE      = process.env.JOBS_TABLE            || 'chartreview-jobs-p
 const SUMMARIES_TABLE = process.env.SUMMARIES_TABLE       || 'chartreview-summaries-prod';
 const USAGE_TABLE   = process.env.BEDROCK_USAGE_TABLE   || 'chartreview-bedrock-usage';
 const WORKER_FN        = process.env.GENERATE_WORKER_FUNCTION_NAME       || 'chartreview-pro-prod-generateSummaryWorker';
+const VERIFY_FN        = process.env.VERIFY_WORKER_FUNCTION_NAME         || 'chartreview-pro-prod-verifySummaryWorker';
 
 // ─── Multi-region Bedrock router ─────────────────────────────────────────────
 // Each region has an independent daily token quota. We track usage per region
@@ -1596,6 +1597,23 @@ const generateSummaryWorker = async (event) => {
       aws_summary_id,
     });
 
+    // ── Trigger verify worker (async, non-blocking) ───────────────────────────
+    try {
+      await lambda.send(new InvokeCommand({
+        FunctionName:   VERIFY_FN,
+        InvocationType: 'Event',
+        Payload: Buffer.from(JSON.stringify({
+          job_id,
+          aws_summary_id,
+          doc_ids,
+          org_id: docRecords[0]?.org_id || '',
+        })),
+      }));
+      console.log(`coordinator: verify worker triggered for summary ${aws_summary_id}`);
+    } catch (verifyErr) {
+      console.warn('coordinator: failed to trigger verify worker (non-fatal):', verifyErr.message);
+    }
+
   } catch (err) {
     console.error('coordinator fatal:', err);
     await markJobFailed(job_id, err.message);
@@ -1740,12 +1758,317 @@ const buildVisitIndexStartHandler = async (event) => {
   return httpResponse(200, { job_id });
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// VERIFY SUMMARY WORKER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const normalizeDate = (raw) => {
+  const d = (raw || '').trim();
+  if (!d) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  const m = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+  const parsed = new Date(d);
+  return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+};
+
+const normalizeProvider = (name) => {
+  return (name || '')
+    .replace(/\b(M\.?D\.?|D\.?O\.?|PA-?C?|NP|RN|DO|MD|PA|FACS|FACP|DPM|DDS|PhD)\b\.?/gi, '')
+    .replace(/[^a-zA-Z0-9\s]/g, '')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+};
+
+// ── Fetch PDF bytes from S3 ───────────────────────────────────────────────────
+const fetchPdfBytes = async (fileKey) => {
+  const resp = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: fileKey }));
+  const chunks = [];
+  for await (const chunk of resp.Body) chunks.push(chunk);
+  return Buffer.concat(chunks);
+};
+
+// ── Bedrock call (PDF-bytes, light VI schema) ─────────────────────────────────
+const VI_LIGHT_SCHEMA = {
+  type: 'object',
+  properties: {
+    patient_name: { type: 'string' },
+    visits: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          date:       { type: 'string', description: 'YYYY-MM-DD — use SERVICE DATE or encounter start, NOT signature/discharge date' },
+          provider:   { type: 'string', description: 'Full name with credentials as written' },
+          facility:   { type: 'string' },
+          visit_type: { type: 'string' },
+          pages:      { type: 'array', items: { type: 'number' } },
+        },
+        required: ['date', 'provider'],
+      },
+    },
+  },
+};
+
+const VI_PROMPT = `You are a medical record analyst performing a CENSUS PASS — identifying every distinct clinical encounter in this document.
+
+For each encounter return:
+- date: exact encounter date YYYY-MM-DD. Use SERVICE DT, REP SRV DT, or Triage Date when present — NOT ADM DT, DISCH DT, or physician signature date.
+- provider: full name exactly as written, including credentials
+- facility: treating facility name
+- visit_type: Emergency Department | Consultation Report | Operative Report | Radiology Report | History & Physical | Discharge Summary | Office Visit | Physical Therapy | C-4 Form
+- pages: page numbers in this PDF where the encounter appears
+
+INCLUDE: ED notes, consultation reports, operative reports, radiology reports, office visits, H&P notes, discharge summaries, C-4/Workers Comp forms.
+EXCLUDE: nursing flowsheets, MAR, anesthesia records, coding summaries, consent forms, lab printouts, appointment reminders, PPRs, PACU records, pre-op checklists.`;
+
+const callBedrockVI = async (fileKey) => {
+  const pdfBytes = await fetchPdfBytes(fileKey);
+  const b64 = pdfBytes.toString('base64');
+
+  const client = getBedrockClient();
+  const body = JSON.stringify({
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 4096,
+    temperature: 0,
+    tools: [{
+      name:        'record_visits',
+      description: 'Record the list of clinical encounters found in this document',
+      input_schema: VI_LIGHT_SCHEMA,
+    }],
+    tool_choice: { type: 'tool', name: 'record_visits' },
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+        { type: 'text', text: VI_PROMPT },
+      ],
+    }],
+  });
+
+  const resp = await client.send(new InvokeModelCommand({
+    modelId:     MODEL_ID,
+    contentType: 'application/json',
+    accept:      'application/json',
+    body,
+  }));
+  const parsed = JSON.parse(Buffer.from(resp.body).toString());
+  const toolUse = parsed.content && parsed.content.find(b => b.type === 'tool_use');
+  return toolUse ? toolUse.input : { visits: [] };
+};
+
+// ── SERVICE DT regex correction ───────────────────────────────────────────────
+const SERVICE_DATE_RE = /(?:SERVICE\s+DT|REP\s+SRV\s+DT|TRIAGE\s+DATE?|DATE\s+OF\s+SERVICE)[:\s]+([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{2,4})/i;
+
+const parseMDY = (s) => {
+  const m = s.match(/^([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{2,4})$/);
+  if (!m) return null;
+  let yr = parseInt(m[3], 10);
+  if (yr < 100) yr += 2000;
+  return `${yr}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+};
+
+// Given a visit from the pre-pass (with pages[]) and the part's extracted_text,
+// scan for an authoritative SERVICE DT near the encounter's page anchor.
+const findServiceDate = (visit, extractedText) => {
+  if (!extractedText) return null;
+  let anchorIdx = -1;
+
+  // Prefer PAGE marker anchor (most accurate)
+  if (Array.isArray(visit.pages) && visit.pages.length > 0) {
+    const marker = '--- PAGE ' + visit.pages[0] + ' ---';
+    anchorIdx = extractedText.indexOf(marker);
+  }
+  // Fall back to provider last name
+  if (anchorIdx < 0) {
+    const lastName = (visit.provider || '').split(/[,\s]/)[0].trim();
+    if (lastName && lastName.length >= 3) {
+      anchorIdx = extractedText.indexOf(lastName);
+    }
+  }
+  if (anchorIdx < 0) return null;
+
+  const window = extractedText.slice(Math.max(0, anchorIdx - 500), anchorIdx + 6000);
+  const match  = window.match(SERVICE_DATE_RE);
+  if (!match) return null;
+
+  const corrected = parseMDY(match[1]);
+  if (!corrected) return null;
+
+  // Sanity: within 7 days of VI-reported date
+  const origMs = new Date(visit.date).getTime();
+  const corrMs = new Date(corrected).getTime();
+  if (isNaN(origMs) || isNaN(corrMs)) return null;
+  const diffDays = Math.abs(origMs - corrMs) / 86400000;
+  if (diffDays > 7) return null;
+
+  return corrected !== visit.date ? corrected : null;
+};
+
+// ── Main handler ──────────────────────────────────────────────────────────────
+const verifySummaryWorker = async (event) => {
+  const { job_id, aws_summary_id, doc_ids, org_id } = event;
+  console.log(`verifySummaryWorker start: job_id=${job_id} summary=${aws_summary_id}`);
+
+  try {
+    // 1. Load the saved summary
+    const summaryResp = await dynamo.send(new GetCommand({
+      TableName: SUMMARIES_TABLE,
+      Key: { aws_summary_id },
+    }));
+    const summary = summaryResp.Item;
+    if (!summary) throw new Error(`Summary not found: ${aws_summary_id}`);
+    const summaryVisits = Array.isArray(summary.visits) ? summary.visits : [];
+
+    // 2. Load document parts (need file_key + extracted_text)
+    const docRecords = [];
+    for (const doc_id of (doc_ids || [])) {
+      const r = await dynamo.send(new GetCommand({
+        TableName: DOCS_TABLE,
+        Key: { aws_document_id: doc_id },
+      }));
+      if (r.Item) docRecords.push(r.Item);
+    }
+    const allParts = docRecords.filter(d => d.status === 'processed' || d.extracted_text);
+
+    // 3. Run VI pre-pass on each part
+    const viVisits = [];
+    for (const part of allParts) {
+      if (!part.file_key) continue;
+      try {
+        const result = await callBedrockVI(part.file_key);
+        if (Array.isArray(result.visits)) {
+          result.visits
+            .map(v => ({ ...v, date: normalizeDate(v.date), _part: part }))
+            .filter(v => v.date)
+            .forEach(v => viVisits.push(v));
+        }
+        console.log(`verify: VI pre-pass ${part.label || part.aws_document_id} → ${(result.visits||[]).length} visits`);
+      } catch (e) {
+        console.warn(`verify: VI pre-pass failed for part ${part.aws_document_id}: ${e.message}`);
+      }
+    }
+
+    // Dedup VI visits
+    const viSeen = new Set();
+    const uniqueViVisits = viVisits.filter(v => {
+      const k = `${v.date}|${normalizeProvider(v.provider)}`;
+      if (viSeen.has(k)) return false;
+      viSeen.add(k); return true;
+    });
+
+    // 4. Apply SERVICE DT corrections to VI visits
+    const dateCorrections = [];
+    for (const v of uniqueViVisits) {
+      const corrected = findServiceDate(v, v._part && v._part.extracted_text);
+      if (corrected) {
+        dateCorrections.push({
+          provider:      v.provider,
+          original_date: v.date,
+          corrected_date: corrected,
+          method:        'SERVICE_DT_regex',
+        });
+        v.date = corrected; // update in place for downstream diff
+      }
+    }
+
+    // 5. Diff: find visits in VI not present in summary (by date+provider key)
+    const summaryKeys = new Set(
+      summaryVisits.map(v => `${normalizeDate(v.date)}|${normalizeProvider(v.provider || v.provider_name)}`)
+    );
+    const missingVisits = uniqueViVisits.filter(v => {
+      const k = `${v.date}|${normalizeProvider(v.provider)}`;
+      return !summaryKeys.has(k);
+    }).map(v => ({ date: v.date, provider: v.provider, visit_type: v.visit_type }));
+
+    // 6. Apply date corrections to summary visits
+    let correctedCount = 0;
+    const correctedVisits = summaryVisits.map(sv => {
+      const svKey = normalizeProvider(sv.provider || sv.provider_name || '');
+      const correction = dateCorrections.find(c => normalizeProvider(c.provider) === svKey);
+      if (correction) {
+        correctedCount++;
+        console.log(`verify: correcting ${sv.provider} ${sv.date} → ${correction.corrected_date}`);
+        return { ...sv, date: correction.corrected_date };
+      }
+      return sv;
+    });
+
+    // 7. Re-sort corrected visits chronologically
+    const finalVisits = correctedVisits.sort((a, b) =>
+      (normalizeDate(a.date) || '').localeCompare(normalizeDate(b.date) || '')
+    );
+
+    // 8. Build verification result
+    const verification_result = {
+      verified_at:     new Date().toISOString(),
+      vi_visit_count:  uniqueViVisits.length,
+      date_corrections: dateCorrections,
+      missing_visits:   missingVisits,
+      status: dateCorrections.length > 0 || missingVisits.length > 0
+        ? 'verified_with_corrections'
+        : 'verified',
+    };
+
+    console.log(`verify: complete — ${dateCorrections.length} corrections, ${missingVisits.length} missing`);
+
+    // 9. Write back to summary record
+    await dynamo.send(new UpdateCommand({
+      TableName: SUMMARIES_TABLE,
+      Key: { aws_summary_id },
+      UpdateExpression: 'SET visits = :v, visit_count = :vc, verification_result = :vr, #st = :st, updated_at = :now',
+      ExpressionAttributeNames: { '#st': 'status' },
+      ExpressionAttributeValues: {
+        ':v':  finalVisits,
+        ':vc': finalVisits.length,
+        ':vr': verification_result,
+        ':st': verification_result.status,
+        ':now': new Date().toISOString(),
+      },
+    }));
+
+    // 10. Update job status
+    await dynamo.send(new UpdateCommand({
+      TableName: JOBS_TABLE,
+      Key: { job_id },
+      UpdateExpression: 'SET #s = :s, updated_at = :now',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: {
+        ':s':   verification_result.status,
+        ':now': new Date().toISOString(),
+      },
+    }));
+
+  } catch (err) {
+    console.error('verifySummaryWorker fatal:', err);
+    // Non-fatal — don't fail the job, just log
+    try {
+      await dynamo.send(new UpdateCommand({
+        TableName: SUMMARIES_TABLE,
+        Key: { aws_summary_id },
+        UpdateExpression: 'SET verification_result = :vr, updated_at = :now',
+        ExpressionAttributeValues: {
+          ':vr':  { status: 'verify_failed', error: err.message, verified_at: new Date().toISOString() },
+          ':now': new Date().toISOString(),
+        },
+      }));
+    } catch (_) {}
+  }
+};
+
+
+
 module.exports = {
   generateSummaryStart:       validateApiKey(generateSummaryStartHandler),
   generateSummaryWorker:      generateSummaryWorker,
   generateSummaryChunkWorker: generateSummaryChunkWorker,
   buildVisitIndexStart:       validateApiKey(buildVisitIndexStartHandler),
   buildVisitIndexWorker:      buildVisitIndexWorkerFn,
+  verifySummaryWorker:        verifySummaryWorker,
 };
 
 
