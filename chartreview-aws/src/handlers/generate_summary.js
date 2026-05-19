@@ -190,7 +190,7 @@ const slicePdfPages = async (fileKey, pages) => {
   }
 
   const newDoc = await PDFDocument.create();
-  const copied = await newDoc.copyPagesFrom(srcDoc, indices);
+  const copied = await newDoc.copyPages(srcDoc, indices);
   copied.forEach(page => newDoc.addPage(page));
 
   const slicedBytes = await newDoc.save();
@@ -1023,12 +1023,12 @@ const generateSummaryChunkWorker = async (event) => {
       : null;
     if (scopeWithBuffer) console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: page scope [${scopeWithBuffer.join(',')}]`);
     try {
-      const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), fullSchema, regionOrder, scopeWithBuffer);
+      const result = await callBedrock(fileKeys, buildPrompt('', 1, batchLabel, knownVisitsChecklist), fullSchema, regionOrder, scopeWithBuffer);
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
-        const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel), simplifiedSchema, regionOrder, scopeWithBuffer);
+        const result = await callBedrock(fileKeys, buildPrompt('', 1, batchLabel, knownVisitsChecklist), simplifiedSchema, regionOrder, scopeWithBuffer);
         return result;
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
