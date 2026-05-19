@@ -877,11 +877,16 @@ const buildVisitIndexPrompt = () => {
 
 For each clinical encounter found, extract:
 1. date - the date of service (YYYY-MM-DD format). For ED/hospital visits use the encounter START date — NOT the electronic signature date.
-   PRIORITY ORDER for ED date (use the earliest you can find):
-   a) Explicit fields: "Admit Date", "Triage Date", "Date of Service", "SERVICE DT", "Encounter Date" in the document header or vitals block
+   PRIORITY ORDER for ED/hospital date (use the FIRST matching rule):
+   a) "SERVICE DT", "REP SRV DT", "Triage Date", "Date of Service", "Encounter Date" on the PROVIDER'S OWN PAGE — this is always the encounter date
    b) Medication administration timestamps in the body (e.g. "Morphine 4mg IV (10/01 1937)" — this tells you the patient was present on 10/01)
    c) Nursing assessment timestamps (e.g. "VS at 2145 on 10/01")
-   d) LAST resort: document header date (which is often the physician signature date, not the encounter start)
+   d) LAST resort: global document header date
+   CRITICAL — DO NOT USE THESE AS VISIT DATES:
+   - "ADM DT" / "Admission Date" — this is the hospital admission date, NOT the encounter date for individual provider notes
+   - "DISCH DT" / "Discharge Date" — this is the discharge date, not the encounter date
+   - Electronic signature date or "Signed:" date — this is when the note was finalized, not when the visit occurred
+   EXAMPLE: Document header shows "ADM DT: 10/02/25" but Dr. Tall's note on page 5 shows "SERVICE DT: 10/01/25" → use 2025-10-01 for Dr. Tall's visit.
    EXAMPLE: Note header says "10/02/2025" but treatment plan shows "Morphine 4mg IV (10/01 1937)" → use 2025-10-01.
    A note signed 10/02 for a visit starting 10/01 → use 2025-10-01.
 2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
