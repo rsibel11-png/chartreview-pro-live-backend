@@ -1019,7 +1019,7 @@ const generateSummaryChunkWorker = async (event) => {
     const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
     // Add ±1 page buffer so we don't miss content at encounter edges
     const scopeWithBuffer = pageScope && pageScope.length > 0
-      ? [...new Set(pageScope.flatMap(p => [p - 1, p, p + 1]).filter(p => p > 0))].sort((a, b) => a - b)
+      ? (() => { const buf = pageScope.length <= 3 ? 3 : 1; return [...new Set(pageScope.flatMap(p => Array.from({length: buf*2+1}, (_,i) => p - buf + i).filter(p => p > 0)))].sort((a,b) => a-b); })()
       : null;
     if (scopeWithBuffer) console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: page scope [${scopeWithBuffer.join(',')}]`);
     try {
@@ -1144,10 +1144,6 @@ const generateSummaryWorker = async (event) => {
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
 
     // ── 3. Inline VI pre-pass (callBedrock per part — PDF-bytes, light schema) ───
-    // Runs automatically at summary start. Asks Bedrock for date/provider/facility/
-    // visit_type/pages only — no HPI or narrative. This census map is used to:
-    //   a) scope each chunk worker to only the clinical pages for that visit
-    //   b) reconcile final output — missing visits trigger targeted recovery
     let knownVisits = [];
     let patientName = patient_name;
     let caseNumber  = '';
@@ -1164,9 +1160,6 @@ const generateSummaryWorker = async (event) => {
         return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
       };
 
-      // Normalize provider name for dedup matching:
-      // Strip credentials, lowercase, sort tokens alphabetically
-      // "Tall, Samantha M, MD" and "Samantha M. Tall MD" → "m samantha tall"
       const normalizeProvider = (name) => {
         const credRe = /\b(M\.?D\.?|D\.?O\.?|PA-?C?|NP|RN|DO|MD|PA|FACS|FACP|DPM|DDS|PhD)\b\.?/gi;
         return (name || '')
@@ -1191,7 +1184,7 @@ const generateSummaryWorker = async (event) => {
                 date:       { type: 'string', description: 'YYYY-MM-DD' },
                 provider:   { type: 'string', description: 'Full name with credentials as written in document' },
                 facility:   { type: 'string' },
-                visit_type: { type: 'string', description: 'e.g. Emergency Department, Consultation Report, Operative Report, Radiology Report, Office Visit' },
+                visit_type: { type: 'string', description: 'e.g. Emergency Department, Consultation Report, Operative Report, Radiology Report, Office Visit, C-4 Form' },
                 pages:      { type: 'array', items: { type: 'number' }, description: 'Page numbers in source PDF where this encounter appears' },
               },
               required: ['date', 'provider'],
@@ -1206,7 +1199,7 @@ OUTPUT ONLY a structured list of visits. For each visit return:
 - date: exact encounter date in YYYY-MM-DD format. Use the SERVICE DATE or encounter start date — NOT the signature date, discharge date, or document export date.
 - provider: full name exactly as written in the document, including credentials (e.g. "Samantha M. Tall, MD")
 - facility: name of the treating facility
-- visit_type: one of — Emergency Department, Consultation Report, Operative Report, Radiology Report, History & Physical, Discharge Summary, Office Visit, Physical Therapy
+- visit_type: one of — Emergency Department, Consultation Report, Operative Report, Radiology Report, History & Physical, Discharge Summary, Office Visit, Physical Therapy, C-4 Form
 - pages: array of page numbers in this PDF where this encounter appears
 
 INCLUDE:
@@ -1217,6 +1210,7 @@ INCLUDE:
 - Office/follow-up visits
 - History & Physical notes
 - Discharge summaries authored by a treating physician
+- C-4 / Workers Compensation Board forms (visit_type: "C-4 Form")
 
 EXCLUDE (do not return these):
 - Nursing flowsheets and nursing assessments
@@ -1230,9 +1224,9 @@ EXCLUDE (do not return these):
 - Physician Progress Reports (PPR) — brief check-box nursing-style forms
 - PACU / post-anesthesia records
 - Pre-operative checklists
-- Workers comp C-4 forms
 
-CRITICAL: Return the date the physician EXAMINED or TREATED the patient — not when they signed the note.`;
+CRITICAL: Return the date the physician EXAMINED or TREATED the patient — not when they signed the note.
+For ED/hospital visits: use SERVICE DT, REP SRV DT, or Triage Date when present — NOT ADM DT or DISCH DT.`;
 
       const VI_CONCURRENCY = 4;
       const viResults = new Array(allParts.length).fill(null);
@@ -1247,28 +1241,26 @@ CRITICAL: Return the date the physician EXAMINED or TREATED the patient — not 
               viResults[partIdx] = viResult.visits
                 .map(v => ({
                   ...v,
-                  date:           normalizeDate(v.date),
-                  source_doc_id:  viPart.id,
+                  date:              normalizeDate(v.date),
+                  source_doc_id:     viPart.id,
                   source_part_label: viPart.label,
-                  pages:          Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [],
+                  pages:             Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [],
                 }))
                 .filter(v => v.date);
             }
             if (viResult.patient_name && !patientName) patientName = viResult.patient_name;
             console.log(`coordinator: VI pre-pass ${viPart.label} → ${(viResults[partIdx] || []).length} visits`);
           } catch (e) {
-            console.warn(`coordinator: VI pre-pass failed for ${viPart.label}: ${e.message} — will use full-doc fallback for this part`);
+            console.warn(`coordinator: VI pre-pass failed for ${viPart.label}: ${e.message} — will use full-doc fallback`);
             viResults[partIdx] = null;
           }
         }));
       }
 
-      // Merge VI results across all parts
       for (const tagged of viResults) {
         if (tagged) knownVisits = knownVisits.concat(tagged);
       }
 
-      // Deduplicate by date + normalized full provider name
       const viSeen = new Set();
       knownVisits = knownVisits.filter(v => {
         const k = `${v.date}|${normalizeProvider(v.provider)}`;
@@ -1277,21 +1269,18 @@ CRITICAL: Return the date the physician EXAMINED or TREATED the patient — not 
         return true;
       });
 
-      // Filter obvious admin visit types
       knownVisits = knownVisits.filter(v =>
         !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
       );
 
       knownVisits.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
       console.log(`coordinator: VI pre-pass complete — ${knownVisits.length} unique visits identified`);
-
-      // Log the census map for debugging
       knownVisits.forEach((v, i) => {
-        console.log(`coordinator: VI[${i}] ${v.date} | ${v.provider} | ${v.facility} | pages: ${(v.pages || []).join(',')}`);
+        console.log(`coordinator: VI[${i}] ${v.date} | ${v.provider} | ${v.visit_type} | pages: ${(v.pages || []).join(',')}`);
       });
 
     } catch (viErr) {
-      console.warn('coordinator: VI pre-pass failed (non-fatal), using full-doc fallback:', viErr.message);
+      console.warn('coordinator: VI pre-pass failed (non-fatal):', viErr.message);
       knownVisits = [];
     }
 
@@ -1315,12 +1304,21 @@ CRITICAL: Return the date the physician EXAMINED or TREATED the patient — not 
       if (!srcPart || !srcPart.extracted_text) return v;
       const text = srcPart.extracted_text;
       // Anchor search on provider last name (first token before comma or space)
-      const lastName = (v.provider || '').split(/[,\s]/)[0].trim();
-      if (!lastName || lastName.length < 3) return v;
-      const nameIdx = text.indexOf(lastName);
-      if (nameIdx < 0) return v;
-      // Scan window: 3000 chars before and after provider name
-      const window = text.slice(Math.max(0, nameIdx - 3000), nameIdx + 3000);
+      // Anchor search on the PAGE marker for this visit's first page (if available),
+      // falling back to first provider last-name occurrence.
+      let anchorIdx = -1;
+      if (Array.isArray(v.pages) && v.pages.length > 0) {
+        const pageMarker = '--- PAGE ' + v.pages[0] + ' ---';
+        anchorIdx = text.indexOf(pageMarker);
+      }
+      if (anchorIdx < 0) {
+        const lastName = (v.provider || '').split(/[,\s]/)[0].trim();
+        if (!lastName || lastName.length < 3) return v;
+        anchorIdx = text.indexOf(lastName);
+      }
+      if (anchorIdx < 0) return v;
+      // Scan window: 500 chars before anchor + 6000 chars after (covers multi-page notes)
+      const window = text.slice(Math.max(0, anchorIdx - 500), anchorIdx + 6000);
       const match = window.match(SERVICE_DATE_RE);
       if (!match) return v;
       const corrected = parseMDY(match[1]);
