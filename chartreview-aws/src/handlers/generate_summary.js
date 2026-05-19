@@ -1588,16 +1588,7 @@ const generateSummaryWorker = async (event) => {
       console.warn('coordinator: failed to stamp summary_id on job (non-fatal):', stampErr.message);
     }
 
-    await markJobComplete(job_id, {
-      patient_name:   patientName || '',
-      case_number:    caseNumber  || '',
-      visits:         allVisits,
-      doc_count:      docRecords.length,
-      visit_count:    allVisits.length,
-      aws_summary_id,
-    });
-
-    // ── Run verify logic inline (no cross-Lambda invoke needed) ─────────────
+    // ── Run verify logic inline before marking complete — no race on export ──
     try {
       await runVerifyInline({
         job_id,
@@ -1609,6 +1600,15 @@ const generateSummaryWorker = async (event) => {
     } catch (verifyErr) {
       console.warn('coordinator: inline verify failed (non-fatal):', verifyErr.message);
     }
+
+    await markJobComplete(job_id, {
+      patient_name:   patientName || '',
+      case_number:    caseNumber  || '',
+      visits:         allVisits,
+      doc_count:      docRecords.length,
+      visit_count:    allVisits.length,
+      aws_summary_id,
+    });
 
   } catch (err) {
     console.error('coordinator fatal:', err);
