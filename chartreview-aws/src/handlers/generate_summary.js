@@ -1976,25 +1976,78 @@ const verifySummaryWorker = async (event) => {
       }
     }
 
-    // 5. Diff: find visits in VI not present in summary (by date+provider key)
+    // 5. Diff: find visits in VI not present in summary (by date+provider+visit_type key)
     const summaryKeys = new Set(
       summaryVisits.map(v => `${normalizeDate(v.date)}|${normalizeProvider(v.provider || v.provider_name)}`)
     );
+    // Also build a provider+visit_type → VI date map for targeted date correction below
+    const viDateByProviderType = {};
+    for (const v of uniqueViVisits) {
+      const k = `${normalizeProvider(v.provider)}|${(v.visit_type || '').toLowerCase()}`;
+      viDateByProviderType[k] = v.date;
+    }
     const missingVisits = uniqueViVisits.filter(v => {
       const k = `${v.date}|${normalizeProvider(v.provider)}`;
       return !summaryKeys.has(k);
     }).map(v => ({ date: v.date, provider: v.provider, visit_type: v.visit_type }));
 
     // 6. Apply date corrections to summary visits
+    // Strategy A: SERVICE DT regex corrections (from findServiceDate)
+    // Strategy B: VI pre-pass date override — if VI says provider X had visit_type Y on date Z
+    //             but summary has same provider+visit_type on a different date, correct it
     let correctedCount = 0;
     const correctedVisits = summaryVisits.map(sv => {
-      const svKey = normalizeProvider(sv.provider || sv.provider_name || '');
-      const correction = dateCorrections.find(c => normalizeProvider(c.provider) === svKey);
-      if (correction) {
+      const svProvKey = normalizeProvider(sv.provider || sv.provider_name || '');
+      const svType    = (sv.practice_setting || sv.visit_type || '').toLowerCase();
+
+      // Strategy A: regex correction — match on provider+visit_type to avoid hitting C-4 instead of ED note
+      const regexCorrection = dateCorrections.find(c => {
+        if (normalizeProvider(c.provider) !== svProvKey) return false;
+        // If visit_type available on correction, require it to match
+        if (c.visit_type && !svType.includes((c.visit_type || '').toLowerCase().split(/\s+/)[0])) return false;
+        return true;
+      });
+      if (regexCorrection) {
         correctedCount++;
-        console.log(`verify: correcting ${sv.provider} ${sv.date} → ${correction.corrected_date}`);
-        return { ...sv, date: correction.corrected_date };
+        console.log(`verify [regex]: correcting ${sv.provider} (${svType}) ${sv.date} → ${regexCorrection.corrected_date}`);
+        return { ...sv, date: regexCorrection.corrected_date };
       }
+
+      // Strategy B: VI pre-pass direct date comparison
+      // Try exact visit_type match first, then fuzzy
+      let viDate = null;
+      const exactKey = `${svProvKey}|${svType}`;
+      if (viDateByProviderType[exactKey]) {
+        viDate = viDateByProviderType[exactKey];
+      } else {
+        // Fuzzy: find VI visit for same provider where visit_type words overlap
+        const svTypeWords = svType.split(/\s+/).filter(w => w.length > 3);
+        for (const [k, d] of Object.entries(viDateByProviderType)) {
+          if (!k.startsWith(svProvKey + '|')) continue;
+          const viTypeWords = k.split('|')[1].split(/\s+/);
+          const overlap = svTypeWords.filter(w => viTypeWords.some(vw => vw.includes(w) || w.includes(vw)));
+          if (overlap.length > 0) { viDate = d; break; }
+        }
+      }
+
+      if (viDate && viDate !== normalizeDate(sv.date)) {
+        // Sanity: only correct if within 7 days
+        const origMs = new Date(normalizeDate(sv.date)).getTime();
+        const corrMs = new Date(viDate).getTime();
+        if (!isNaN(origMs) && !isNaN(corrMs) && Math.abs(origMs - corrMs) / 86400000 <= 7) {
+          correctedCount++;
+          const origFmt = normalizeDate(sv.date);
+          console.log(`verify [VI diff]: correcting ${sv.provider} (${svType}) ${origFmt} → ${viDate}`);
+          dateCorrections.push({
+            provider:       sv.provider || sv.provider_name || '',
+            original_date:  origFmt,
+            corrected_date: viDate,
+            method:         'VI_prepass_diff',
+          });
+          return { ...sv, date: viDate };
+        }
+      }
+
       return sv;
     });
 
