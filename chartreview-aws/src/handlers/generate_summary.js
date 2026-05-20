@@ -1588,24 +1588,30 @@ const generateSummaryWorker = async (event) => {
       console.warn('coordinator: failed to stamp summary_id on job (non-fatal):', stampErr.message);
     }
 
+    // markJobComplete after verify — finalVisits has date corrections applied
     await markJobComplete(job_id, {
       patient_name:   patientName || '',
       case_number:    caseNumber  || '',
-      visits:         allVisits,
+      visits:         finalVisits,
       doc_count:      docRecords.length,
-      visit_count:    allVisits.length,
+      visit_count:    finalVisits.length,
       aws_summary_id,
     });
 
-    // ── Run verify logic inline (no cross-Lambda invoke needed) ─────────────
+    // ── Run verify inline — pass knownVisits so it skips redundant Bedrock call ──
+    let finalVisits = allVisits;
     try {
-      await runVerifyInline({
+      const verifyResult = await runVerifyInline({
         job_id,
         aws_summary_id,
         doc_ids,
         org_id: docRecords[0] && docRecords[0].org_id ? docRecords[0].org_id : '',
+        precomputedViVisits: knownVisits,
       });
-      console.log(`coordinator: inline verify complete for summary ${aws_summary_id}`);
+      if (verifyResult && Array.isArray(verifyResult.correctedVisits) && verifyResult.correctedVisits.length > 0) {
+        finalVisits = verifyResult.correctedVisits;
+        console.log('coordinator: verify returned correctedVisits — using for markJobComplete');
+      }
     } catch (verifyErr) {
       console.warn('coordinator: inline verify failed (non-fatal):', verifyErr.message);
     }
@@ -1907,7 +1913,7 @@ const findServiceDate = (visit, extractedText) => {
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 // ── Shared verify logic (called inline by coordinator AND by Lambda entrypoint) ──
-const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id }) => {
+const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precomputedViVisits }) => {
   console.log(`runVerifyInline start: job_id=${job_id} summary=${aws_summary_id}`);
 
 
@@ -1932,21 +1938,32 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id }) => {
     }
     const allParts = docRecords.filter(d => d.status === 'processed' || d.extracted_text);
 
-    // 3. Run VI pre-pass on each part
+    // 3. Build VI visits — use precomputed data from coordinator if available (no redundant Bedrock call)
     const viVisits = [];
-    for (const part of allParts) {
-      if (!part.file_key) continue;
-      try {
-        const result = await callBedrockVI(part.file_key);
-        if (Array.isArray(result.visits)) {
-          result.visits
-            .map(v => ({ ...v, date: normalizeDate(v.date), _part: part }))
-            .filter(v => v.date)
-            .forEach(v => viVisits.push(v));
+    if (Array.isArray(precomputedViVisits) && precomputedViVisits.length > 0) {
+      console.log(`verify: using ${precomputedViVisits.length} precomputed VI visits from coordinator — skipping Bedrock re-call`);
+      const partMap = {};
+      for (const p of allParts) { partMap[p.aws_document_id] = p; if (p.id) partMap[p.id] = p; }
+      precomputedViVisits.forEach(v => {
+        const part = partMap[v.source_doc_id] || null;
+        viVisits.push({ ...v, date: normalizeDate(v.date), _part: part });
+      });
+    } else {
+      console.log('verify: no precomputed VI visits — running Bedrock VI pre-pass (fallback)');
+      for (const part of allParts) {
+        if (!part.file_key) continue;
+        try {
+          const result = await callBedrockVI(part.file_key);
+          if (Array.isArray(result.visits)) {
+            result.visits
+              .map(v => ({ ...v, date: normalizeDate(v.date), _part: part }))
+              .filter(v => v.date)
+              .forEach(v => viVisits.push(v));
+          }
+          console.log(`verify: VI pre-pass ${part.label || part.aws_document_id} → ${(result.visits||[]).length} visits`);
+        } catch (e) {
+          console.warn(`verify: VI pre-pass failed for part ${part.aws_document_id}: ${e.message}`);
         }
-        console.log(`verify: VI pre-pass ${part.label || part.aws_document_id} → ${(result.visits||[]).length} visits`);
-      } catch (e) {
-        console.warn(`verify: VI pre-pass failed for part ${part.aws_document_id}: ${e.message}`);
       }
     }
 
@@ -2067,6 +2084,7 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id }) => {
     };
 
     console.log(`verify: complete — ${dateCorrections.length} corrections, ${missingVisits.length} missing`);
+    return { correctedVisits: finalVisits, correctedCount };
 
     // 9. Write back to summary record
     await dynamo.send(new UpdateCommand({
