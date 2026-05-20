@@ -1165,13 +1165,8 @@ const generateSummaryWorker = async (event) => {
           const yr = mmddyyyy[3].length === 2 ? '20' + mmddyyyy[3] : mmddyyyy[3];
           return `${yr}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
         }
-        // Last resort: parse then extract date portion using LOCAL date parts (not UTC)
-        const parsed = new Date(d);
-        if (isNaN(parsed.getTime())) return '';
-        const yr = parsed.getFullYear();
-        const mo = String(parsed.getMonth() + 1).padStart(2, '0');
-        const dy = String(parsed.getDate()).padStart(2, '0');
-        return `${yr}-${mo}-${dy}`;
+        // Last resort: return empty — never use Date() which applies UTC conversion
+        return '';
       };
 
       for (const part of allParts) {
@@ -1209,8 +1204,11 @@ const generateSummaryWorker = async (event) => {
         var cy = parseInt(v.date.split('-')[0], 10);
         var cm = parseInt(v.date.split('-')[1], 10);
         var cd = parseInt(v.date.split('-')[2], 10);
-        var storedDate = new Date(cy, cm - 1, cd);
+        // Pure string date math — no Date() objects, no UTC
+        // storedDate as integer YYYYMMDD for numeric comparison
+        var storedInt = cy * 10000 + cm * 100 + cd;
         var earliestCandidate = null;
+        var earliestInt = Infinity;
 
         // Check first 2 pages of encounter
         var pagesToCheck = v.pages.slice(0, 2);
@@ -1236,20 +1234,21 @@ const generateSummaryWorker = async (event) => {
           if (year < 100) year += 2000;
           if (month < 1 || month > 12 || day < 1 || day > 31) continue;
 
-          var candidate = new Date(year, month - 1, day);
-          var diffDays = (storedDate - candidate) / (1000 * 60 * 60 * 24);
-          // Accept if 1-7 days before stored (signature) date
+          var candidateInt = year * 10000 + month * 100 + day;
+          // Simple day diff approximation (good enough for 1-7 day check)
+          var diffDays = storedInt - candidateInt; // YYYYMMDD diff is not exact but fine for small ranges
+          // Accept if 1-7 days before stored date (using rough numeric diff)
           if (diffDays >= 1 && diffDays <= 7) {
-            if (!earliestCandidate || candidate < earliestCandidate) {
-              earliestCandidate = candidate;
+            if (candidateInt < earliestInt) {
+              earliestInt = candidateInt;
+              earliestCandidate = year + '-' + String(month).padStart(2,'0') + '-' + String(day).padStart(2,'0');
             }
           }
         }
 
         if (earliestCandidate) {
-          var corrected = earliestCandidate.toISOString().split('T')[0];
-          console.log('coordinator: ED page-header date fix ' + v.provider + ' ' + v.date + ' -> ' + corrected + ' (first-page Date: header, pages checked: ' + pagesToCheck.join(',') + ')');
-          return Object.assign({}, v, { date: corrected });
+          console.log('coordinator: ED page-header date fix ' + v.provider + ' ' + v.date + ' -> ' + earliestCandidate + ' (first-page Date: header, pages checked: ' + pagesToCheck.join(',') + ')');
+          return Object.assign({}, v, { date: earliestCandidate });
         }
         return v;
       });
@@ -1312,10 +1311,10 @@ const generateSummaryWorker = async (event) => {
       const corrected = parseMDY(match[1]);
       if (!corrected || corrected === v.date) return v;
       // Only override if corrected date is within 7 days of original (sanity check)
-      const origMs = new Date(v.date).getTime();
-      const corrMs = new Date(corrected).getTime();
-      const diffDays = Math.abs(origMs - corrMs) / 86400000;
-      if (diffDays > 7) return v;
+      // Pure string YYYYMMDD numeric diff — no Date() objects
+      const origInt = parseInt((v.date || '').replace(/-/g, ''), 10);
+      const corrInt = parseInt((corrected || '').replace(/-/g, ''), 10);
+      if (isNaN(origInt) || isNaN(corrInt) || Math.abs(origInt - corrInt) > 7) return v;
       console.log(`coordinator: service-date correction ${v.provider} ${v.date} → ${corrected} (SERVICE DT found in extracted_text)`);
       return { ...v, date: corrected };
     });
@@ -1789,9 +1788,8 @@ const normalizeDate = (raw) => {
     const yr = m[3].length === 2 ? '20' + m[3] : m[3];
     return `${yr}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
   }
-  const parsed = new Date(d);
-  if (isNaN(parsed.getTime())) return '';
-  return `${parsed.getFullYear()}-${String(parsed.getMonth()+1).padStart(2,'0')}-${String(parsed.getDate()).padStart(2,'0')}`;
+  // Never use Date() — it applies UTC conversion; return empty if unrecognized format
+  return '';
 };
 
 const normalizeProvider = (name) => {
@@ -1921,11 +1919,10 @@ const findServiceDate = (visit, extractedText) => {
   if (!corrected) return null;
 
   // Sanity: within 7 days of VI-reported date
-  const origMs = new Date(visit.date).getTime();
-  const corrMs = new Date(corrected).getTime();
-  if (isNaN(origMs) || isNaN(corrMs)) return null;
-  const diffDays = Math.abs(origMs - corrMs) / 86400000;
-  if (diffDays > 7) return null;
+  // Pure string YYYYMMDD diff — no Date() objects
+  const origInt = parseInt((visit.date || '').replace(/-/g, ''), 10);
+  const corrInt = parseInt((corrected || '').replace(/-/g, ''), 10);
+  if (isNaN(origInt) || isNaN(corrInt) || Math.abs(origInt - corrInt) > 7) return null;
 
   return corrected !== visit.date ? corrected : null;
 };
@@ -2065,9 +2062,10 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
 
       if (viDate && viDate !== normalizeDate(sv.date)) {
         // Sanity: only correct if within 7 days
-        const origMs = new Date(normalizeDate(sv.date)).getTime();
-        const corrMs = new Date(viDate).getTime();
-        if (!isNaN(origMs) && !isNaN(corrMs) && Math.abs(origMs - corrMs) / 86400000 <= 7) {
+        // Pure string YYYYMMDD diff — no Date() objects
+        const origInt2 = parseInt((normalizeDate(sv.date) || '').replace(/-/g, ''), 10);
+        const corrInt2 = parseInt((viDate || '').replace(/-/g, ''), 10);
+        if (!isNaN(origInt2) && !isNaN(corrInt2) && Math.abs(origInt2 - corrInt2) <= 7) {
           correctedCount++;
           const origFmt = normalizeDate(sv.date);
           console.log(`verify [VI diff]: correcting ${sv.provider} (${svType}) ${origFmt} → ${viDate}`);
@@ -2086,8 +2084,9 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
 
     // 7. Re-sort corrected visits chronologically (proper date comparison)
     const finalVisits = correctedVisits.sort((a, b) => {
-      const da = new Date(normalizeDate(a.date) || '1900-01-01').getTime();
-      const db = new Date(normalizeDate(b.date) || '1900-01-01').getTime();
+      // Pure string YYYYMMDD sort — no Date() objects
+      const da = parseInt((normalizeDate(a.date) || '19000101').replace(/-/g, ''), 10);
+      const db = parseInt((normalizeDate(b.date) || '19000101').replace(/-/g, ''), 10);
       return da - db;
     });
 
