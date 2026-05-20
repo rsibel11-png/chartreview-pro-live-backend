@@ -735,6 +735,7 @@ When extracting any single visit/document, you MUST use ONLY the content within 
 - A Consultation Report's HPI must come ONLY from the consultation document — NOT from the operative note, NOT from the ED note, NOT from any other same-date document.
 - An Operative Report's HPI must come ONLY from the operative note itself.
 - A Discharge Summary must come ONLY from the discharge document.
+- For a Discharge Summary, the Treatment Plan field must contain the DISCHARGE plan — follow-up instructions, discharge medications, return precautions, activity restrictions at discharge. Do NOT use the inpatient admission or treatment orders (IV fluids, admit to medicine, etc.) — those belong to the H&P or ED note, not the discharge summary.
 - NEVER borrow, import, or infer content from a different document even if it is the same date and same provider.
 - If the consult note HPI is brief, keep it brief — do NOT pad it with content from the operative report.
 - Each document stands alone. Extract only what is written in that document. Period.
@@ -850,6 +851,7 @@ For each clinical encounter found, extract:
    EXAMPLE: Document header shows "ADM DT: 10/02/25" but Dr. Tall's note on page 5 shows "SERVICE DT: 10/01/25" → use 2025-10-01 for Dr. Tall's visit.
    EXAMPLE: Note header says "10/02/2025" but treatment plan shows "Morphine 4mg IV (10/01 1937)" → use 2025-10-01.
    A note signed 10/02 for a visit starting 10/01 → use 2025-10-01.
+   CRITICAL — TIME FIELDS: Completely ignore any TIME or military time value (e.g. "TIME: 1825", "REP SRV TM: 1825") when determining the date. Dates in medical documents are always local calendar dates. Never treat a time value as a UTC offset. "SERVICE DT: 10/01/25 TIME: 1825" means the visit date is 10/01/2025 — period.
 2. provider - the treating provider's name and credentials (e.g. "Arthur J. Taylor, MD")
 3. facility - the facility or practice name (e.g. "Nevada Orthopedic & Spine Center", "Centennial Hills Hospital Emergency Department", "Dignity Health Physical Therapy")
 4. visit_type - a brief label: "Office Visit", "ER Visit", "Surgery", "Physical Therapy", "Radiology", "C-4 Form", "IME", "Chiropractic", etc.
@@ -1836,7 +1838,7 @@ const VI_LIGHT_SCHEMA = {
 const VI_PROMPT = `You are a medical record analyst performing a CENSUS PASS — identifying every distinct clinical encounter in this document.
 
 For each encounter return:
-- date: exact encounter date YYYY-MM-DD. Use SERVICE DT, REP SRV DT, or Triage Date when present — NOT ADM DT, DISCH DT, or physician signature date.
+- date: exact encounter date YYYY-MM-DD. Use SERVICE DT, REP SRV DT, or Triage Date when present — NOT ADM DT, DISCH DT, or physician signature date. Ignore any TIME or military time field entirely — dates are local calendar dates, never UTC-converted.
 - provider: full name exactly as written, including credentials
 - facility: treating facility name
 - visit_type: Emergency Department | Consultation Report | Operative Report | Radiology Report | History & Physical | Discharge Summary | Office Visit | Physical Therapy | C-4 Form
