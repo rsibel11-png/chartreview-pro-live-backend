@@ -1588,17 +1588,7 @@ const generateSummaryWorker = async (event) => {
       console.warn('coordinator: failed to stamp summary_id on job (non-fatal):', stampErr.message);
     }
 
-    // markJobComplete after verify — finalVisits has date corrections applied
-    await markJobComplete(job_id, {
-      patient_name:   patientName || '',
-      case_number:    caseNumber  || '',
-      visits:         finalVisits,
-      doc_count:      docRecords.length,
-      visit_count:    finalVisits.length,
-      aws_summary_id,
-    });
-
-    // ── Run verify inline — pass knownVisits so it skips redundant Bedrock call ──
+    // ── Run verify inline FIRST — pass knownVisits so it skips redundant Bedrock call ──
     let finalVisits = allVisits;
     try {
       const verifyResult = await runVerifyInline({
@@ -1615,6 +1605,16 @@ const generateSummaryWorker = async (event) => {
     } catch (verifyErr) {
       console.warn('coordinator: inline verify failed (non-fatal):', verifyErr.message);
     }
+
+    // markJobComplete AFTER verify — finalVisits has corrected dates
+    await markJobComplete(job_id, {
+      patient_name:   patientName || '',
+      case_number:    caseNumber  || '',
+      visits:         finalVisits,
+      doc_count:      docRecords.length,
+      visit_count:    finalVisits.length,
+      aws_summary_id,
+    });
 
   } catch (err) {
     console.error('coordinator fatal:', err);
