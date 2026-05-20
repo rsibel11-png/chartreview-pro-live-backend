@@ -1155,11 +1155,23 @@ const generateSummaryWorker = async (event) => {
       const normalizeDate = (raw) => {
         let d = (raw || '').trim();
         if (!d) return '';
+        // Strip time component before any parsing to prevent UTC midnight rollover
+        // e.g. "2025-10-01T18:25:00" or "10/01/25 1825" → "2025-10-01" / "10/01/25"
+        d = d.replace(/[T\s]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/, '').trim();
+        d = d.replace(/\s+\d{3,4}$/, '').trim(); // strip bare 4-digit military time e.g. "10/01/25 1825"
         if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-        const mmddyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-        if (mmddyyyy) return `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
+        const mmddyyyy = d.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+        if (mmddyyyy) {
+          const yr = mmddyyyy[3].length === 2 ? '20' + mmddyyyy[3] : mmddyyyy[3];
+          return `${yr}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
+        }
+        // Last resort: parse then extract date portion using LOCAL date parts (not UTC)
         const parsed = new Date(d);
-        return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+        if (isNaN(parsed.getTime())) return '';
+        const yr = parsed.getFullYear();
+        const mo = String(parsed.getMonth() + 1).padStart(2, '0');
+        const dy = String(parsed.getDate()).padStart(2, '0');
+        return `${yr}-${mo}-${dy}`;
       };
 
       for (const part of allParts) {
@@ -1766,13 +1778,20 @@ const buildVisitIndexStartHandler = async (event) => {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const normalizeDate = (raw) => {
-  const d = (raw || '').trim();
+  let d = (raw || '').trim();
   if (!d) return '';
+  // Strip time component to prevent UTC midnight rollover
+  d = d.replace(/[T\s]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/, '').trim();
+  d = d.replace(/\s+\d{3,4}$/, '').trim(); // strip bare military time e.g. "10/01/25 1825"
   if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-  const m = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+  const m = d.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    const yr = m[3].length === 2 ? '20' + m[3] : m[3];
+    return `${yr}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+  }
   const parsed = new Date(d);
-  return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+  if (isNaN(parsed.getTime())) return '';
+  return `${parsed.getFullYear()}-${String(parsed.getMonth()+1).padStart(2,'0')}-${String(parsed.getDate()).padStart(2,'0')}`;
 };
 
 const normalizeProvider = (name) => {
