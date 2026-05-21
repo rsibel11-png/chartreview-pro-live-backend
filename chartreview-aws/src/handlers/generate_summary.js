@@ -1273,55 +1273,6 @@ const generateSummaryWorker = async (event) => {
       knownVisits = [];
     }
 
-    // ── 3b. Service-date correction pass (free — regex on extracted_text) ─────
-    // The VI pre-pass sometimes returns ADM DT or signature date instead of
-    // SERVICE DT for hospital provider notes. Scan extracted_text around each
-    // provider's name for SERVICE DT / REP SRV DT / TRIAGE DATE and override
-    // if a different (earlier) date is found. No Bedrock call — pure regex.
-    const SERVICE_DATE_RE = /(?:SERVICE\s+DT|REP\s+SRV\s+DT|TRIAGE\s+DATE?|DATE\s+OF\s+SERVICE)[:\s]+([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{2,4})/i;
-    const parseMDY = (s) => {
-      const m = s.match(/^([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{2,4})$/);
-      if (!m) return null;
-      let yr = parseInt(m[3], 10);
-      if (yr < 100) yr += 2000;
-      const mo = m[1].padStart(2, '0');
-      const dy = m[2].padStart(2, '0');
-      return `${yr}-${mo}-${dy}`;
-    };
-    knownVisits = knownVisits.map(v => {
-      const srcPart = allParts.find(p => p.id === v.source_doc_id);
-      if (!srcPart || !srcPart.extracted_text) return v;
-      const text = srcPart.extracted_text;
-      // Anchor search on provider last name (first token before comma or space)
-      // Anchor on PAGE marker for this visit's first page if available,
-      // else fall back to first lastName occurrence. Prevents wrong SERVICE DT
-      // match when multiple providers appear in same multi-page document.
-      let anchorIdx = -1;
-      if (Array.isArray(v.pages) && v.pages.length > 0) {
-        const pageMarker = '--- PAGE ' + v.pages[0] + ' ---';
-        anchorIdx = text.indexOf(pageMarker);
-      }
-      if (anchorIdx < 0) {
-        const lastName = (v.provider || '').split(/[,\s]/)[0].trim();
-        if (!lastName || lastName.length < 3) return v;
-        anchorIdx = text.indexOf(lastName);
-      }
-      if (anchorIdx < 0) return v;
-      // Scan 500 chars before + 6000 after anchor (covers multi-page notes)
-      const window = text.slice(Math.max(0, anchorIdx - 500), anchorIdx + 6000);
-      const match = window.match(SERVICE_DATE_RE);
-      if (!match) return v;
-      const corrected = parseMDY(match[1]);
-      if (!corrected || corrected === v.date) return v;
-      // Only override if corrected date is within 7 days of original (sanity check)
-      // Pure string YYYYMMDD numeric diff — no Date() objects
-      const origInt = parseInt((v.date || '').replace(/-/g, ''), 10);
-      const corrInt = parseInt((corrected || '').replace(/-/g, ''), 10);
-      if (isNaN(origInt) || isNaN(corrInt) || Math.abs(origInt - corrInt) > 7) return v;
-      console.log(`coordinator: service-date correction ${v.provider} ${v.date} → ${corrected} (SERVICE DT found in extracted_text)`);
-      return { ...v, date: corrected };
-    });
-
     // ── 4. Build encounter-scoped batches using VI page data ─────────────────
     // Each VI visit with page data → its own scoped batch for that doc part.
     // Parts with no VI page data → full-document batch (safe fallback).
