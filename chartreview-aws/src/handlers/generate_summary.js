@@ -1139,6 +1139,7 @@ const generateSummaryWorker = async (event) => {
         label: doc.file_name || doc.aws_document_id,
         file_key: fileKey,
         file_size: doc.file_size || 0,
+        page_count: doc.page_count || 0,
         page_classifications: partClassif,
         extracted_text: doc.extracted_text || '',  // kept for fallback reference
         encounter_index: Array.isArray(doc.encounter_index) ? doc.encounter_index : [],  // from classify VI pre-pass
@@ -1333,9 +1334,26 @@ const generateSummaryWorker = async (event) => {
         }
         console.log(`coordinator: part ${part.label} → ${partVisits.length} encounter-scoped batches`);
       } else {
-        // No VI page data — fall back to full-document extraction
-        batches.push([{ ...part, pageScope: null }]);
-        console.log(`coordinator: part ${part.label} → full-document batch (no VI page data)`);
+        // No VI page data — fall back to full-document extraction.
+        // Bedrock hard limit: 100 pages per PDF. If the part exceeds that,
+        // split into sub-100-page window batches so Bedrock never rejects.
+        const MAX_BEDROCK_PAGES = 95; // small buffer below 100
+        const partPageCount = part.page_count || 0;
+        if (partPageCount > MAX_BEDROCK_PAGES) {
+          const windows = [];
+          for (let pg = 1; pg <= partPageCount; pg += MAX_BEDROCK_PAGES) {
+            const windowPages = [];
+            for (let p = pg; p < pg + MAX_BEDROCK_PAGES && p <= partPageCount; p++) windowPages.push(p);
+            windows.push(windowPages);
+          }
+          for (const windowPages of windows) {
+            batches.push([{ ...part, pageScope: windowPages }]);
+          }
+          console.log(`coordinator: part ${part.label} (${partPageCount} pages) → ${windows.length} windowed full-doc batches (>100 page limit)`);
+        } else {
+          batches.push([{ ...part, pageScope: null }]);
+          console.log(`coordinator: part ${part.label} → full-document batch (no VI page data)`);
+        }
       }
     }
     const totalBatches = batches.length;
