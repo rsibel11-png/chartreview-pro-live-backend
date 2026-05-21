@@ -1174,7 +1174,7 @@ const generateSummaryWorker = async (event) => {
               console.log(`coordinator: inline VI pre-pass ${part.label} → ${visits.length} visits`);
               // Persist to DynamoDB so subsequent runs skip this call
               await dynamo.send(new UpdateCommand({
-                TableName: DOCUMENTS_TABLE,
+                TableName: DOCS_TABLE,
                 Key: { aws_document_id: part.id },
                 UpdateExpression: 'SET encounter_index = :ei, updated_at = :now',
                 ExpressionAttributeValues: {
@@ -1617,6 +1617,7 @@ const generateSummaryWorker = async (event) => {
         doc_ids,
         org_id: docRecords[0] && docRecords[0].org_id ? docRecords[0].org_id : '',
         precomputedViVisits: knownVisits,
+        regionOrder,
       });
       if (verifyResult && Array.isArray(verifyResult.correctedVisits) && verifyResult.correctedVisits.length > 0) {
         finalVisits = verifyResult.correctedVisits;
@@ -1955,7 +1956,7 @@ const findServiceDate = (visit, extractedText) => {
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 // ── Shared verify logic (called inline by coordinator AND by Lambda entrypoint) ──
-const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precomputedViVisits }) => {
+const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precomputedViVisits, regionOrder: verifyRegionOrder }) => {
   console.log(`runVerifyInline start: job_id=${job_id} summary=${aws_summary_id}`);
 
 
@@ -1995,7 +1996,7 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
       for (const part of allParts) {
         if (!part.file_key) continue;
         try {
-          const result = await callBedrockVI(part.file_key, regionOrder);
+          const result = await callBedrockVI(part.file_key, verifyRegionOrder);
           if (Array.isArray(result.visits)) {
             result.visits
               .map(v => ({ ...v, date: normalizeDate(v.date), _part: part }))
