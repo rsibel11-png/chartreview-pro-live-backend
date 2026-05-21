@@ -1147,14 +1147,52 @@ const generateSummaryWorker = async (event) => {
     }
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
 
-    // ── 3. Read encounter_index from DynamoDB (written by classifyJobWorker VI pre-pass) ────
-    // No Bedrock call needed here — classify already ran VI pre-pass and stored results.
-    // encounter_index = [{ date, provider, facility, visit_type, pages, source_doc_id? }]
+    // ── 3. Load or build encounter_index ──────────────────────────────────────
+    // If encounter_index is already populated in DynamoDB (from a prior run), use it.
+    // If not, run an inline VI pre-pass via Bedrock and persist results back to DynamoDB
+    // so subsequent runs skip the Bedrock call entirely.
+    // encounter_index = [{ date, provider, facility, visit_type, pages }]
     let knownVisits = [];
     let patientName = patient_name;
     let caseNumber  = '';
     try {
-      await setJobStatus(job_id, 'Loading pre-pass encounter index...');
+      await setJobStatus(job_id, 'Loading encounter index...');
+
+      // ── 3a. Check if any part already has encounter_index populated ──────────
+      const partsNeedingVI = allParts.filter(p => !Array.isArray(p.encounter_index) || p.encounter_index.length === 0);
+      if (partsNeedingVI.length > 0) {
+        console.log(`coordinator: ${partsNeedingVI.length} parts missing encounter_index — running inline VI pre-pass`);
+        await setJobStatus(job_id, `Building encounter index (${partsNeedingVI.length} document parts)...`);
+        // Run VI pre-pass on parts that are missing encounter_index
+        const VI_CONCURRENCY_INLINE = 4;
+        for (let vi = 0; vi < partsNeedingVI.length; vi += VI_CONCURRENCY_INLINE) {
+          const chunk = partsNeedingVI.slice(vi, vi + VI_CONCURRENCY_INLINE);
+          await Promise.all(chunk.map(async (part) => {
+            try {
+              const viResult = await callBedrockVI(part.file_key);
+              const visits = Array.isArray(viResult.visits) ? viResult.visits : [];
+              console.log(`coordinator: inline VI pre-pass ${part.label} → ${visits.length} visits`);
+              // Persist to DynamoDB so subsequent runs skip this call
+              await dynamo.send(new UpdateCommand({
+                TableName: DOCUMENTS_TABLE,
+                Key: { aws_document_id: part.id },
+                UpdateExpression: 'SET encounter_index = :ei, updated_at = :now',
+                ExpressionAttributeValues: {
+                  ':ei': visits,
+                  ':now': new Date().toISOString(),
+                },
+              }));
+              // Mutate the in-memory part so the read loop below picks it up
+              part.encounter_index = visits;
+            } catch (viErr) {
+              console.warn(`coordinator: inline VI pre-pass failed for ${part.label}: ${viErr.message}`);
+              part.encounter_index = [];
+            }
+          }));
+        }
+      } else {
+        console.log(`coordinator: all parts have encounter_index — skipping inline VI pre-pass`);
+      }
       const normalizeDate = (raw) => {
         let d = (raw || '').trim();
         if (!d) return '';
@@ -1811,6 +1849,7 @@ For each encounter return:
 - provider: full name exactly as written, including credentials
 - facility: treating facility name
 - visit_type: Emergency Department | Consultation Report | Operative Report | Radiology Report | History & Physical | Discharge Summary | Office Visit | Physical Therapy | C-4 Form
+  CRITICAL: Use "Discharge Summary" if the note contains discharge instructions, discharge medications, or follow-up instructions after an inpatient stay — even if the document header says "Emergency Department". Use "Emergency Department" only for the initial ED triage/treatment note.
 - pages: page numbers in this PDF where the encounter appears
 
 INCLUDE: ED notes, consultation reports, operative reports, radiology reports, office visits, H&P notes, discharge summaries, C-4/Workers Comp forms.
