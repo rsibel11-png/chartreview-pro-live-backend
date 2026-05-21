@@ -1020,9 +1020,10 @@ const generateSummaryChunkWorker = async (event) => {
     }
     const globalBatchNum = batchOffset + batchIndex + 1;
     const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
-    // Add ±1 page buffer so we don't miss content at encounter edges
+    // Add ±3 page buffer so we don't miss content at encounter edges
+    // NOTE: ±1 was tried and caused sparse output — keep at ±3
     const scopeWithBuffer = pageScope && pageScope.length > 0
-      ? [...new Set(pageScope.flatMap(p => [p - 1, p, p + 1]).filter(p => p > 0))].sort((a, b) => a - b)
+      ? [...new Set(pageScope.flatMap(p => [p - 3, p - 2, p - 1, p, p + 1, p + 2, p + 3]).filter(p => p > 0))].sort((a, b) => a - b)
       : null;
     if (scopeWithBuffer) console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: page scope [${scopeWithBuffer.join(',')}]`);
     try {
