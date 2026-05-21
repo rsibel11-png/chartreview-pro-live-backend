@@ -1169,7 +1169,7 @@ const generateSummaryWorker = async (event) => {
           const chunk = partsNeedingVI.slice(vi, vi + VI_CONCURRENCY_INLINE);
           await Promise.all(chunk.map(async (part) => {
             try {
-              const viResult = await callBedrockVI(part.file_key);
+              const viResult = await callBedrockVI(part.file_key, regionOrder);
               const visits = Array.isArray(viResult.visits) ? viResult.visits : [];
               console.log(`coordinator: inline VI pre-pass ${part.label} → ${visits.length} visits`);
               // Persist to DynamoDB so subsequent runs skip this call
@@ -1855,39 +1855,55 @@ For each encounter return:
 INCLUDE: ED notes, consultation reports, operative reports, radiology reports, office visits, H&P notes, discharge summaries, C-4/Workers Comp forms.
 EXCLUDE: nursing flowsheets, MAR, anesthesia records, coding summaries, consent forms, lab printouts, appointment reminders, PPRs, PACU records, pre-op checklists.`;
 
-const callBedrockVI = async (fileKey) => {
+const callBedrockVI = async (fileKey, regionOrder) => {
+  // VI uses its own tool name ('record_visits') so we can't reuse callBedrock directly.
+  // Instead iterate the same region/model order for consistency + throttle handling.
   const pdfBytes = await fetchPdfBytes(fileKey);
   const b64 = pdfBytes.toString('base64');
 
-  const client = getBedrockClient();
-  const body = JSON.stringify({
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 4096,
-    temperature: 0,
-    tools: [{
-      name:        'record_visits',
-      description: 'Record the list of clinical encounters found in this document',
-      input_schema: VI_LIGHT_SCHEMA,
-    }],
-    tool_choice: { type: 'tool', name: 'record_visits' },
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
-        { type: 'text', text: VI_PROMPT },
-      ],
-    }],
-  });
-
-  const resp = await client.send(new InvokeModelCommand({
-    modelId:     MODEL_ID,
-    contentType: 'application/json',
-    accept:      'application/json',
-    body,
-  }));
-  const parsed = JSON.parse(Buffer.from(resp.body).toString());
-  const toolUse = parsed.content && parsed.content.find(b => b.type === 'tool_use');
-  return toolUse ? toolUse.input : { visits: [] };
+  const regions = regionOrder || CANDIDATE_REGIONS;
+  let lastErr;
+  for (const candidate of regions) {
+    const { region, models } = candidate;
+    for (const modelId of models) {
+      try {
+        const client = getBedrockClient(region);
+        const body = JSON.stringify({
+          anthropic_version: 'bedrock-2023-05-31',
+          max_tokens: 4096,
+          temperature: 0,
+          tools: [{
+            name: 'record_visits',
+            description: 'Record the list of clinical encounters found in this document',
+            input_schema: VI_LIGHT_SCHEMA,
+          }],
+          tool_choice: { type: 'tool', name: 'record_visits' },
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+              { type: 'text', text: VI_PROMPT },
+            ],
+          }],
+        });
+        const resp = await client.send(new InvokeModelCommand({
+          modelId,
+          contentType: 'application/json',
+          accept: 'application/json',
+          body,
+        }));
+        const parsed = JSON.parse(Buffer.from(resp.body).toString());
+        const toolUse = parsed.content && parsed.content.find(b => b.type === 'tool_use');
+        if (!toolUse) throw new Error('No tool_use block in VI response');
+        console.log(`callBedrockVI: success region=${region} model=${modelId} visits=${(toolUse.input.visits||[]).length}`);
+        return toolUse.input;
+      } catch (err) {
+        console.warn(`callBedrockVI: region=${region} model=${modelId} failed — ${err.message}`);
+        lastErr = err;
+      }
+    }
+  }
+  throw lastErr || new Error('callBedrockVI: all regions failed');
 };
 
 // ── SERVICE DT regex correction ───────────────────────────────────────────────
@@ -1979,7 +1995,7 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
       for (const part of allParts) {
         if (!part.file_key) continue;
         try {
-          const result = await callBedrockVI(part.file_key);
+          const result = await callBedrockVI(part.file_key, regionOrder);
           if (Array.isArray(result.visits)) {
             result.visits
               .map(v => ({ ...v, date: normalizeDate(v.date), _part: part }))
