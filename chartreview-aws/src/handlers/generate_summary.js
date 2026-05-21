@@ -1814,7 +1814,7 @@ const normalizeProvider = (name) => {
 
 // ── Fetch PDF bytes from S3 ───────────────────────────────────────────────────
 const fetchPdfBytes = async (fileKey) => {
-  const resp = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: fileKey }));
+  const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
   const chunks = [];
   for await (const chunk of resp.Body) chunks.push(chunk);
   return Buffer.concat(chunks);
