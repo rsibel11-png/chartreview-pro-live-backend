@@ -191,7 +191,7 @@ const slicePdfPages = async (fileKey, pages) => {
   }
 
   const newDoc = await PDFDocument.create();
-  const copied = await newDoc.copyPagesFrom(srcDoc, indices);
+  const copied = await newDoc.copyPages(srcDoc, indices);
   copied.forEach(page => newDoc.addPage(page));
 
   const slicedBytes = await newDoc.save();
