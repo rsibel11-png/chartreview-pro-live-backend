@@ -191,7 +191,7 @@ const slicePdfPages = async (fileKey, pages) => {
   }
 
   const newDoc = await PDFDocument.create();
-  const copied = await newDoc.copyPages(srcDoc, indices);
+  const copied = await newDoc.copyPagesFrom(srcDoc, indices);
   copied.forEach(page => newDoc.addPage(page));
 
   const slicedBytes = await newDoc.save();
@@ -1147,52 +1147,14 @@ const generateSummaryWorker = async (event) => {
     }
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
 
-    // ── 3. Load or build encounter_index ──────────────────────────────────────
-    // If encounter_index is already populated in DynamoDB (from a prior run), use it.
-    // If not, run an inline VI pre-pass via Bedrock and persist results back to DynamoDB
-    // so subsequent runs skip the Bedrock call entirely.
-    // encounter_index = [{ date, provider, facility, visit_type, pages }]
+    // ── 3. Read encounter_index from DynamoDB (written by classifyJobWorker VI pre-pass) ────
+    // No Bedrock call needed here — classify already ran VI pre-pass and stored results.
+    // encounter_index = [{ date, provider, facility, visit_type, pages, source_doc_id? }]
     let knownVisits = [];
     let patientName = patient_name;
     let caseNumber  = '';
     try {
-      await setJobStatus(job_id, 'Loading encounter index...');
-
-      // ── 3a. Check if any part already has encounter_index populated ──────────
-      const partsNeedingVI = allParts.filter(p => !Array.isArray(p.encounter_index) || p.encounter_index.length === 0);
-      if (partsNeedingVI.length > 0) {
-        console.log(`coordinator: ${partsNeedingVI.length} parts missing encounter_index — running inline VI pre-pass`);
-        await setJobStatus(job_id, `Building encounter index (${partsNeedingVI.length} document parts)...`);
-        // Run VI pre-pass on parts that are missing encounter_index
-        const VI_CONCURRENCY_INLINE = 4;
-        for (let vi = 0; vi < partsNeedingVI.length; vi += VI_CONCURRENCY_INLINE) {
-          const chunk = partsNeedingVI.slice(vi, vi + VI_CONCURRENCY_INLINE);
-          await Promise.all(chunk.map(async (part) => {
-            try {
-              const viResult = await callBedrockVI(part.file_key, regionOrder);
-              const visits = Array.isArray(viResult.visits) ? viResult.visits : [];
-              console.log(`coordinator: inline VI pre-pass ${part.label} → ${visits.length} visits`);
-              // Persist to DynamoDB so subsequent runs skip this call
-              await dynamo.send(new UpdateCommand({
-                TableName: DOCS_TABLE,
-                Key: { aws_document_id: part.id },
-                UpdateExpression: 'SET encounter_index = :ei, updated_at = :now',
-                ExpressionAttributeValues: {
-                  ':ei': visits,
-                  ':now': new Date().toISOString(),
-                },
-              }));
-              // Mutate the in-memory part so the read loop below picks it up
-              part.encounter_index = visits;
-            } catch (viErr) {
-              console.warn(`coordinator: inline VI pre-pass failed for ${part.label}: ${viErr.message}`);
-              part.encounter_index = [];
-            }
-          }));
-        }
-      } else {
-        console.log(`coordinator: all parts have encounter_index — skipping inline VI pre-pass`);
-      }
+      await setJobStatus(job_id, 'Loading pre-pass encounter index...');
       const normalizeDate = (raw) => {
         let d = (raw || '').trim();
         if (!d) return '';
@@ -1310,6 +1272,55 @@ const generateSummaryWorker = async (event) => {
       console.warn('coordinator: encounter_index read failed (non-fatal):', viErr.message);
       knownVisits = [];
     }
+
+    // ── 3b. Service-date correction pass (free — regex on extracted_text) ─────
+    // The VI pre-pass sometimes returns ADM DT or signature date instead of
+    // SERVICE DT for hospital provider notes. Scan extracted_text around each
+    // provider's name for SERVICE DT / REP SRV DT / TRIAGE DATE and override
+    // if a different (earlier) date is found. No Bedrock call — pure regex.
+    const SERVICE_DATE_RE = /(?:SERVICE\s+DT|REP\s+SRV\s+DT|TRIAGE\s+DATE?|DATE\s+OF\s+SERVICE)[:\s]+([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{2,4})/i;
+    const parseMDY = (s) => {
+      const m = s.match(/^([0-9]{1,2})\/([0-9]{1,2})\/([0-9]{2,4})$/);
+      if (!m) return null;
+      let yr = parseInt(m[3], 10);
+      if (yr < 100) yr += 2000;
+      const mo = m[1].padStart(2, '0');
+      const dy = m[2].padStart(2, '0');
+      return `${yr}-${mo}-${dy}`;
+    };
+    knownVisits = knownVisits.map(v => {
+      const srcPart = allParts.find(p => p.id === v.source_doc_id);
+      if (!srcPart || !srcPart.extracted_text) return v;
+      const text = srcPart.extracted_text;
+      // Anchor search on provider last name (first token before comma or space)
+      // Anchor on PAGE marker for this visit's first page if available,
+      // else fall back to first lastName occurrence. Prevents wrong SERVICE DT
+      // match when multiple providers appear in same multi-page document.
+      let anchorIdx = -1;
+      if (Array.isArray(v.pages) && v.pages.length > 0) {
+        const pageMarker = '--- PAGE ' + v.pages[0] + ' ---';
+        anchorIdx = text.indexOf(pageMarker);
+      }
+      if (anchorIdx < 0) {
+        const lastName = (v.provider || '').split(/[,\s]/)[0].trim();
+        if (!lastName || lastName.length < 3) return v;
+        anchorIdx = text.indexOf(lastName);
+      }
+      if (anchorIdx < 0) return v;
+      // Scan 500 chars before + 6000 after anchor (covers multi-page notes)
+      const window = text.slice(Math.max(0, anchorIdx - 500), anchorIdx + 6000);
+      const match = window.match(SERVICE_DATE_RE);
+      if (!match) return v;
+      const corrected = parseMDY(match[1]);
+      if (!corrected || corrected === v.date) return v;
+      // Only override if corrected date is within 7 days of original (sanity check)
+      // Pure string YYYYMMDD numeric diff — no Date() objects
+      const origInt = parseInt((v.date || '').replace(/-/g, ''), 10);
+      const corrInt = parseInt((corrected || '').replace(/-/g, ''), 10);
+      if (isNaN(origInt) || isNaN(corrInt) || Math.abs(origInt - corrInt) > 7) return v;
+      console.log(`coordinator: service-date correction ${v.provider} ${v.date} → ${corrected} (SERVICE DT found in extracted_text)`);
+      return { ...v, date: corrected };
+    });
 
     // ── 4. Build encounter-scoped batches using VI page data ─────────────────
     // Each VI visit with page data → its own scoped batch for that doc part.
@@ -1617,7 +1628,6 @@ const generateSummaryWorker = async (event) => {
         doc_ids,
         org_id: docRecords[0] && docRecords[0].org_id ? docRecords[0].org_id : '',
         precomputedViVisits: knownVisits,
-        regionOrder,
       });
       if (verifyResult && Array.isArray(verifyResult.correctedVisits) && verifyResult.correctedVisits.length > 0) {
         finalVisits = verifyResult.correctedVisits;
@@ -1815,7 +1825,7 @@ const normalizeProvider = (name) => {
 
 // ── Fetch PDF bytes from S3 ───────────────────────────────────────────────────
 const fetchPdfBytes = async (fileKey) => {
-  const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fileKey }));
+  const resp = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: fileKey }));
   const chunks = [];
   for await (const chunk of resp.Body) chunks.push(chunk);
   return Buffer.concat(chunks);
@@ -1850,61 +1860,44 @@ For each encounter return:
 - provider: full name exactly as written, including credentials
 - facility: treating facility name
 - visit_type: Emergency Department | Consultation Report | Operative Report | Radiology Report | History & Physical | Discharge Summary | Office Visit | Physical Therapy | C-4 Form
-  CRITICAL: Use "Discharge Summary" if the note contains discharge instructions, discharge medications, or follow-up instructions after an inpatient stay — even if the document header says "Emergency Department". Use "Emergency Department" only for the initial ED triage/treatment note.
 - pages: page numbers in this PDF where the encounter appears
 
 INCLUDE: ED notes, consultation reports, operative reports, radiology reports, office visits, H&P notes, discharge summaries, C-4/Workers Comp forms.
 EXCLUDE: nursing flowsheets, MAR, anesthesia records, coding summaries, consent forms, lab printouts, appointment reminders, PPRs, PACU records, pre-op checklists.`;
 
-const callBedrockVI = async (fileKey, regionOrder) => {
-  // VI uses its own tool name ('record_visits') so we can't reuse callBedrock directly.
-  // Instead iterate the same region/model order for consistency + throttle handling.
+const callBedrockVI = async (fileKey) => {
   const pdfBytes = await fetchPdfBytes(fileKey);
   const b64 = pdfBytes.toString('base64');
 
-  const regions = regionOrder || CANDIDATE_REGIONS;
-  let lastErr;
-  for (const candidate of regions) {
-    const { region, models } = candidate;
-    for (const modelId of models) {
-      try {
-        const client = getBedrockClient(region);
-        const body = JSON.stringify({
-          anthropic_version: 'bedrock-2023-05-31',
-          max_tokens: 4096,
-          temperature: 0,
-          tools: [{
-            name: 'record_visits',
-            description: 'Record the list of clinical encounters found in this document',
-            input_schema: VI_LIGHT_SCHEMA,
-          }],
-          tool_choice: { type: 'tool', name: 'record_visits' },
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
-              { type: 'text', text: VI_PROMPT },
-            ],
-          }],
-        });
-        const resp = await client.send(new InvokeModelCommand({
-          modelId,
-          contentType: 'application/json',
-          accept: 'application/json',
-          body,
-        }));
-        const parsed = JSON.parse(Buffer.from(resp.body).toString());
-        const toolUse = parsed.content && parsed.content.find(b => b.type === 'tool_use');
-        if (!toolUse) throw new Error('No tool_use block in VI response');
-        console.log(`callBedrockVI: success region=${region} model=${modelId} visits=${(toolUse.input.visits||[]).length}`);
-        return toolUse.input;
-      } catch (err) {
-        console.warn(`callBedrockVI: region=${region} model=${modelId} failed — ${err.message}`);
-        lastErr = err;
-      }
-    }
-  }
-  throw lastErr || new Error('callBedrockVI: all regions failed');
+  const client = getBedrockClient();
+  const body = JSON.stringify({
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 4096,
+    temperature: 0,
+    tools: [{
+      name:        'record_visits',
+      description: 'Record the list of clinical encounters found in this document',
+      input_schema: VI_LIGHT_SCHEMA,
+    }],
+    tool_choice: { type: 'tool', name: 'record_visits' },
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+        { type: 'text', text: VI_PROMPT },
+      ],
+    }],
+  });
+
+  const resp = await client.send(new InvokeModelCommand({
+    modelId:     MODEL_ID,
+    contentType: 'application/json',
+    accept:      'application/json',
+    body,
+  }));
+  const parsed = JSON.parse(Buffer.from(resp.body).toString());
+  const toolUse = parsed.content && parsed.content.find(b => b.type === 'tool_use');
+  return toolUse ? toolUse.input : { visits: [] };
 };
 
 // ── SERVICE DT regex correction ───────────────────────────────────────────────
@@ -1956,7 +1949,7 @@ const findServiceDate = (visit, extractedText) => {
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 // ── Shared verify logic (called inline by coordinator AND by Lambda entrypoint) ──
-const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precomputedViVisits, regionOrder: verifyRegionOrder }) => {
+const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precomputedViVisits }) => {
   console.log(`runVerifyInline start: job_id=${job_id} summary=${aws_summary_id}`);
 
 
@@ -1996,7 +1989,7 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
       for (const part of allParts) {
         if (!part.file_key) continue;
         try {
-          const result = await callBedrockVI(part.file_key, verifyRegionOrder);
+          const result = await callBedrockVI(part.file_key);
           if (Array.isArray(result.visits)) {
             result.visits
               .map(v => ({ ...v, date: normalizeDate(v.date), _part: part }))
