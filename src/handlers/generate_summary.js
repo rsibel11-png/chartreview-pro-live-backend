@@ -443,6 +443,14 @@ const sanitizeVisits = (visits, patientName) => {
       });
       if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
       if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
+      // Strip any LLM-generated meta-commentary about data sources
+      const metaPattern = /\s*[\(\[]\s*(Extrapolated|Cross-referenced|Inferred|Derived|Based on|from same[- ]date[^)\]]*)[^\)\]]*[\)\]]\.?/gi;
+      const textFieldsToStrip = ['hpi_summary','diagnosis_codes','impression_diagnosis','treatment_plan','chief_complaint','imaging_findings'];
+      textFieldsToStrip.forEach(f => {
+        if (clean[f] && typeof clean[f] === 'string') {
+          clean[f] = clean[f].replace(metaPattern, '').trim();
+        }
+      });
       const patientLower = patientName?.toLowerCase();
       if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
         clean.practice_setting = '';
