@@ -443,20 +443,12 @@ const sanitizeVisits = (visits, patientName) => {
       });
       if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
       if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
-      // Strip any LLM-generated meta-commentary about data sources (parenthetical OR inline)
-      const metaPatterns = [
-        /\s*[\(\[]\s*(Extrapolated|Cross-referenced|Inferred|Derived|Based on)[^\)\]]*[\)\]]\.?/gi,
-        /\s*(;?\s*extrapolated from[^.;)\]]*[.;]?)/gi,
-        /\s*(;?\s*cross-referenced from[^.;)\]]*[.;]?)/gi,
-        /\s*(;?\s*inferred from same[- ]date[^.;)\]]*[.;]?)/gi,
-        /\s*(;?\s*\(from same[- ]date[^)]*\)\.?)/gi,
-      ];
+      // Strip any LLM-generated meta-commentary about data sources
+      const metaPattern = /\s*[\(\[]\s*(Extrapolated|Cross-referenced|Inferred|Derived|Based on|from same[- ]date[^)\]]*)[^\)\]]*[\)\]]\.?/gi;
       const textFieldsToStrip = ['hpi_summary','diagnosis_codes','impression_diagnosis','treatment_plan','chief_complaint','imaging_findings'];
       textFieldsToStrip.forEach(f => {
         if (clean[f] && typeof clean[f] === 'string') {
-          let val = clean[f];
-          metaPatterns.forEach(p => { val = val.replace(p, ''); });
-          clean[f] = val.replace(/\s{2,}/g, ' ').trim();
+          clean[f] = clean[f].replace(metaPattern, '').trim();
         }
       });
       const patientLower = patientName?.toLowerCase();
