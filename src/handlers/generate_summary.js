@@ -443,12 +443,20 @@ const sanitizeVisits = (visits, patientName) => {
       });
       if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
       if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
-      // Strip any LLM-generated meta-commentary about data sources
-      const metaPattern = /\s*[\(\[]\s*(Extrapolated|Cross-referenced|Inferred|Derived|Based on|from same[- ]date[^)\]]*)[^\)\]]*[\)\]]\.?/gi;
+      // Strip any LLM-generated meta-commentary about data sources (parenthetical OR inline)
+      const metaPatterns = [
+        /\s*[\(\[]\s*(Extrapolated|Cross-referenced|Inferred|Derived|Based on)[^\)\]]*[\)\]]\.?/gi,
+        /\s*(;?\s*extrapolated from[^.;)\]]*[.;]?)/gi,
+        /\s*(;?\s*cross-referenced from[^.;)\]]*[.;]?)/gi,
+        /\s*(;?\s*inferred from same[- ]date[^.;)\]]*[.;]?)/gi,
+        /\s*(;?\s*\(from same[- ]date[^)]*\)\.?)/gi,
+      ];
       const textFieldsToStrip = ['hpi_summary','diagnosis_codes','impression_diagnosis','treatment_plan','chief_complaint','imaging_findings'];
       textFieldsToStrip.forEach(f => {
         if (clean[f] && typeof clean[f] === 'string') {
-          clean[f] = clean[f].replace(metaPattern, '').trim();
+          let val = clean[f];
+          metaPatterns.forEach(p => { val = val.replace(p, ''); });
+          clean[f] = val.replace(/\s{2,}/g, ' ').trim();
         }
       });
       const patientLower = patientName?.toLowerCase();
@@ -543,7 +551,7 @@ D) AMBULANCE / EMS REPORTS (pre-hospital care records):
    - visit_date: the date of the incident/transport
 
 E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
-    STRICT IDENTIFICATION: Only treat as a C-4 if the document EXPLICITLY shows the official WCB Form C-4 header, title block, or reference number (e.g., "Form C-4", "Workers' Compensation Board", "WCB Report"). Do NOT label regular office visits or injury reports as C-4 unless the actual form is present.
+    IDENTIFICATION: Treat as a C-4 if the document contains ANY of the following: "Form C-4", "C-4", "Workers' Compensation Board", "WCB Report", "EMPLOYEE'S CLAIM FOR COMPENSATION", or "Doctor's Report of Initial Examination". These forms are often partially illegible or printed as scanned images — extract what you can. Do NOT label regular office visit notes as C-4 unless one of the above identifiers is present.
 
     For ACTUAL C-4 forms only:
     - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
