@@ -4,37 +4,39 @@ on:
   workflow_dispatch:
 
 jobs:
-  invoke-and-log:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - name: Invoke Lambda and capture error
+      - name: Check API GW integration and invoke Lambda
         run: |
-          echo '=== Direct Lambda invocation ==='
+          API_ID="1h4kpspbs6"
+          REGION="us-east-1"
+
+          echo '=== API GW resources with /redact ==='
+          aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
+            --query 'items[?contains(path,`redact`)]' --output json
+
+          echo '=== Get /redact resource ID ==='
+          REDACT_ID=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
+            --query "items[?contains(path,'redact')].id" --output text)
+          echo "Resource ID: $REDACT_ID"
+
+          echo '=== POST integration ==='
+          aws apigateway get-integration \
+            --rest-api-id $API_ID \
+            --resource-id $REDACT_ID \
+            --http-method POST \
+            --region $REGION 2>&1 || echo 'No POST integration found'
+
+          echo '=== Direct Lambda invoke (simple) ==='
           aws lambda invoke \
             --function-name chartreview-pro-prod-redactDocumentStart \
-            --invocation-type RequestResponse \
-            --payload '{"httpMethod":"POST","pathParameters":{"aws_document_id":"test-123"},"headers":{"x-api-key":"ChartReview#2026$ProdKey!Rx"},"body":null}' \
-            --log-type Tail \
+            --cli-binary-format raw-in-base64-out \
+            --payload '{"httpMethod":"POST","path":"/documents/test/redact","pathParameters":{"aws_document_id":"test-id"},"headers":{"x-api-key":"ChartReview#2026$ProdKey!Rx"},"body":null}' \
             --region us-east-1 \
-            --query 'LogResult' \
-            --output text \
-            /tmp/response.json 2>&1 | base64 -d || true
-          echo '=== Response payload ==='
-          cat /tmp/response.json 2>/dev/null || echo 'no response file'
-          echo '=== CloudWatch logs (last 100 events) ==='
-          sleep 3
-          LOG_GROUP='/aws/lambda/chartreview-pro-prod-redactDocumentStart'
-          STREAM=$(aws logs describe-log-streams \
-            --log-group-name "$LOG_GROUP" \
-            --order-by LastEventTime --descending --max-items 1 \
-            --region us-east-1 \
-            --query 'logStreams[0].logStreamName' --output text)
-          echo "Stream: $STREAM"
-          aws logs get-log-events \
-            --log-group-name "$LOG_GROUP" \
-            --log-stream-name "$STREAM" \
-            --limit 100 --region us-east-1 \
-            --query 'events[*].message' --output text 2>&1
+            /tmp/out.json 2>&1
+          echo '=== Lambda response ==='
+          cat /tmp/out.json 2>/dev/null || echo 'no output'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
