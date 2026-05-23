@@ -14,9 +14,9 @@ const { PDFDocument, rgb }                             = require('pdf-lib');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
-const s3          = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
-const dynamo      = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const bedrock     = new BedrockRuntimeClient({ region: 'us-east-1' });
+const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
+const dynamo       = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const bedrock      = new BedrockRuntimeClient({ region: 'us-east-1' });
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
 
 const BUCKET     = process.env.S3_BUCKET       || 'chartreview-documents-prod';
@@ -27,15 +27,17 @@ const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-p
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-const respond = (statusCode, body) => ({
-  statusCode,
-  headers: {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-api-key,x-org-id',
-  },
-  body: JSON.stringify(body),
-});
+const respond = function(statusCode, body) {
+  return {
+    statusCode: statusCode,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-api-key,x-org-id',
+    },
+    body: JSON.stringify(body),
+  };
+};
 
 async function getS3Bytes(key) {
   const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
@@ -44,22 +46,23 @@ async function getS3Bytes(key) {
   return Buffer.concat(chunks);
 }
 
-// String-concat version — avoids template literal stripping in transit
 async function updateJob(job_id, patch) {
   const keys   = Object.keys(patch);
-  const sets   = keys.map((k, i) => '#f' + i + ' = :v' + i).join(', ');
-  const names  = Object.fromEntries(keys.map((k, i) => ['#f' + i, k]));
-  const values = Object.fromEntries(Object.values(patch).map((v, i) => [':v' + i, v]));
+  const sets   = keys.map(function(k, i) { return '#f' + i + ' = :v' + i; }).join(', ');
+  const names  = {};
+  const values = {};
+  keys.forEach(function(k, i) { names['#f' + i] = k; });
+  Object.values(patch).forEach(function(v, i) { values[':v' + i] = v; });
   await dynamo.send(new UpdateCommand({
     TableName: JOBS_TABLE,
-    Key: { job_id },
+    Key: { job_id: job_id },
     UpdateExpression: 'SET ' + sets,
     ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
   }));
 }
 
-// ── PII detection via Bedrock (PDF document vision) ───────────────────────────
+// ── PII detection via Bedrock vision ─────────────────────────────────────────
 
 async function detectPiiInPdf(pdfBytes) {
   const pdfBase64 = pdfBytes.toString('base64');
@@ -111,17 +114,17 @@ async function detectPiiInPdf(pdfBytes) {
     modelId: MODEL_ID,
     contentType: 'application/json',
     accept: 'application/json',
-    body,
+    body: body,
   }));
 
-  const result = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
-  const text = (result.content && result.content[0] && result.content[0].text || '{}').trim();
-  const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const result  = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
+  const rawText = (result.content && result.content[0] && result.content[0].text) || '{}';
+  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
 
   try {
     return JSON.parse(cleaned);
   } catch (e) {
-    console.warn('PII detection parse failed:', text.slice(0, 300));
+    console.warn('PII detection parse failed:', rawText.slice(0, 300));
     return {};
   }
 }
@@ -134,7 +137,7 @@ async function applyRedactions(pdfBytes, piiByPage) {
 
   for (const pageIndexStr of Object.keys(piiByPage)) {
     const pageIndex = parseInt(pageIndexStr, 10);
-    const boxes = piiByPage[pageIndexStr];
+    const boxes     = piiByPage[pageIndexStr];
     if (pageIndex >= pages.length || !boxes || !boxes.length) continue;
 
     const page = pages[pageIndex];
@@ -153,7 +156,7 @@ async function applyRedactions(pdfBytes, piiByPage) {
         y:      Math.max(0, py - pad),
         width:  Math.min(w, pw + pad * 2),
         height: Math.min(h, ph + pad * 2),
-        color:  rgb(0, 0, 0),
+        color:   rgb(0, 0, 0),
         opacity: 1,
       });
     }
@@ -164,12 +167,12 @@ async function applyRedactions(pdfBytes, piiByPage) {
 
 // ── START handler ─────────────────────────────────────────────────────────────
 
-const _redactDocumentStart = async (event) => {
+const _redactDocumentStart = async function(event) {
   const doc_id = event.pathParameters && event.pathParameters.aws_document_id;
   if (!doc_id) return respond(400, { error: 'Missing document ID' });
 
   const docRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
-  const doc = docRes.Item;
+  const doc    = docRes.Item;
   if (!doc) return respond(404, { error: 'Document not found' });
 
   const fileKey = doc.file_key || doc.s3_key;
@@ -181,28 +184,34 @@ const _redactDocumentStart = async (event) => {
   await dynamo.send(new PutCommand({
     TableName: JOBS_TABLE,
     Item: {
-      job_id, type: 'redact', status: 'processing',
-      doc_id, org_id: doc.org_id,
-      created_at: now, updated_at: now,
+      job_id:           job_id,
+      type:             'redact',
+      status:           'processing',
+      doc_id:           doc_id,
+      org_id:           doc.org_id,
+      created_at:       now,
+      updated_at:       now,
       progress_message: 'Starting redaction...',
     },
   }));
 
   await lambdaClient.send(new InvokeCommand({
-    FunctionName: WORKER_FN,
+    FunctionName:   WORKER_FN,
     InvocationType: 'Event',
-    Payload: Buffer.from(JSON.stringify({ job_id, doc_id, doc })),
+    Payload:        Buffer.from(JSON.stringify({ job_id: job_id, doc_id: doc_id, doc: doc })),
   }));
 
-  return respond(200, { job_id, status: 'processing' });
+  return respond(200, { job_id: job_id, status: 'processing' });
 };
 
 module.exports.redactDocumentStart = validateApiKey(_redactDocumentStart);
 
 // ── WORKER handler ────────────────────────────────────────────────────────────
 
-module.exports.redactDocumentWorker = async (event) => {
-  const { job_id, doc_id, doc } = event;
+module.exports.redactDocumentWorker = async function(event) {
+  const job_id = event.job_id;
+  const doc_id = event.doc_id;
+  const doc    = event.doc;
 
   try {
     await updateJob(job_id, { progress_message: 'Fetching document from S3...', updated_at: new Date().toISOString() });
@@ -210,21 +219,26 @@ module.exports.redactDocumentWorker = async (event) => {
     const fileKey  = doc.file_key || doc.s3_key;
     const pdfBytes = await getS3Bytes(fileKey);
 
-    const pdfDoc     = await PDFDocument.load(pdfBytes);
-    const totalPages = pdfDoc.getPageCount();
+    // Load master PDF to know total pages
+    const masterDoc  = await PDFDocument.load(pdfBytes);
+    const totalPages = masterDoc.getPageCount();
     const CHUNK_SIZE = 20;
     const allPii     = {};
 
     for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
-      const end = Math.min(start + CHUNK_SIZE, totalPages);
+      const end     = Math.min(start + CHUNK_SIZE, totalPages);
+      const indices = [];
+      for (let i = start; i < end; i++) indices.push(i);
+
       await updateJob(job_id, {
         progress_message: 'Analyzing pages ' + (start + 1) + ' to ' + end + ' of ' + totalPages + '...',
         updated_at: new Date().toISOString(),
       });
 
-      const subDoc  = await PDFDocument.create();
-      const indices = Array.from({ length: end - start }, (_, i) => start + i);
-      const copied  = await subDoc.copyPagesFrom(pdfDoc, indices);
+      // Build chunk PDF using correct pdf-lib v1 API: copyPages on destination doc
+      const subDoc   = await PDFDocument.create();
+      // copyPages(srcDoc, pageIndices) returns array of copied PDFPage objects
+      const copied   = await subDoc.copyPages(masterDoc, indices);
       copied.forEach(function(p) { subDoc.addPage(p); });
       const subBytes = Buffer.from(await subDoc.save());
 
@@ -232,12 +246,12 @@ module.exports.redactDocumentWorker = async (event) => {
 
       for (const chunkPageStr of Object.keys(chunkPii)) {
         const globalPage = start + parseInt(chunkPageStr, 10);
-        const boxes = chunkPii[chunkPageStr];
+        const boxes      = chunkPii[chunkPageStr];
         if (boxes && boxes.length) allPii[String(globalPage)] = boxes;
       }
     }
 
-    const totalRedactions  = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
+    const totalRedactions    = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
     const totalPagesAffected = Object.keys(allPii).length;
 
     await updateJob(job_id, {
@@ -247,6 +261,7 @@ module.exports.redactDocumentWorker = async (event) => {
 
     const redactedBytes = await applyRedactions(pdfBytes, allPii);
 
+    // Build S3 key for redacted file
     const keyParts     = fileKey.split('/');
     const origFilename = keyParts.pop();
     const baseName     = origFilename.replace(/\.pdf$/i, '');
@@ -256,30 +271,33 @@ module.exports.redactDocumentWorker = async (event) => {
     await updateJob(job_id, { progress_message: 'Saving redacted document...', updated_at: new Date().toISOString() });
 
     await s3.send(new PutObjectCommand({
-      Bucket: BUCKET, Key: redactedKey,
-      Body: redactedBytes, ContentType: 'application/pdf',
+      Bucket:      BUCKET,
+      Key:         redactedKey,
+      Body:        redactedBytes,
+      ContentType: 'application/pdf',
     }));
 
+    // Create new DynamoDB record for the redacted version
     const newDocId = randomUUID();
     await dynamo.send(new PutCommand({
       TableName: DOCS_TABLE,
       Item: {
-        aws_document_id: newDocId,
-        org_id:          doc.org_id,
-        patient_id:      doc.patient_id,
-        folder_name:     doc.folder_name,
-        provider_name:   doc.provider_name,
+        aws_document_id:   newDocId,
+        org_id:            doc.org_id,
+        patient_id:        doc.patient_id,
+        folder_name:       doc.folder_name,
+        provider_name:     doc.provider_name,
         original_filename: redactedName,
-        file_key:        redactedKey,
-        s3_key:          redactedKey,
-        is_redacted:     true,
-        redacted_from:   doc_id,
-        redaction_count: totalRedactions,
-        redacted_pages:  totalPagesAffected,
-        status:          'processed',
-        is_clinical:     doc.is_clinical,
-        created_at:      new Date().toISOString(),
-        updated_at:      new Date().toISOString(),
+        file_key:          redactedKey,
+        s3_key:            redactedKey,
+        is_redacted:       true,
+        redacted_from:     doc_id,
+        redaction_count:   totalRedactions,
+        redacted_pages:    totalPagesAffected,
+        status:            'processed',
+        is_clinical:       doc.is_clinical,
+        created_at:        new Date().toISOString(),
+        updated_at:        new Date().toISOString(),
       },
     }));
 
