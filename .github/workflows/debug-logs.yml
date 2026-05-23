@@ -1,0 +1,35 @@
+name: Debug Lambda Logs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch redactDocumentStart logs and config
+        run: |
+          LOG_GROUP="/aws/lambda/chartreview-pro-prod-redactDocumentStart"
+          STREAM=$(aws logs describe-log-streams \
+            --log-group-name "$LOG_GROUP" \
+            --order-by LastEventTime \
+            --descending \
+            --max-items 1 \
+            --region us-east-1 \
+            --query 'logStreams[0].logStreamName' \
+            --output text 2>&1)
+          echo "Latest stream: $STREAM"
+          aws logs get-log-events \
+            --log-group-name "$LOG_GROUP" \
+            --log-stream-name "$STREAM" \
+            --limit 80 \
+            --region us-east-1 \
+            --output text 2>&1 || echo "No logs"
+          echo "--- Lambda config ---"
+          aws lambda get-function-configuration \
+            --function-name chartreview-pro-prod-redactDocumentStart \
+            --region us-east-1 2>&1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
