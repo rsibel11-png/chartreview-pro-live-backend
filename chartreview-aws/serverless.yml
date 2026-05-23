@@ -459,3 +459,33 @@ resources:
           gatewayresponse.header.Access-Control-Allow-Methods: "'OPTIONS,GET,POST,PUT,DELETE'"
         ResponseType: DEFAULT_5XX
         RestApiId: !Ref ApiGatewayRestApi
+
+  # ── REDACTION ──
+  redactDocumentStart:
+    handler: src/handlers/redact_document.redactDocumentStart
+    timeout: 29
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      REDACT_WORKER_FUNCTION_NAME: chartreview-pro-prod-redactDocumentWorker
+      MODEL_ID: us.anthropic.claude-sonnet-4-6
+    events:
+      - http:
+          path: /documents/{aws_document_id}/redact
+          method: post
+          cors: true
+      - http:
+          path: /documents/{aws_document_id}/redact
+          method: options
+          cors: true
+
+  redactDocumentWorker:
+    handler: src/handlers/redact_document.redactDocumentWorker
+    timeout: 900
+    memorySize: 1024
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      MODEL_ID: us.anthropic.claude-sonnet-4-6
