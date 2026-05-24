@@ -1,7 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Worker: redactDocumentWorker (900s, invoked async)
-// Updated: 2026-05-23 — add ACCOUNT NO / PATIENT'S NAME / UNIT NO label variants + PT order address block
+// Updated: 2026-05-24 — comprehensive label variants + radiology/C-4/handwritten form + Name: Acct: patterns
 
 'use strict';
 
@@ -63,7 +62,7 @@ async function updateJob(job_id, patch) {
   }));
 }
 
-// ── STEP 1: Regex scan of extracted_text to find known PII values ─────────────
+// ── STEP 1: Regex scan — extract all known PII values from stored text ────────
 
 function extractKnownPiiValues(extractedText) {
   if (!extractedText || typeof extractedText !== 'string') return [];
@@ -71,57 +70,58 @@ function extractKnownPiiValues(extractedText) {
   const found = new Set();
 
   const patterns = [
-    // Patient name — labeled
-    /(?:PATIENT(?:'S)?\s*NAME?|PT\s*NAME|PATIENT\s*NAME|CLIENT\s*NAME|CLAIMANT|PATIENT)\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{2,50})/gi,
-    // Patient name — "Patient's Name: Vilma N. Mora Maldonado" style (mixed case)
-    /Patient(?:'s)?\s*Name\s*[:\-]\s*([A-Za-z][A-Za-z ,'\-\.]{4,60})/g,
-    // DOB — capture date + optional age on same line
-    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*DATE|BIRTHDATE|BIRTH\s*DT)\s*[:\-]\s*([\d\/\-\.]+(?:\s+AGE\s*[:\-]?\s*\d{1,3})?)/gi,
-    // DOB in "Date of Birth: 05/21/1969, 56 years" style
+    // Patient name — ALL label variants
+    /(?:PATIENT(?:'S)?\s*(?:NAME?)?|PT\s*NAME|PATIENT\s*NAME|CLIENT\s*NAME|CLAIMANT)\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{2,60})/gi,
+    // Mixed-case patient name labels
+    /Patient(?:'s)?\s*(?:Name)?\s*[:\-]\s*([A-Za-z][A-Za-z ,'\-\.]{4,60})/g,
+    // "Name: MORA-MALDONADO,VILMA N" — radiology/short form header (Name: without PATIENT prefix)
+    /\bName\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{4,50})/g,
+    // Standalone patient name as first non-empty line (bare name, no label) — caught by Bedrock visual
+    // DOB — all variants
+    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Date\s*of\s*Birth)\s*[:\-]\s*([\d\/\-\.]+(?:\s+AGE\s*[:\-]?\s*\d{1,3})?)/gi,
     /\bDOB\s*[:\-]\s*([\d\/]+)/gi,
-    // Age standalone
     /\bAGE\s*[:\-]\s*(\d{1,3})\b/gi,
-    // Account / financial
-    /(?:ACCOUNT\s*(?:NO|NUMBER|#)?|ACCT\s*(?:NO|#)?|FIN#?|FINANCIAL\s*NO?|VISIT#?|PATIENT\s*NO?|PAT#?)\s*[:\-]\s*([A-Z0-9\-]{4,30})/gi,
+    // Account / financial — all variants including "Acct:" (abbreviated radiology format)
+    /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)?|ACCT\s*(?:NO\.?|#)?|FIN#?|FINANCIAL\s*NO?|VISIT#?|PATIENT\s*NO?|PAT#?|EPISODE\s*ID)\s*[:\-]\s*([A-Z0-9\-]{4,30})/gi,
+    /\bAcct\s*[:\-]\s*([A-Z0-9\-]{4,20})/g,
     // Unit / room / bed
-    /(?:UNIT\s*(?:NO|#)?|ROOM\s*(?:\/\s*BED)?|BED|WARD)\s*[:\-]\s*([A-Z0-9\-\.]{2,20})/gi,
+    /(?:UNIT\s*(?:NO\.?|NUMBER|#)?|ROOM\s*(?:\/\s*BED)?|BED\b|WARD\b)\s*[:\-]\s*([A-Z0-9\-\.]{2,20})/gi,
     // SSN
     /\b(\d{3}-\d{2}-\d{4})\b/g,
-    // MRN
-    /(?:MRN#?|MR#?|MED(?:ICAL)?\s*REC(?:ORD)?(?:\s*NO?)?|CHART#?|PATIENT\s*#|MED\s*REC\s*#)\s*[:\-]?\s*([A-Z0-9\-]{4,20})/gi,
-    // Insurance plan / group / member / policy / subscriber
-    /(?:PLAN\s*#?|GROUP\s*#?|MEMBER\s*(?:ID|#)?|POLICY\s*(?:NO?|#)?|SUBSCRIBER\s*(?:ID|#)?)\s*[:\-]?\s*([A-Z0-9\-]{6,30})/gi,
+    // MRN — all variants
+    /(?:MRN#?|MR#?|MED(?:ICAL)?\s*REC(?:ORD)?(?:\s*NO\.?)?|CHART#?|PATIENT\s*#|Patient\s*#)\s*[:\-]?\s*([A-Z0-9\-]{4,20})/gi,
+    // Insurance IDs — plan, group, member, policy, subscriber, claim
+    /(?:PLAN\s*#?|GROUP\s*#?|MEMBER\s*(?:ID|#)?|POLICY\s*(?:NO\.?|#)?|SUBSCRIBER\s*(?:ID|#)?|CLAIM\s*#?|CLM#?)\s*[:\-]?\s*([A-Z0-9\-]{4,30})/gi,
     // Driver license
     /(?:DL#?|DRIVER\s*(?:S?\s*)?LICENSE|LICENSE\s*NO?)\s*[:\-]\s*([A-Z0-9\-]{4,20})/gi,
-    // Personal phone — labeled
+    // Personal phone
     /(?:(?:HOME|CELL|MOBILE|PT|PATIENT|PERSONAL)\s+)?PHONE\s*[:\-]\s*([\(\d][\d\(\)\-\.\s]{8,14})/gi,
-    // Phone in plain format — 10-digit standalone (area code in parens or not)
-    /\((\d{3})\)\s*(\d{3}-\d{4})/g,
+    /PHONE\s*[:\-]\s*([\(\d][\d\(\)\-\.\s]{8,14})/gi,
+    // Standalone 10-digit phone in parens format
+    /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
     // Email
     /(?:EMAIL|E-MAIL)\s*[:\-]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
-    // Street address — labeled
+    // Address — labeled
     /(?:HOME\s*ADDRESS|ADDRESS|ADDR|MAILING\s*ADDRESS)\s*[:\-]\s*(.{10,80})/gi,
-    // Street address — standalone line pattern (number + street name + optional unit)
-    /\b(\d{1,5}\s+[A-Z][A-Za-z0-9\s,\.]{5,60}(?:Ave|St|Blvd|Dr|Rd|Hwy|Highway|Way|Ln|Ct|Pl|Box|Suite|Ste|#)\s*[\w\d\s,\.]{0,20})\b/g,
-    // City, State ZIP line following an address
-    /\b([A-Z][a-zA-Z\s]{2,20},\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)\b/g,
+    // Address — street number pattern
+    /\b(\d{1,5}\s+[A-Z][A-Za-z0-9\s,\.]{5,60}(?:Ave|St|Blvd|Dr|Rd|Hwy|Highway|Way|Ln|Ct|Pl|Box|Suite|Ste)\s*[\w\d\s,\.]{0,20})/g,
+    // City State ZIP
+    /\b([A-Z][a-zA-Z\s]{2,25},\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)\b/g,
   ];
 
-  for (const pattern of patterns) {
-    let match;
+  for (var i = 0; i < patterns.length; i++) {
+    var pattern = patterns[i];
+    var match;
     pattern.lastIndex = 0;
     while ((match = pattern.exec(extractedText)) !== null) {
-      // For phone pattern with two groups
-      let val;
-      if (match[2]) {
+      var val;
+      if (pattern.source.indexOf('(\\d{3})') !== -1 && match[2]) {
         val = ('(' + match[1] + ') ' + match[2]).trim();
       } else {
         val = match[1] && match[1].trim();
       }
       if (!val || val.length < 3) continue;
-      // Filter pure short numeric codes
-      if (/^[\d\s\-]{1,6}$/.test(val)) continue;
-      // Filter all-lowercase clinical sentences
+      if (/^[\d\s\-\.]{1,6}$/.test(val)) continue;
       if (/^[a-z\s,\.]{20,}$/.test(val)) continue;
       found.add(val);
     }
@@ -136,126 +136,110 @@ async function detectPiiInPdf(pdfBytes, knownPiiValues) {
   const pdfBase64 = pdfBytes.toString('base64');
 
   const confirmedSection = knownPiiValues && knownPiiValues.length > 0
-    ? [
-        '=== CONFIRMED PATIENT PII — YOU MUST REDACT ALL OF THESE ===',
-        '',
-        'The following strings have been confirmed as patient PII.',
-        'Find EVERY occurrence on EVERY page and draw a bounding box around it.',
-        'Cover the entire text including any leading/trailing characters on the same line segment.',
-        '',
-        knownPiiValues.map(function(v) { return '  - "' + v + '"'; }).join('\n'),
-        '',
-      ].join('\n')
+    ? '=== CONFIRMED PATIENT PII — MUST REDACT ALL ===\n\n' +
+      'These strings are confirmed patient PII. Find EVERY occurrence on EVERY page.\n' +
+      'Draw a bounding box around each one wherever it appears.\n\n' +
+      knownPiiValues.map(function(v) { return '  - "' + v + '"'; }).join('\n') + '\n'
     : '';
 
   const prompt = [
-    'You are a HIPAA privacy redaction assistant reviewing medical records for a workers compensation law firm.',
-    'Your task is to identify and redact PATIENT personally identifiable information (PII) only.',
+    'You are a HIPAA privacy redaction assistant reviewing workers compensation medical records.',
+    'Redact PATIENT personally identifiable information (PII) only.',
     '',
     confirmedSection,
-    '=== BOX PLACEMENT RULE — CRITICAL ===',
+    '=== BOX PLACEMENT — CRITICAL ===',
+    'Start boxes slightly LEFT of the first PII character — never too far right.',
+    'Add 0.008 to width to ensure full coverage. When in doubt, make the box wider.',
     '',
-    'Bounding boxes must cover the ENTIRE PII value, including any leading characters.',
-    'Common mistake: starting the box too far right and clipping the first characters.',
-    'Start each box slightly to the LEFT of the first PII character. Add 0.005 to width for full coverage.',
+    '=== CORE NAME RULE ===',
+    'KEEP names with professional credentials: MD, DO, NP, PA, PA-C, RN, LVN, LPN, DPM,',
+    'DC, CRNA, FNP, APRN, PharmD, DDS, Esq., JD, Officer, Detective, Deputy, Sgt., Sheriff.',
+    'REDACT bare names with NO credential anywhere — headers, footers, fax pages, narratives.',
     '',
-    '=== THE CORE NAME RULE ===',
+    '=== REDACT ALL OF THESE ===',
     '',
-    'KEEP a name if it has any professional credential attached:',
-    '  Medical: MD, M.D., DO, D.O., NP, PA, PA-C, RN, R.N., LVN, LPN, DPM, DC, PT, OT,',
-    '    CRNA, FNP, CNP, APRN, PharmD, DDS, DMD, MBBS',
-    '  Administrative: Esq., JD, Administrator, Supervisor, Case Manager, Director',
-    '  Law enforcement: Officer, Detective, Deputy, Sergeant, Sgt., Lieutenant, Lt., Sheriff, Investigator',
+    '1. PATIENT NAME (bare, no credential)',
+    '   Labels: PATIENT, PATIENTS NAME, PATIENT NAME, PT NAME, NAME, PT:, CLIENT, CLAIMANT,',
+    '   "Name:" in radiology headers, standalone name line at top of fax or report pages.',
+    '   Also: patient name in "PATIENT NAME: ___  ACCOUNT #: ___" footer lines.',
+    '   Also: patient name as first bold line in orthopedic/office visit reports (e.g. "Vilma N. Mora Maldonado").',
     '',
-    'REDACT a bare name with NO credential — it is the patient name.',
-    'This applies everywhere: header blocks, narrative text, footers, fax pages, signature lines.',
+    '2. DATE OF BIRTH + AGE (same line)',
+    '   Labels: DOB, D.O.B., DATE OF BIRTH, BIRTH DATE, Date of Birth, DOB:',
+    '   Include AGE value if on same line. Redact DOB in footers, fax metadata, and form fields.',
+    '   "DOB: 05/21/1969" appearing as a plain text line in auth forms — redact it.',
     '',
-    '=== REDACT THESE — PATIENT PII ===',
+    '3. ACCOUNT / FINANCIAL NUMBER',
+    '   Labels: ACCOUNT#, ACCOUNT NO, ACCOUNT NUMBER, ACCT#, ACCT NO, ACCT:, FIN#, VISIT#, PAT#',
+    '   Also: "Acct: D00136377973" in radiology headers (abbreviated format).',
     '',
-    '1. PATIENT NAME — bare name with no credential (see Core Name Rule)',
-    "   Labels (any variant): PATIENT, PATIENT'S NAME, PATIENT NAME, PT NAME, NAME, PT:, CLIENT NAME, CLAIMANT",
-    '   Also redact: patient name in PATIENT NAME/ACCOUNT # footer lines at page bottom.',
-    '   Also redact: bare patient name at top of fax pages (e.g. "Vilma N. Mora Maldonado" as opening line).',
-    '   Also redact: patient name + DOB lines in page footers — redact BOTH the name and the DOB.',
+    '4. UNIT / ROOM / BED',
+    '   Labels: UNIT#, UNIT NO, UNIT NUMBER, ROOM, ROOM/BED, BED, WARD, LOCATION',
     '',
-    '2. DATE OF BIRTH + AGE',
-    '   Labels (any variant): DOB, D.O.B., DATE OF BIRTH, BIRTH DATE, BIRTHDATE, Date of Birth, DOB:',
-    '   Also redact the age value when on the same line (AGE: 56).',
-    '   Also redact DOB in page footers, fax footers, and PT order forms.',
+    '5. SSN — XXX-XX-XXXX pattern anywhere, including handwritten C-4 forms.',
     '',
-    '3. PATIENT ACCOUNT / FINANCIAL NUMBER',
-    '   Labels (any variant): ACCOUNT#, ACCOUNT NO, ACCOUNT NUMBER, ACCT#, ACCT NO,',
-    '   FIN#, VISIT#, PATIENT NO, PAT#, EPISODE ID',
-    '   Redact the value — the label itself can stay.',
+    '6. PATIENT ADDRESS (full block)',
+    '   Street + city + state + ZIP. Redact as one tall box covering all lines.',
+    '   Common format: "1828 E State Highway 168 Box 578" then "Moapa, NV 89025-9117".',
+    '   Also redact addresses in PT/OT orders, therapy forms, and C-4 forms even if unlabeled.',
     '',
-    '4. PATIENT UNIT / ROOM / BED',
-    '   Labels (any variant): UNIT#, UNIT NO, UNIT NUMBER, ROOM, ROOM/BED, BED, WARD, LOCATION',
+    '7. PATIENT PERSONAL PHONE',
+    '   Any phone linked to patient: "(818) 497-1726".',
+    '   In authorization forms it may appear as "PHONE: 818-497-1726" — redact the number.',
+    '   Do NOT redact hospital/clinic phone numbers near facility names.',
     '',
-    '5. SSN — any XXX-XX-XXXX number pattern, with or without a label.',
+    '8. PATIENT EMAIL',
     '',
-    '6. PATIENT HOME ADDRESS',
-    '   Redact the full multi-line address block: street number + street name, city, state, ZIP.',
-    '   Examples: "1828 E State Highway 168 Box 578" + "Moapa, NV 89025-9117"',
-    '   Also redact address blocks in PT/OT orders, insurance forms, and therapy orders even if unlabeled.',
-    '   Draw one box covering all address lines.',
+    '9. MRN — Labels: MRN, MR#, MED REC, CHART#, Patient #, Patient#: 403522',
+    '   Also: "MRN: D003081753" in radiology headers.',
     '',
-    '7. PATIENT PERSONAL PHONE NUMBER',
-    '   Redact any phone number associated with the patient.',
-    '   Example: "(818) 497-1726" in a patient info block or PT order.',
-    '   Do NOT redact hospital/clinic/office phone numbers (those appear next to facility names).',
-    '',
-    '8. PATIENT PERSONAL EMAIL',
-    '',
-    '9. MEDICAL RECORD NUMBER (MRN)',
-    '   Labels: MRN, MR#, MED REC, MEDICAL RECORD NO, MEDICAL REC #, CHART#, Patient #',
-    '',
-    '10. INSURANCE / MEMBER / POLICY / PLAN / GROUP IDs',
-    '    Labels: MEMBER ID, POLICY#, GROUP#, GROUP NO, SUBSCRIBER ID, Plan #, Group #, Member ID#',
-    '    Redact the numeric ID values — keep the insurance company name visible.',
+    '10. INSURANCE / CLAIM IDs',
+    '    Labels: PLAN #, GROUP #, MEMBER ID, POLICY #, SUBSCRIBER ID, CLAIM #, CLM#',
+    '    Redact the numbers — keep insurance company names.',
     '',
     '11. DRIVER LICENSE NUMBER',
     '',
-    '12. PATIENT PHOTO or PATIENT HANDWRITTEN SIGNATURE',
+    '12. PATIENT PHOTO or HANDWRITTEN PATIENT SIGNATURE',
+    '',
+    '13. HANDWRITTEN C-4 FORM FIELDS',
+    '    C-4 / workers comp claim forms often have handwritten data.',
+    '    Redact ALL handwritten entries in: employee name, address, DOB, SSN, phone fields.',
+    '    The printed field labels can remain — only redact the written/typed values.',
     '',
     '=== DO NOT REDACT ===',
+    '- Names with credentials (MD, RN, PA, DO, Officer, etc.)',
+    '- Hospital/facility names and addresses',
+    '- Report section headers and field labels',
+    '- CPT/ICD codes, procedure codes',
+    '- Dates of service, admission, discharge, exam, report dates (NOT date of birth)',
+    '- Clinical content: diagnoses, medications, vitals, lab values',
+    '- Hospital/clinic phone and fax numbers',
+    '- Page numbers, print timestamps, CorVel scan dates, fax metadata',
+    '- Insurance company names (CORVEL, UMR, CLARK COUNTY) — only redact ID numbers',
+    '- Employer name, attorney name, adjuster name, claim numbers',
     '',
-    '- Names with professional credentials (MD, DO, RN, PA, NP, Officer, etc.)',
-    '- Hospital or facility names and addresses',
-    '- Report titles, section headers, field labels',
-    '- Procedure and diagnosis codes (CPT, ICD)',
-    '- Dates of service, admission, discharge, report dates — NOT date of birth',
-    '- Clinical content: diagnoses, meds, vitals, labs',
-    '- Hospital/clinic/office phone numbers and fax numbers',
-    '- Page numbers, timestamps, print dates, fax metadata',
-    '- Insurance company names (keep name, redact ID number only)',
-    '- Claim numbers, adjuster names, employer names',
-    '',
-    '=== KEY DISTINCTION: DATES ===',
-    'Date of Birth / DOB / Birth Date → patient PII → REDACT',
-    'Date of service / admission / discharge / report date → clinical data → DO NOT REDACT',
+    '=== KEY DATE DISTINCTION ===',
+    'Date of Birth / DOB / Birth Date → REDACT',
+    'Date of service / exam / admission / discharge / report → DO NOT REDACT',
     '',
     '=== OUTPUT FORMAT ===',
+    'Return bounding boxes around PII VALUES ONLY — not labels.',
+    '"PATIENT NAME: MORA-MALDONADO,VILMA N" → box covers "MORA-MALDONADO,VILMA N" only.',
+    '"DOB: 05/21/69  AGE: 56" → one box covering "05/21/69  AGE: 56".',
+    'Multi-line address → one tall box spanning all lines.',
     '',
-    'Return bounding boxes ONLY around the PII values — not the field labels.',
-    'Example: "PATIENT NAME: MORA-MALDONADO,VILMA N" → box covers "MORA-MALDONADO,VILMA N" only.',
-    'Example: "DOB: 05/21/69  AGE: 56" → one box covering "05/21/69  AGE: 56".',
-    'Example: address block spanning 2 lines → one tall box covering both lines.',
-    '',
-    'Return a JSON object keyed by 0-based page index.',
-    'Normalized coordinates 0.0-1.0, top-left origin:',
+    'JSON object keyed by 0-based page index, normalized coords 0.0-1.0, top-left origin:',
     '{',
     '  "0": [',
-    '    { "label": "Patient Name", "x": 0.12, "y": 0.08, "width": 0.42, "height": 0.018 },',
-    '    { "label": "DOB+Age",     "x": 0.05, "y": 0.10, "width": 0.32, "height": 0.018 },',
-    '    { "label": "Address",     "x": 0.04, "y": 0.14, "width": 0.55, "height": 0.040 }',
+    '    {"label":"Patient Name","x":0.10,"y":0.08,"width":0.45,"height":0.018},',
+    '    {"label":"DOB+Age","x":0.05,"y":0.10,"width":0.35,"height":0.018},',
+    '    {"label":"Address","x":0.04,"y":0.20,"width":0.55,"height":0.050}',
     '  ],',
     '  "1": []',
     '}',
-    '',
     'Empty array for pages with no patient PII.',
-    'Return ONLY the JSON object — no explanation, no markdown.',
+    'Return ONLY the JSON — no explanation, no markdown.',
   ].filter(Boolean).join('\n');
-
 
   const body = JSON.stringify({
     anthropic_version: 'bedrock-2023-05-31',
@@ -289,7 +273,7 @@ async function detectPiiInPdf(pdfBytes, knownPiiValues) {
   }
 }
 
-// ── STEP 3: Apply redaction boxes — with generous left-side padding ───────────
+// ── STEP 3: Apply black boxes — generous left-side padding ───────────────────
 
 async function applyRedactions(pdfBytes, piiByPage) {
   const pdfDoc = await PDFDocument.load(pdfBytes);
@@ -306,19 +290,17 @@ async function applyRedactions(pdfBytes, piiByPage) {
     const h    = sz.height;
 
     for (const box of boxes) {
-      const px  = box.x * w;
-      const py  = h - (box.y + box.height) * h;
-      const pw  = box.width  * w;
-      const ph  = box.height * h;
-      // Use asymmetric padding: more on the left to compensate for Claude's
-      // tendency to start boxes slightly too far right
+      const px       = box.x * w;
+      const py       = h - (box.y + box.height) * h;
+      const pw       = box.width  * w;
+      const ph       = box.height * h;
       const padLeft  = 8;
-      const padRight = 4;
+      const padRight = 5;
       const padVert  = 3;
       page.drawRectangle({
         x:      Math.max(0, px - padLeft),
         y:      Math.max(0, py - padVert),
-        width:  Math.min(w, pw + padLeft + padRight),
+        width:  Math.min(w - Math.max(0, px - padLeft), pw + padLeft + padRight),
         height: Math.min(h, ph + padVert * 2),
         color:   rgb(0, 0, 0),
         opacity: 1,
@@ -335,7 +317,6 @@ async function fetchExtractedText(doc_id) {
   const docRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
   const doc    = docRes.Item || {};
   let text     = doc.extracted_text || '';
-
   try {
     if (doc.original_document_id) {
       const parentRes = await dynamo.send(new GetCommand({
@@ -347,9 +328,8 @@ async function fetchExtractedText(doc_id) {
       }
     }
   } catch (e) {
-    console.warn('Could not fetch parent doc text:', e.message);
+    console.warn('Could not fetch parent doc:', e.message);
   }
-
   return text;
 }
 
@@ -372,13 +352,9 @@ const _redactDocumentStart = async function(event) {
   await dynamo.send(new PutCommand({
     TableName: JOBS_TABLE,
     Item: {
-      job_id:           job_id,
-      type:             'redact',
-      status:           'processing',
-      doc_id:           doc_id,
-      org_id:           doc.org_id || null,
-      created_at:       now,
-      updated_at:       now,
+      job_id: job_id, type: 'redact', status: 'processing',
+      doc_id: doc_id, org_id: doc.org_id || null,
+      created_at: now, updated_at: now,
       progress_message: 'Starting redaction...',
     },
   }));
@@ -407,13 +383,11 @@ module.exports.redactDocumentWorker = async function(event) {
     const fileKey  = doc.file_key || doc.s3_key;
     const pdfBytes = await getS3Bytes(fileKey);
 
-    // Step 1: regex scan
-    await updateJob(job_id, { progress_message: 'Scanning text for known PII patterns...', updated_at: new Date().toISOString() });
+    await updateJob(job_id, { progress_message: 'Scanning text for known PII...', updated_at: new Date().toISOString() });
     const extractedText  = await fetchExtractedText(doc_id);
     const knownPiiValues = extractKnownPiiValues(extractedText);
-    console.log('Regex PII found (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues.slice(0, 15)));
+    console.log('Regex PII (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues.slice(0, 20)));
 
-    // Step 2: Bedrock visual pass in 20-page chunks
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
     const CHUNK_SIZE = 20;
@@ -425,7 +399,7 @@ module.exports.redactDocumentWorker = async function(event) {
       for (let i = start; i < end; i++) indices.push(i);
 
       await updateJob(job_id, {
-        progress_message: 'Analyzing pages ' + (start + 1) + '–' + end + ' of ' + totalPages + '...',
+        progress_message: 'Analyzing pages ' + (start + 1) + '\u2013' + end + ' of ' + totalPages + '...',
         updated_at: new Date().toISOString(),
       });
 
@@ -443,7 +417,6 @@ module.exports.redactDocumentWorker = async function(event) {
       }
     }
 
-    // Step 3: apply black boxes
     const totalRedactions    = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
     const totalPagesAffected = Object.keys(allPii).length;
 
@@ -460,13 +433,11 @@ module.exports.redactDocumentWorker = async function(event) {
     const redactedKey  = keyParts.concat([baseName + '_REDACTED.pdf']).join('/');
     const redactedName = baseName + '_REDACTED.pdf';
 
-    await updateJob(job_id, { progress_message: 'Saving redacted document...', updated_at: new Date().toISOString() });
+    await updateJob(job_id, { progress_message: 'Saving redacted file...', updated_at: new Date().toISOString() });
 
     await s3.send(new PutObjectCommand({
-      Bucket:      BUCKET,
-      Key:         redactedKey,
-      Body:        redactedBytes,
-      ContentType: 'application/pdf',
+      Bucket: BUCKET, Key: redactedKey,
+      Body: redactedBytes, ContentType: 'application/pdf',
     }));
 
     const newDocId = randomUUID();
@@ -501,7 +472,8 @@ module.exports.redactDocumentWorker = async function(event) {
 
     await updateJob(job_id, {
       status:           'complete',
-      progress_message: 'Redaction complete — ' + totalRedactions + ' item(s) redacted across ' + totalPagesAffected + ' page(s). (' + knownPiiValues.length + ' confirmed via text scan)',
+      progress_message: 'Redaction complete — ' + totalRedactions + ' item(s) across ' + totalPagesAffected +
+                        ' page(s). (' + knownPiiValues.length + ' confirmed via text scan)',
       result: {
         new_doc_id:      newDocId,
         download_url:    downloadUrl,
