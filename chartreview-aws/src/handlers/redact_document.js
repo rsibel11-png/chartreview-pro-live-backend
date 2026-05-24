@@ -1,7 +1,7 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
 // Worker: redactDocumentWorker (900s, invoked async)
-// Updated: 2026-05-23 — fix removeUndefinedValues + copyPages API
+// Updated: 2026-05-23 — patient-only PII prompt, exclude physician/hospital/institutional data
 
 'use strict';
 
@@ -16,7 +16,6 @@ const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
 const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
-// removeUndefinedValues: true prevents DynamoDB errors when source doc fields are absent
 const dynamo       = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
 const bedrock      = new BedrockRuntimeClient({ region: 'us-east-1' });
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
@@ -70,21 +69,37 @@ async function detectPiiInPdf(pdfBytes) {
   const pdfBase64 = pdfBytes.toString('base64');
 
   const prompt = [
-    'You are a HIPAA privacy redaction assistant. Examine this medical document PDF page by page.',
+    'You are a HIPAA privacy redaction assistant reviewing medical records for a workers compensation law firm.',
+    'Your job is to redact PATIENT personally identifiable information (PII) only.',
     '',
-    'For each page, identify ALL regions containing personally identifiable information (PII):',
-    '- Patient name (anywhere)',
-    '- Date of birth / age',
-    '- Social Security Number (SSN) or partial SSN',
-    '- Address (street, city, zip)',
-    '- Phone number / fax',
-    '- Email address',
-    '- Medical Record Number (MRN)',
-    '- Insurance ID / Member ID / Group Number / Policy Number',
-    '- Driver license number',
-    '- Photo of patient face or photo ID card',
-    '- Signature',
-    '- Account or claim numbers linked to the patient',
+    'REDACT only these items belonging to the PATIENT:',
+    '- Patient full name (first, last, or full)',
+    '- Patient date of birth',
+    '- Patient Social Security Number (SSN) or partial SSN',
+    '- Patient home address (street, city, zip)',
+    '- Patient personal phone number or personal email',
+    '- Patient Medical Record Number (MRN) or Patient ID number',
+    '- Patient insurance ID, Member ID, Group Number, or Policy Number',
+    '- Patient driver license number',
+    '- Photo of the patient face or a photo ID card belonging to the patient',
+    '- Patient handwritten signature',
+    '',
+    'DO NOT REDACT any of the following — these must remain visible:',
+    '- Treating physician or provider names and credentials (e.g. "Roman A. Sibel, MD")',
+    '- Hospital or facility names (e.g. "St. Rose Dominican Hospitals")',
+    '- Report titles, section headers, or document labels',
+    '- Encounter numbers, case numbers, or internal billing codes (e.g. "38204004")',
+    '- Procedure codes (CPT/ICD codes)',
+    '- Diagnosis text or clinical descriptions',
+    '- Dates of service or admission/discharge dates',
+    '- Fax numbers or phone numbers belonging to hospitals or clinics',
+    '- Hospital addresses or facility addresses',
+    '- Sender or recipient names on fax cover sheets when they refer to staff or facilities',
+    '- Page numbers, timestamps, or system-generated headers (e.g. "GMH001-03  4/8/2026")',
+    '',
+    'IMPORTANT: This is a workers compensation medical record. The treating physician name',
+    'and facility name are legally required to remain visible. Only the patient identity',
+    'information listed above should be redacted.',
     '',
     'Return a JSON object keyed by 0-based page index.',
     'Each page has an array of bounding boxes using normalized coordinates (0.0-1.0, top-left origin):',
@@ -95,7 +110,7 @@ async function detectPiiInPdf(pdfBytes) {
     '  "1": []',
     '}',
     '',
-    'Pages with no PII should have an empty array.',
+    'If a page has no patient PII, return an empty array for that page.',
     'Return ONLY the JSON object, no explanation or markdown.',
   ].join('\n');
 
@@ -221,7 +236,6 @@ module.exports.redactDocumentWorker = async function(event) {
     const fileKey  = doc.file_key || doc.s3_key;
     const pdfBytes = await getS3Bytes(fileKey);
 
-    // Load master PDF to get page count
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
     const CHUNK_SIZE = 20;
@@ -237,7 +251,6 @@ module.exports.redactDocumentWorker = async function(event) {
         updated_at: new Date().toISOString(),
       });
 
-      // pdf-lib v1 correct API: subDoc.copyPages(srcDoc, [indices]) → PDFPage[]
       const subDoc = await PDFDocument.create();
       const copied = await subDoc.copyPages(masterDoc, indices);
       copied.forEach(function(p) { subDoc.addPage(p); });
@@ -262,7 +275,6 @@ module.exports.redactDocumentWorker = async function(event) {
 
     const redactedBytes = await applyRedactions(pdfBytes, allPii);
 
-    // Build S3 key for the redacted file
     const keyParts     = fileKey.split('/');
     const origFilename = keyParts.pop();
     const baseName     = origFilename.replace(/\.pdf$/i, '');
@@ -278,8 +290,6 @@ module.exports.redactDocumentWorker = async function(event) {
       ContentType: 'application/pdf',
     }));
 
-    // Write a new DynamoDB record for the redacted version
-    // Use || null on all optional fields so removeUndefinedValues handles them cleanly
     const newDocId = randomUUID();
     await dynamo.send(new PutCommand({
       TableName: DOCS_TABLE,
