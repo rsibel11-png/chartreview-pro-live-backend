@@ -1,6 +1,7 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
 // Worker: redactDocumentWorker (900s, invoked async)
+// Updated: 2026-05-23 — fix removeUndefinedValues + copyPages API
 
 'use strict';
 
@@ -15,7 +16,8 @@ const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
 const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
-const dynamo       = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+// removeUndefinedValues: true prevents DynamoDB errors when source doc fields are absent
+const dynamo       = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
 const bedrock      = new BedrockRuntimeClient({ region: 'us-east-1' });
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
 
@@ -188,7 +190,7 @@ const _redactDocumentStart = async function(event) {
       type:             'redact',
       status:           'processing',
       doc_id:           doc_id,
-      org_id:           doc.org_id,
+      org_id:           doc.org_id || null,
       created_at:       now,
       updated_at:       now,
       progress_message: 'Starting redaction...',
@@ -219,7 +221,7 @@ module.exports.redactDocumentWorker = async function(event) {
     const fileKey  = doc.file_key || doc.s3_key;
     const pdfBytes = await getS3Bytes(fileKey);
 
-    // Load master PDF to know total pages
+    // Load master PDF to get page count
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
     const CHUNK_SIZE = 20;
@@ -235,10 +237,9 @@ module.exports.redactDocumentWorker = async function(event) {
         updated_at: new Date().toISOString(),
       });
 
-      // Build chunk PDF using correct pdf-lib v1 API: copyPages on destination doc
-      const subDoc   = await PDFDocument.create();
-      // copyPages(srcDoc, pageIndices) returns array of copied PDFPage objects
-      const copied   = await subDoc.copyPages(masterDoc, indices);
+      // pdf-lib v1 correct API: subDoc.copyPages(srcDoc, [indices]) → PDFPage[]
+      const subDoc = await PDFDocument.create();
+      const copied = await subDoc.copyPages(masterDoc, indices);
       copied.forEach(function(p) { subDoc.addPage(p); });
       const subBytes = Buffer.from(await subDoc.save());
 
@@ -261,7 +262,7 @@ module.exports.redactDocumentWorker = async function(event) {
 
     const redactedBytes = await applyRedactions(pdfBytes, allPii);
 
-    // Build S3 key for redacted file
+    // Build S3 key for the redacted file
     const keyParts     = fileKey.split('/');
     const origFilename = keyParts.pop();
     const baseName     = origFilename.replace(/\.pdf$/i, '');
@@ -277,16 +278,17 @@ module.exports.redactDocumentWorker = async function(event) {
       ContentType: 'application/pdf',
     }));
 
-    // Create new DynamoDB record for the redacted version
+    // Write a new DynamoDB record for the redacted version
+    // Use || null on all optional fields so removeUndefinedValues handles them cleanly
     const newDocId = randomUUID();
     await dynamo.send(new PutCommand({
       TableName: DOCS_TABLE,
       Item: {
         aws_document_id:   newDocId,
-        org_id:            doc.org_id,
-        patient_id:        doc.patient_id,
-        folder_name:       doc.folder_name,
-        provider_name:     doc.provider_name,
+        org_id:            doc.org_id            || null,
+        patient_id:        doc.patient_id         || null,
+        folder_name:       doc.folder_name        || null,
+        provider_name:     doc.provider_name      || null,
         original_filename: redactedName,
         file_key:          redactedKey,
         s3_key:            redactedKey,
@@ -295,7 +297,7 @@ module.exports.redactDocumentWorker = async function(event) {
         redaction_count:   totalRedactions,
         redacted_pages:    totalPagesAffected,
         status:            'processed',
-        is_clinical:       doc.is_clinical,
+        is_clinical:       doc.is_clinical        || false,
         created_at:        new Date().toISOString(),
         updated_at:        new Date().toISOString(),
       },
