@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-05-24 — comprehensive label variants + radiology/C-4/handwritten form + Name: Acct: patterns
+// Updated: 2026-05-25 — Textract-coordinate-first redaction + Claude vision for handwritten only
 
 'use strict';
 
@@ -29,7 +29,7 @@ const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-p
 
 const respond = function(statusCode, body) {
   return {
-    statusCode: statusCode,
+    statusCode,
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
@@ -55,7 +55,7 @@ async function updateJob(job_id, patch) {
   Object.values(patch).forEach(function(v, i) { values[':v' + i] = v; });
   await dynamo.send(new UpdateCommand({
     TableName: JOBS_TABLE,
-    Key: { job_id: job_id },
+    Key: { job_id },
     UpdateExpression: 'SET ' + sets,
     ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
@@ -66,49 +66,28 @@ async function updateJob(job_id, patch) {
 
 function extractKnownPiiValues(extractedText) {
   if (!extractedText || typeof extractedText !== 'string') return [];
-
   const found = new Set();
-
   const patterns = [
-    // Patient name — ALL label variants
     /(?:PATIENT(?:'S)?\s*(?:NAME?)?|PT\s*NAME|PATIENT\s*NAME|CLIENT\s*NAME|CLAIMANT)\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{2,60})/gi,
-    // Mixed-case patient name labels
     /Patient(?:'s)?\s*(?:Name)?\s*[:\-]\s*([A-Za-z][A-Za-z ,'\-\.]{4,60})/g,
-    // "Name: MORA-MALDONADO,VILMA N" — radiology/short form header (Name: without PATIENT prefix)
     /\bName\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{4,50})/g,
-    // Standalone patient name as first non-empty line (bare name, no label) — caught by Bedrock visual
-    // DOB — all variants
     /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Date\s*of\s*Birth)\s*[:\-]\s*([\d\/\-\.]+(?:\s+AGE\s*[:\-]?\s*\d{1,3})?)/gi,
     /(?:\bDOB|Patient\s*DOB)\s*[:\-]\s*([\d\/]+)/gi,
     /\bAGE\s*[:\-]\s*(\d{1,3})\b/gi,
-    // Account / financial — all variants including "Acct:" (abbreviated radiology format)
-    /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)?|ACCT\s*(?:NO\.?|#)?|FIN#?|FINANCIAL\s*NO?|VISIT#?|PATIENT\s*NO?|PAT#?|EPISODE\s*ID)\s*[:\-]\s*([A-Z0-9\-]{4,30})/gi,
+    /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)?|Account\s*Number|ACCT\s*(?:NO\.?|#)?|FIN#?|FINANCIAL\s*NO?|VISIT#?|PATIENT\s*NO?|PAT#?|EPISODE\s*ID)\s*[:\-]\s*([A-Z0-9\-]{4,30})/g,
     /\bAcct\s*[:\-]\s*([A-Z0-9\-]{4,20})/g,
-    // Unit / room / bed
-    /(?:UNIT\s*(?:NO\.?|NUMBER|#)?|ROOM\s*(?:\/\s*BED)?|BED\b|WARD\b|Unit\s*Number)\s*[:\-]\s*([A-Z0-9\-\.]{2,20})/g,
-    // SSN
+    /(?:UNIT\s*(?:NO\.?|NUMBER|#)?|Unit\s*Number|ROOM\s*(?:\/\s*BED)?|BED\b|WARD\b)\s*[:\-]\s*([A-Z0-9\-\.]{2,20})/g,
     /\b(\d{3}-\d{2}-\d{4})\b/g,
-    // MRN — all variants
     /(?:MRN#?|MR#?|MED(?:ICAL)?\s*REC(?:ORD)?(?:\s*NO\.?)?|CHART#?|PATIENT\s*#|Patient\s*#)\s*[:\-]?\s*([A-Z0-9\-]{4,20})/gi,
-    // Insurance IDs — plan, group, member, policy, subscriber, claim
-    /(?:PLAN\s*#?|GROUP\s*#?|MEMBER\s*(?:ID|#)?|POLICY\s*(?:NO\.?|#)?|SUBSCRIBER\s*(?:ID|#)?|CLAIM\s*#?|CLM#?)\s*[:\-]?\s*([A-Z0-9\-]{4,30})/gi,
-    // Driver license
+    /(?:PLAN\s*#?|GROUP\s*#?|MEMBER\s*(?:ID|#)?|POLICY\s*(?:NO\.?|#)?|SUBSCRIBER\s*(?:ID|#)?|CLAIM\s*#?)\s*[:\-]?\s*([A-Z0-9\-]{4,30})/gi,
     /(?:DL#?|DRIVER\s*(?:S?\s*)?LICENSE|LICENSE\s*NO?)\s*[:\-]\s*([A-Z0-9\-]{4,20})/gi,
-    // Personal phone
     /(?:(?:HOME|CELL|MOBILE|PT|PATIENT|PERSONAL)\s+)?PHONE\s*[:\-]\s*([\(\d][\d\(\)\-\.\s]{8,14})/gi,
-    /PHONE\s*[:\-]\s*([\(\d][\d\(\)\-\.\s]{8,14})/gi,
-    // Standalone 10-digit phone in parens format
     /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
-    // Email
     /(?:EMAIL|E-MAIL)\s*[:\-]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
-    // Address — labeled
     /(?:HOME\s*ADDRESS|ADDRESS|ADDR|MAILING\s*ADDRESS)\s*[:\-]\s*(.{10,80})/gi,
-    // Address — street number pattern
     /\b(\d{1,5}\s+[A-Z][A-Za-z0-9\s,\.]{5,60}(?:Ave|St|Blvd|Dr|Rd|Hwy|Highway|Way|Ln|Ct|Pl|Box|Suite|Ste)\s*[\w\d\s,\.]{0,20})/g,
-    // City State ZIP
     /\b([A-Z][a-zA-Z\s]{2,25},\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)\b/g,
   ];
-
   for (var i = 0; i < patterns.length; i++) {
     var pattern = patterns[i];
     var match;
@@ -126,124 +105,123 @@ function extractKnownPiiValues(extractedText) {
       found.add(val);
     }
   }
-
   return Array.from(found);
 }
 
-// ── STEP 2: Bedrock visual pass ───────────────────────────────────────────────
+// ── STEP 2A: Textract-coordinate-based redaction ──────────────────────────────
+// Returns piiByPage map using exact Textract bounding boxes — no LLM needed
 
-async function detectPiiInPdf(pdfBytes, knownPiiValues) {
+function normalizeForMatch(str) {
+  return (str || '').toLowerCase().replace(/[\s\-,\.]/g, '');
+}
+
+function findBoxesFromBlocks(wordBlocks, piiValues) {
+  // Build a map of page -> list of word blocks
+  var pageMap = {};
+  for (var i = 0; i < wordBlocks.length; i++) {
+    var b = wordBlocks[i];
+    var pg = b.p || 1;
+    if (!pageMap[pg]) pageMap[pg] = [];
+    pageMap[pg].push(b);
+  }
+
+  var result = {}; // page (0-indexed) -> array of boxes
+
+  for (var pi = 0; pi < piiValues.length; pi++) {
+    var pii = piiValues[pi];
+    var piiNorm = normalizeForMatch(pii);
+    if (piiNorm.length < 2) continue;
+
+    // Try to match pii value against concatenated word sequences on each page
+    var pageNums = Object.keys(pageMap);
+    for (var pg2i = 0; pg2i < pageNums.length; pg2i++) {
+      var pageNum = parseInt(pageNums[pg2i], 10);
+      var pageWords = pageMap[pageNum];
+      var pageIdx = pageNum - 1; // convert to 0-based
+
+      // Sliding window: try 1 to 6 consecutive words
+      for (var start = 0; start < pageWords.length; start++) {
+        for (var len = 1; len <= 6 && start + len <= pageWords.length; len++) {
+          var slice = pageWords.slice(start, start + len);
+          var concat = normalizeForMatch(slice.map(function(w) { return w.t; }).join(''));
+          if (concat === piiNorm || (piiNorm.length >= 4 && concat.includes(piiNorm))) {
+            // Compute bounding box that covers all words in slice
+            var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
+            var minT = Math.min.apply(null, slice.map(function(w) { return w.tp; }));
+            var maxR = Math.max.apply(null, slice.map(function(w) { return w.l + w.w; }));
+            var maxB = Math.max.apply(null, slice.map(function(w) { return w.tp + w.h; }));
+            if (!result[String(pageIdx)]) result[String(pageIdx)] = [];
+            result[String(pageIdx)].push({
+              label: 'textract:' + pii.substring(0, 30),
+              x: Math.max(0, minL - 0.005),
+              y: minT,
+              width: Math.min(1, (maxR - minL) + 0.01),
+              height: maxB - minT,
+            });
+            break; // found this pii value on this page, move to next start
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+async function loadTextractBlocks(fileKey) {
+  try {
+    var blocksKey = fileKey.replace(/\/[^\/]+$/, '') + '/textract_blocks.json';
+    var resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: blocksKey }));
+    var chunks = [];
+    for await (var chunk of resp.Body) chunks.push(chunk);
+    return JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+  } catch (e) {
+    console.log('No textract blocks found (will use Claude vision):', e.message);
+    return null;
+  }
+}
+
+// ── STEP 2B: Claude vision pass — handwritten content only ───────────────────
+
+async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
   const pdfBase64 = pdfBytes.toString('base64');
 
   const confirmedSection = knownPiiValues && knownPiiValues.length > 0
     ? '=== CONFIRMED PATIENT PII — MUST REDACT ALL ===\n\n' +
-      'These strings are confirmed patient PII. Find EVERY occurrence on EVERY page.\n' +
-      'Draw a bounding box around each one wherever it appears.\n\n' +
+      'These strings are confirmed patient PII. Find EVERY handwritten occurrence.\n\n' +
       knownPiiValues.map(function(v) { return '  - "' + v + '"'; }).join('\n') + '\n'
     : '';
 
   const prompt = [
-    'You are a HIPAA privacy redaction assistant reviewing workers compensation medical records.',
-    'Redact PATIENT personally identifiable information (PII) only.',
+    'You are a HIPAA redaction assistant. Your task is ONLY to find HANDWRITTEN patient PII.',
+    'Typed/printed text has already been redacted. Focus ONLY on:',
     '',
     confirmedSection,
-    '=== BOX PLACEMENT — CRITICAL ===',
-    'Start boxes slightly LEFT of the first PII character — never too far right.',
-    'Add 0.008 to width to ensure full coverage. When in doubt, make the box wider.',
+    '=== REDACT ONLY THESE HANDWRITTEN ELEMENTS ===',
     '',
-    '=== CORE NAME RULE ===',
-    'KEEP names with professional credentials: MD, DO, NP, PA, PA-C, RN, LVN, LPN, DPM,',
-    'DC, CRNA, FNP, APRN, PharmD, DDS, Esq., JD, Officer, Detective, Deputy, Sgt., Sheriff.',
-    'REDACT bare names with NO credential anywhere — headers, footers, fax pages, narratives.',
+    '1. Handwritten patient name (on C-4 forms, consent forms, signature pages)',
+    '2. Handwritten DOB, SSN, address, phone on form fields',
+    '3. Patient handwritten signature',
+    '4. Patient photo',
     '',
-    '=== REDACT ALL OF THESE ===',
+    'DO NOT redact printed/typed text — it is already handled.',
+    'DO NOT redact provider signatures or provider printed names.',
     '',
-    '1. PATIENT NAME (bare, no credential)',
-    '   Labels: PATIENT, PATIENTS NAME, PATIENT NAME, PT NAME, NAME, PT:, CLIENT, CLAIMANT,',
-    '   "Name:" in radiology headers, standalone name line at top of fax or report pages.',
-    '   Also: patient name in "PATIENT NAME: ___  ACCOUNT #: ___" footer lines.',
-    '   Also: patient name as first bold line in orthopedic/office visit reports (e.g. "Vilma N. Mora Maldonado").',
-    '',
-    '2. DATE OF BIRTH + AGE (same line)',
-    '   Labels: DOB, D.O.B., DATE OF BIRTH, BIRTH DATE, Date of Birth, DOB:',
-    '   Include AGE value if on same line. Redact DOB in footers, fax metadata, and form fields.',
-    '   "DOB: 05/21/1969" appearing as a plain text line in auth forms — redact it.',
-    '',
-    '3. ACCOUNT / FINANCIAL NUMBER',
-    '   Labels: ACCOUNT#, ACCOUNT NO, ACCOUNT NUMBER, ACCT#, ACCT NO, ACCT:, FIN#, VISIT#, PAT#',
-    '   Also: "Acct: D00136377973" in radiology headers (abbreviated format).',
-    '',
-    '4. UNIT / ROOM / BED',
-    '   Labels: UNIT#, UNIT NO, UNIT NUMBER, Unit Number, ROOM, ROOM/BED, BED, WARD, LOCATION',
-    '',
-    '5. SSN — XXX-XX-XXXX pattern anywhere, including handwritten C-4 forms.',
-    '',
-    '6. PATIENT ADDRESS (full block)',
-    '   Street + city + state + ZIP. Redact as one tall box covering all lines.',
-    '   Common format: "1828 E State Highway 168 Box 578" then "Moapa, NV 89025-9117".',
-    '   Also redact addresses in PT/OT orders, therapy forms, and C-4 forms even if unlabeled.',
-    '',
-    '7. PATIENT PERSONAL PHONE',
-    '   Any phone linked to patient: "(818) 497-1726".',
-    '   In authorization forms it may appear as "PHONE: 818-497-1726" — redact the number.',
-    '   Do NOT redact hospital/clinic phone numbers near facility names.',
-    '',
-    '8. PATIENT EMAIL',
-    '',
-    '9. MRN — Labels: MRN, MR#, MED REC, CHART#, Patient #, Patient#: 403522',
-    '   Also: "MRN: D003081753" in radiology headers.',
-    '',
-    '10. INSURANCE / CLAIM IDs',
-    '    Labels: PLAN #, GROUP #, MEMBER ID, POLICY #, SUBSCRIBER ID, CLAIM #, CLM#',
-    '    Redact the numbers — keep insurance company names.',
-    '',
-    '11. DRIVER LICENSE NUMBER',
-    '',
-    '12. PATIENT PHOTO or HANDWRITTEN PATIENT SIGNATURE',
-    '',
-    '13. HANDWRITTEN C-4 FORM FIELDS',
-    '    C-4 / workers comp claim forms often have handwritten data.',
-    '    Redact ALL handwritten entries in: employee name, address, DOB, SSN, phone fields.',
-    '    The printed field labels can remain — only redact the written/typed values.',
-    '',
-    '=== DO NOT REDACT ===',
-    '- Names with credentials (MD, RN, PA, DO, Officer, etc.)',
-    '- Hospital/facility names and addresses',
-    '- Report section headers and field labels',
-    '- CPT/ICD codes, procedure codes',
-    '- Dates of service, admission, discharge, exam, report dates (NOT date of birth)',
-    '- Clinical content: diagnoses, medications, vitals, lab values',
-    '- Hospital/clinic phone and fax numbers',
-    '- Page numbers, print timestamps, CorVel scan dates, fax metadata',
-    '- Insurance company names (CORVEL, UMR, CLARK COUNTY) — only redact ID numbers',
-    '- Employer name, attorney name, adjuster name, claim numbers',
-    '',
-    '=== KEY DATE DISTINCTION ===',
-    'Date of Birth / DOB / Birth Date → REDACT',
-    'Date of service / exam / admission / discharge / report → DO NOT REDACT',
+    '=== BOX PLACEMENT ===',
+    'Start slightly LEFT of handwritten content. Add 0.008 to width for full coverage.',
     '',
     '=== OUTPUT FORMAT ===',
-    'Return bounding boxes around PII VALUES ONLY — not labels.',
-    '"PATIENT NAME: MORA-MALDONADO,VILMA N" → box covers "MORA-MALDONADO,VILMA N" only.',
-    '"DOB: 05/21/69  AGE: 56" → one box covering "05/21/69  AGE: 56".',
-    'Multi-line address → one tall box spanning all lines.',
-    '',
-    'JSON object keyed by 0-based page index, normalized coords 0.0-1.0, top-left origin:',
+    'JSON object keyed by 0-based page index. Empty array if no handwritten PII on that page.',
+    'Return ONLY the JSON — no explanation.',
     '{',
-    '  "0": [',
-    '    {"label":"Patient Name","x":0.10,"y":0.08,"width":0.45,"height":0.018},',
-    '    {"label":"DOB+Age","x":0.05,"y":0.10,"width":0.35,"height":0.018},',
-    '    {"label":"Address","x":0.04,"y":0.20,"width":0.55,"height":0.050}',
-    '  ],',
-    '  "1": []',
+    '  "33": [{"label":"handwritten name","x":0.10,"y":0.12,"width":0.40,"height":0.020}],',
+    '  "34": []',
     '}',
-    'Empty array for pages with no patient PII.',
-    'Return ONLY the JSON — no explanation, no markdown.',
   ].filter(Boolean).join('\n');
 
   const body = JSON.stringify({
     anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 8192,
+    max_tokens: 4096,
     temperature: 0,
     messages: [{
       role: 'user',
@@ -258,22 +236,16 @@ async function detectPiiInPdf(pdfBytes, knownPiiValues) {
     modelId: MODEL_ID,
     contentType: 'application/json',
     accept: 'application/json',
-    body: body,
+    body,
   }));
 
   const result  = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
   const rawText = (result.content && result.content[0] && result.content[0].text) || '{}';
   const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-
-  try {
-    return JSON.parse(cleaned);
-  } catch (e) {
-    console.warn('PII detection parse failed:', rawText.slice(0, 300));
-    return {};
-  }
+  try { return JSON.parse(cleaned); } catch (e) { return {}; }
 }
 
-// ── STEP 3: Apply black boxes — generous left-side padding ───────────────────
+// ── STEP 3: Apply black boxes ─────────────────────────────────────────────────
 
 async function applyRedactions(pdfBytes, piiByPage) {
   const pdfDoc = await PDFDocument.load(pdfBytes);
@@ -290,18 +262,18 @@ async function applyRedactions(pdfBytes, piiByPage) {
     const h    = sz.height;
 
     for (const box of boxes) {
-      const px       = box.x * w;
-      const py       = h - (box.y + box.height) * h;
-      const pw       = box.width  * w;
-      const ph       = box.height * h;
-      const padLeft  = 8;
-      const padRight = 5;
-      const padVert  = 3;
+      const px      = box.x * w;
+      const py      = h - (box.y + box.height) * h;
+      const pw      = box.width  * w;
+      const ph      = box.height * h;
+      const padL    = 8;
+      const padR    = 5;
+      const padV    = 3;
       page.drawRectangle({
-        x:      Math.max(0, px - padLeft),
-        y:      Math.max(0, py - padVert),
-        width:  Math.min(w - Math.max(0, px - padLeft), pw + padLeft + padRight),
-        height: Math.min(h, ph + padVert * 2),
+        x:      Math.max(0, px - padL),
+        y:      Math.max(0, py - padV),
+        width:  Math.min(w - Math.max(0, px - padL), pw + padL + padR),
+        height: Math.min(h, ph + padV * 2),
         color:   rgb(0, 0, 0),
         opacity: 1,
       });
@@ -309,6 +281,17 @@ async function applyRedactions(pdfBytes, piiByPage) {
   }
 
   return Buffer.from(await pdfDoc.save({ useObjectStreams: false }));
+}
+
+// ── Merge two piiByPage maps ──────────────────────────────────────────────────
+
+function mergePiiMaps(a, b) {
+  var out = {};
+  var keys = new Set(Object.keys(a).concat(Object.keys(b)));
+  keys.forEach(function(k) {
+    out[k] = (a[k] || []).concat(b[k] || []);
+  });
+  return out;
 }
 
 // ── Fetch extracted_text from DynamoDB ────────────────────────────────────────
@@ -352,8 +335,8 @@ const _redactDocumentStart = async function(event) {
   await dynamo.send(new PutCommand({
     TableName: JOBS_TABLE,
     Item: {
-      job_id: job_id, type: 'redact', status: 'processing',
-      doc_id: doc_id, org_id: doc.org_id || null,
+      job_id, type: 'redact', status: 'processing',
+      doc_id, org_id: doc.org_id || null,
       created_at: now, updated_at: now,
       progress_message: 'Starting redaction...',
     },
@@ -362,10 +345,10 @@ const _redactDocumentStart = async function(event) {
   await lambdaClient.send(new InvokeCommand({
     FunctionName:   WORKER_FN,
     InvocationType: 'Event',
-    Payload:        Buffer.from(JSON.stringify({ job_id: job_id, doc_id: doc_id, doc: doc })),
+    Payload:        Buffer.from(JSON.stringify({ job_id, doc_id, doc })),
   }));
 
-  return respond(200, { job_id: job_id, status: 'processing' });
+  return respond(200, { job_id, status: 'processing' });
 };
 
 module.exports.redactDocumentStart = validateApiKey(_redactDocumentStart);
@@ -388,35 +371,75 @@ module.exports.redactDocumentWorker = async function(event) {
     const knownPiiValues = extractKnownPiiValues(extractedText);
     console.log('Regex PII (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues.slice(0, 20)));
 
+    // ── Try Textract-coordinate path first ──
+    var textractPii = {};
+    var usedTextract = false;
+    const wordBlocks = await loadTextractBlocks(fileKey);
+
+    if (wordBlocks && wordBlocks.length > 0 && knownPiiValues.length > 0) {
+      await updateJob(job_id, { progress_message: 'Mapping PII to Textract coordinates...', updated_at: new Date().toISOString() });
+      textractPii = findBoxesFromBlocks(wordBlocks, knownPiiValues);
+      const textractHits = Object.values(textractPii).reduce(function(s, b) { return s + b.length; }, 0);
+      console.log('Textract coordinate hits:', textractHits, 'across', Object.keys(textractPii).length, 'pages');
+      usedTextract = textractHits > 0;
+    }
+
+    // ── Always run Claude vision for handwritten content ──
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
     const CHUNK_SIZE = 20;
-    const allPii     = {};
+    var claudePii    = {};
+
+    await updateJob(job_id, { progress_message: 'Scanning for handwritten PII...', updated_at: new Date().toISOString() });
 
     for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
       const end     = Math.min(start + CHUNK_SIZE, totalPages);
       const indices = [];
       for (let i = start; i < end; i++) indices.push(i);
 
-      await updateJob(job_id, {
-        progress_message: 'Analyzing pages ' + (start + 1) + '\u2013' + end + ' of ' + totalPages + '...',
-        updated_at: new Date().toISOString(),
-      });
-
       const subDoc = await PDFDocument.create();
       const copied = await subDoc.copyPages(masterDoc, indices);
       copied.forEach(function(p) { subDoc.addPage(p); });
       const subBytes = Buffer.from(await subDoc.save());
 
-      const chunkPii = await detectPiiInPdf(subBytes, knownPiiValues);
+      const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
 
       for (const chunkPageStr of Object.keys(chunkPii)) {
         const globalPage = start + parseInt(chunkPageStr, 10);
         const boxes      = chunkPii[chunkPageStr];
-        if (boxes && boxes.length) allPii[String(globalPage)] = boxes;
+        if (boxes && boxes.length) claudePii[String(globalPage)] = boxes;
       }
     }
 
+    // ── If no Textract blocks available, also run full Claude pass ──
+    if (!usedTextract) {
+      console.log('No Textract blocks — running full Claude vision pass');
+      await updateJob(job_id, { progress_message: 'Running full visual PII scan (no Textract data)...', updated_at: new Date().toISOString() });
+
+      for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
+        const end     = Math.min(start + CHUNK_SIZE, totalPages);
+        const indices = [];
+        for (let i = start; i < end; i++) indices.push(i);
+
+        const subDoc = await PDFDocument.create();
+        const copied = await subDoc.copyPages(masterDoc, indices);
+        copied.forEach(function(p) { subDoc.addPage(p); });
+        const subBytes = Buffer.from(await subDoc.save());
+
+        // Full prompt for legacy docs without Textract blocks
+        const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
+        for (const chunkPageStr of Object.keys(chunkPii)) {
+          const globalPage = start + parseInt(chunkPageStr, 10);
+          const boxes      = chunkPii[chunkPageStr];
+          if (boxes && boxes.length) {
+            claudePii[String(globalPage)] = (claudePii[String(globalPage)] || []).concat(boxes);
+          }
+        }
+      }
+    }
+
+    // ── Merge Textract + Claude boxes ──
+    const allPii             = mergePiiMaps(textractPii, claudePii);
     const totalRedactions    = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
     const totalPagesAffected = Object.keys(allPii).length;
 
@@ -454,6 +477,7 @@ module.exports.redactDocumentWorker = async function(event) {
         s3_key:            redactedKey,
         is_redacted:       true,
         redacted_from:     doc_id,
+        redaction_method:  usedTextract ? 'textract+claude' : 'claude_only',
         redaction_count:   totalRedactions,
         redacted_pages:    totalPagesAffected,
         confirmed_pii:     knownPiiValues.length,
@@ -473,13 +497,14 @@ module.exports.redactDocumentWorker = async function(event) {
     await updateJob(job_id, {
       status:           'complete',
       progress_message: 'Redaction complete — ' + totalRedactions + ' item(s) across ' + totalPagesAffected +
-                        ' page(s). (' + knownPiiValues.length + ' confirmed via text scan)',
+                        ' page(s). Method: ' + (usedTextract ? 'Textract coordinates + Claude handwriting' : 'Claude vision only'),
       result: {
-        new_doc_id:      newDocId,
-        download_url:    downloadUrl,
-        redaction_count: totalRedactions,
-        redacted_pages:  totalPagesAffected,
-        confirmed_pii:   knownPiiValues.length,
+        new_doc_id:       newDocId,
+        download_url:     downloadUrl,
+        redaction_count:  totalRedactions,
+        redacted_pages:   totalPagesAffected,
+        confirmed_pii:    knownPiiValues.length,
+        method:           usedTextract ? 'textract+claude' : 'claude_only',
       },
       updated_at: new Date().toISOString(),
     });
