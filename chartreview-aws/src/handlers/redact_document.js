@@ -179,7 +179,14 @@ async function detectPiiOnPage(singlePagePdfBytes, pageWidth, pageHeight, knownP
 
   const result  = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
   const rawText = (result.content && result.content[0] && result.content[0].text) || '[]';
-  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  // Extract JSON array from response — handles code fences and preamble text
+  let cleaned = rawText.trim();
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const firstBracket = cleaned.indexOf('[');
+  const lastBracket  = cleaned.lastIndexOf(']');
+  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    cleaned = cleaned.slice(firstBracket, lastBracket + 1);
+  }
   try {
     const parsed = JSON.parse(cleaned);
     return Array.isArray(parsed) ? parsed : [];
