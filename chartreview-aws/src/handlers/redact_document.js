@@ -337,23 +337,18 @@ async function applyRedactions(pdfBytes, piiByPage) {
     const h    = sz.height;
 
     for (const box of boxes) {
-      const px      = box.x * w;
-      const py      = h - (box.y + box.height) * h;
-      const pw      = box.width  * w;
-      const ph      = box.height * h;
-      // Coordinate adjustment:
-      // Claude returns top-left origin coords; pdf-lib uses bottom-left origin.
-      // Claude tends to place boxes slightly left/high of the actual text.
-      // xShift nudges the box right; yShift nudges it down visually.
-      const xShift  = Math.round(w * 0.012);  // ~7px on 612pt page — shift right
-      const yShift  = Math.round(h * 0.008);  // ~6px on 792pt page — shift down
-      const padR    = 4;
-      const padV    = 2;
+      // Claude returns normalized coords with top-left origin (y=0 at top).
+      // pdf-lib uses bottom-left origin, so we flip Y.
+      // No artificial shifts — trust Claude's box placement exactly.
+      const px = box.x * w;
+      const py = h - (box.y + box.height) * h;
+      const pw = box.width  * w;
+      const ph = box.height * h;
       page.drawRectangle({
-        x:      Math.max(0, px + xShift),
-        y:      Math.max(0, py - yShift),
-        width:  Math.min(w - Math.max(0, px + xShift), pw + padR),
-        height: Math.min(h, ph + padV * 2),
+        x:      Math.max(0, px),
+        y:      Math.max(0, py),
+        width:  Math.min(w - Math.max(0, px), pw),
+        height: Math.min(h, ph),
         color:   rgb(0, 0, 0),
         opacity: 1,
       });
