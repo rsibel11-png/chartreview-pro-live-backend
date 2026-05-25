@@ -11,6 +11,8 @@ const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = requir
 const { BedrockRuntimeClient, InvokeModelCommand }     = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand }                  = require('@aws-sdk/client-lambda');
 const { PDFDocument, rgb }                             = require('pdf-lib');
+const pdfjsLib                                         = require('pdfjs-dist/legacy/build/pdf.js');
+const { createCanvas }                                 = require('canvas');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
@@ -207,91 +209,54 @@ async function loadTextractBlocks(fileKey) {
 
 // ── STEP 2B: Claude vision pass — handwritten content only ───────────────────
 
-async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
-  const pdfBase64 = pdfBytes.toString('base64');
-
+async function detectPiiInImage(pngBase64, imgW, imgH, knownPiiValues) {
   const confirmedSection = knownPiiValues && knownPiiValues.length > 0
-    ? '=== CONFIRMED PATIENT PII — MUST REDACT ALL ===\n\n' +
-      'These strings are confirmed patient PII. Find EVERY handwritten occurrence.\n\n' +
+    ? '=== CONFIRMED PATIENT PII VALUES ===\n\n' +
+      'These exact strings appear in this document. Find and box every occurrence:\n\n' +
       knownPiiValues.map(function(v) { return '  - "' + v + '"'; }).join('\n') + '\n'
     : '';
 
   const prompt = [
     'You are a HIPAA redaction assistant for workers compensation medical records.',
-    'Your job is to find and return bounding boxes for PATIENT DEMOGRAPHIC information only.',
-    'Clinical content must be preserved — only identity/contact information is redacted.',
-    '',
-    '=== WHAT TO REDACT (patient demographics only) ===',
-    '',
-    'PATIENT NAME — the patient name value, not provider names:',
-    '  e.g. "Patient: MORA-MALDONADO,VILMA N"  →  redact "MORA-MALDONADO,VILMA N"',
-    '  e.g. "PATIENT: Smith, John A"  →  redact "Smith, John A"',
-    '  e.g. handwritten name on C-4 form patient name field',
-    '',
-    'DATE OF BIRTH — redact the birth date value when labeled as DOB:',
-    '  e.g. line reads "DOB: 05/21/69  AGE: 56  SEX: F" → redact "05/21/69" AND "56"',
-    '  e.g. line reads "DOB: 05/21/1969" → redact the date value',
-    '  e.g. line reads "DATE OF BIRTH: May 21, 1969" → redact the date',
-    '  e.g. line reads "Birth Date: 05/21/69" → redact the date',
-    '  e.g. radiology header "DOB:" field → redact the value next to it',
-    '  KEY RULE: The label that triggers DOB redaction MUST be one of:',
-    '    DOB:  D.O.B.:  DATE OF BIRTH:  Birth Date:  Patient DOB:  Birthdate:',
-    '  SERVICE DATE RULE — these labels do NOT trigger redaction:',
-    '    Date:  DATE:  DATE:xx/xx/xx TIME:  ADM DT:  REP SRV DT:  SERVICE DT:',
-    '    Discharge date:  Date of admission:  Observation Start Date:',
-    '    Any date appearing in clinical notes, vital signs tables, medication orders',
-    'COMPACT HEADER RULE — many continuation pages have this 4-line header block:',
-    '  Patient: [name]  /  Unit#[number]  /  Date: [xx/xx/xx]  /  Acct# [number]',
-    '  The "Date:" value in this 4-line block is a REPORT date, NOT a birth date.',
-    '  DO NOT REDACT the Date: value here. Only redact the Patient name and Acct# value.',
-    '',
-    'MRN / UNIT / ACCOUNT NUMBERS:',
-    '  e.g. "UNIT #: D003081753"  →  redact "D003081753"',
-    '  e.g. "ACCOUNT#: D00136377973"  →  redact "D00136377973"',
-    '  e.g. "MRN#: 403522"  →  redact "403522"',
-    '  e.g. "Patient #: 403522"  →  redact the number',
-    '',
-    'SSN: any value in xxx-xx-xxxx format',
-    '',
-    'INSURANCE / CLAIM IDs:',
-    '  e.g. "Plan #: 354000611225"  →  redact the number',
-    '  e.g. "Group #: 76414937"  →  redact the number',
-    '  e.g. "CLM#: 0583WC260300444"  →  redact the number',
-    '',
-    'PATIENT ADDRESS AND PHONE:',
-    '  e.g. "1828 E State Highway 168 Box 578, Moapa, NV 89025"  →  redact',
-    '  e.g. "(818) 497-1726"  →  redact',
-    '',
-    'PATIENT PHOTO or PATIENT SIGNATURE on forms',
-    '',
-    '=== WHAT NOT TO REDACT ===',
-    '',
-    'Provider names: "Electronically Signed by Ching,Wilbert MD"  →  DO NOT redact',
-    'Dates of service: "SERVICE DT: 10/08/25", "ADM DT: 10/02/25", "REP SRV DT: 10/03/25"  →  DO NOT redact',
-    'Date labels alone: "Date: 10/08/25" on CorVel header continuation pages  →  DO NOT redact (service date)',
-    'AGE field standalone: "AGE: 56" without adjacent DOB  →  DO NOT redact',
-    'Diagnoses: "S52.021A – Displaced fracture of olecranon"  →  DO NOT redact',
-    'ICD/CPT codes: "S52.131A", "W01.0XXA"  →  DO NOT redact',
-    'Medications: "Hydrocodone 10mg", "gabapentin 600mg"  →  DO NOT redact',
-    'Clinical narrative: HPI, exam findings, assessment/plan  →  DO NOT redact',
-    'Facility names: "Sunrise Hospital", "Nevada Orthopedic"  →  DO NOT redact',
-    'Report numbers: "RPT #: 1003-0280"  →  DO NOT redact',
-    'Employer: "DISTRICT ATTORNEY OF FAMIL"  →  DO NOT redact',
+    'This image is ' + imgW + ' x ' + imgH + ' pixels.',
+    'Return bounding boxes in PIXEL coordinates (origin = top-left corner of image).',
     '',
     confirmedSection,
-    '=== BOX PLACEMENT ===',
-    'Cover the VALUE only, not the label. E.g. for "DOB: 05/21/69" cover only "05/21/69".',
-    'Start slightly LEFT of the value (subtract ~0.005 from x). Add ~0.008 to width.',
-    'For multi-line values, use one box per line.',
+    '=== WHAT TO REDACT ===',
+    '',
+    'PATIENT NAME:',
+    '  Redact only the NAME VALUE, not the label.',
+    '  e.g. "PATIENT: MORA-MALDONADO,VILMA N" -> box covers "MORA-MALDONADO,VILMA N" only',
+    '  e.g. "PATIENT\'S NAME: [name]" -> box covers the name value only',
+    '',
+    'DATE OF BIRTH:',
+    '  Redact only the DATE VALUE when labeled: DOB, D.O.B., DATE OF BIRTH, Birth Date, Birthdate.',
+    '  e.g. "DOB: 05/21/69  AGE: 56" -> box covers "05/21/69" AND "56"',
+    '  e.g. "DATE OF BIRTH: 05/21/1969" -> box covers the date value only',
+    '',
+    'MRN / UNIT / ACCOUNT NUMBERS:',
+    '  e.g. "UNIT #: D003081753" -> box covers "D003081753"',
+    '  e.g. "ACCOUNT#: D00136377973" -> box covers "D00136377973"',
+    '  e.g. "Acct: D00136377973" -> box covers "D00136377973"',
+    '  e.g. "MRN#: 403522" -> box covers "403522"',
+    '',
+    'ADDRESS / PHONE / SSN:',
+    '  Redact full street address lines, phone numbers labeled PHONE:, SSN values.',
+    '',
+    'COMPACT HEADER RULE:',
+    '  Many pages have a 4-line header: Patient / Unit# / Date / Acct#',
+    '  The Date: line in this block is a REPORT date. DO NOT REDACT it.',
+    '  Only redact Patient name value and Acct# value in this block.',
+    '',
+    'SERVICE DATE RULE - DO NOT redact dates labeled:',
+    '  Date:  DATE:  ADM DT:  REP SRV DT:  SERVICE DT:  Discharge date:  Admission date:',
+    '  Any date appearing in clinical notes, vitals tables, medication orders.',
     '',
     '=== OUTPUT FORMAT ===',
-    'JSON object keyed by 0-based page index.',
-    'Only include pages that have demographics to redact. Omit pages with nothing to redact.',
-    'Return ONLY valid JSON — no explanation, no markdown.',
-    '{',
-    '  "0": [{"label":"patient name","x":0.08,"y":0.05,"width":0.38,"height":0.018}],',
-    '  "3": [{"label":"DOB","x":0.22,"y":0.08,"width":0.12,"height":0.016},{"label":"unit number","x":0.10,"y":0.11,"width":0.20,"height":0.016}]',
-    '}',
+    'Return a JSON array of boxes. Each box: {"label":"...","x":N,"y":N,"width":N,"height":N}',
+    'All values are INTEGERS in pixels. x,y = top-left corner of the box.',
+    'If nothing to redact on this page, return an empty array: []',
+    'Return ONLY valid JSON - no explanation, no markdown.',
   ].filter(Boolean).join('\n');
 
   const body = JSON.stringify({
@@ -301,7 +266,7 @@ async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
         { type: 'text', text: prompt },
       ],
     }],
@@ -315,40 +280,43 @@ async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
   }));
 
   const result  = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
-  const rawText = (result.content && result.content[0] && result.content[0].text) || '{}';
+  const rawText = (result.content && result.content[0] && result.content[0].text) || '[]';
   const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  try { return JSON.parse(cleaned); } catch (e) { return {}; }
+  try {
+    const parsed = JSON.parse(cleaned);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    console.warn('detectPiiInImage parse error:', e.message, 'raw:', rawText.slice(0, 200));
+    return [];
+  }
 }
 
-// ── STEP 3: Apply black boxes ─────────────────────────────────────────────────
 
 async function applyRedactions(pdfBytes, piiByPage) {
   const pdfDoc = await PDFDocument.load(pdfBytes);
   const pages  = pdfDoc.getPages();
 
   for (const pageIndexStr of Object.keys(piiByPage)) {
-    const pageIndex = parseInt(pageIndexStr, 10);
-    const boxes     = piiByPage[pageIndexStr];
-    if (pageIndex >= pages.length || !boxes || !boxes.length) continue;
+    const pageIndex  = parseInt(pageIndexStr, 10);
+    const entry      = piiByPage[pageIndexStr];
+    if (pageIndex >= pages.length || !entry || !entry.boxes || !entry.boxes.length) continue;
 
-    const page = pages[pageIndex];
-    const sz   = page.getSize();
-    const w    = sz.width;
-    const h    = sz.height;
+    const page        = pages[pageIndex];
+    const sz          = page.getSize();
+    const pdfH        = sz.height;
+    const pdfW        = sz.width;
+    const renderScale = entry.scale;
 
-    for (const box of boxes) {
-      // Claude returns normalized coords with top-left origin (y=0 at top).
-      // pdf-lib uses bottom-left origin, so we flip Y.
-      // No artificial shifts — trust Claude's box placement exactly.
-      const px = box.x * w;
-      const py = h - (box.y + box.height) * h;
-      const pw = box.width  * w;
-      const ph = box.height * h;
+    for (const box of entry.boxes) {
+      const pdfX  = box.x / renderScale;
+      const pdfY  = pdfH - (box.y + box.height) / renderScale;
+      const pdfBW = box.width  / renderScale;
+      const pdfBH = box.height / renderScale;
       page.drawRectangle({
-        x:      Math.max(0, px),
-        y:      Math.max(0, py),
-        width:  Math.min(w - Math.max(0, px), pw),
-        height: Math.min(h, ph),
+        x:      Math.max(0, pdfX),
+        y:      Math.max(0, pdfY),
+        width:  Math.min(pdfW - Math.max(0, pdfX), pdfBW),
+        height: Math.min(pdfH, pdfBH),
         color:   rgb(0, 0, 0),
         opacity: 1,
       });
@@ -451,27 +419,30 @@ module.exports.redactDocumentWorker = async function(event) {
     const CHUNK_SIZE = 20;
     const allPii     = {};
 
-    for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
-      const end     = Math.min(start + CHUNK_SIZE, totalPages);
-      const indices = [];
-      for (let i = start; i < end; i++) indices.push(i);
+    const RENDER_DPI   = 150;
+    const RENDER_SCALE = RENDER_DPI / 72;
+    const pdfJsDoc = await pdfjsLib.getDocument({ data: new Uint8Array(pdfBytes) }).promise;
 
-      await updateJob(job_id, {
-        progress_message: 'Scanning pages ' + (start + 1) + ' to ' + end + ' of ' + totalPages + '...',
-        updated_at: new Date().toISOString(),
-      });
+    for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
+      if (pageIdx % 5 === 0) {
+        await updateJob(job_id, {
+          progress_message: 'Scanning page ' + (pageIdx + 1) + ' of ' + totalPages + '...',
+          updated_at: new Date().toISOString(),
+        });
+      }
+      const pdfJsPage  = await pdfJsDoc.getPage(pageIdx + 1);
+      const viewport   = pdfJsPage.getViewport({ scale: RENDER_SCALE });
+      const imgW       = Math.round(viewport.width);
+      const imgH       = Math.round(viewport.height);
+      const nodeCanvas = createCanvas(imgW, imgH);
+      const ctx        = nodeCanvas.getContext('2d');
+      await pdfJsPage.render({ canvasContext: ctx, viewport }).promise;
+      const pngBuffer  = nodeCanvas.toBuffer('image/png');
+      const pngBase64  = pngBuffer.toString('base64');
 
-      const subDoc = await PDFDocument.create();
-      const copied = await subDoc.copyPages(masterDoc, indices);
-      copied.forEach(function(p) { subDoc.addPage(p); });
-      const subBytes = Buffer.from(await subDoc.save());
-
-      const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
-
-      for (const chunkPageStr of Object.keys(chunkPii)) {
-        const globalPage = start + parseInt(chunkPageStr, 10);
-        const boxes      = chunkPii[chunkPageStr];
-        if (boxes && boxes.length) allPii[String(globalPage)] = boxes;
+      const boxes = await detectPiiInImage(pngBase64, imgW, imgH, knownPiiValues);
+      if (boxes && boxes.length) {
+        allPii[String(pageIdx)] = { boxes, imgW, imgH, scale: RENDER_SCALE };
       }
     }
 
