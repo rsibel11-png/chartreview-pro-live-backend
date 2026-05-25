@@ -74,41 +74,46 @@ function extractKnownPiiValues(extractedText) {
   var found = new Set();
 
   var patterns = [
-    // Patient name — must follow an explicit label on the same line
-    /^(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]{4,50})$/mg,
-    /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})$/mgi,
-    /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})$/mgi,
-    /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})$/mgi,
-    // PPR form — "Patient's Name" field
-    /Patient['']?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]{4,50})/gi,
+    // Patient name — explicit label; removed $ end anchor so trailing content on same line is OK
+    /(?:^|\n)[ \t]*(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]{4,50})/mg,
+    /(?:^|\n)[ \t]*(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})/mgi,
+    /(?:^|\n)[ \t]*Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})/mgi,
+    /(?:^|\n)[ \t]*(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})/mgi,
+    // PPR form "Patient's Name:" value (mixed case)
+    /Patient['s]*\s*Name\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})/gi,
+    // Nevada Ortho bold standalone name: "Vilma N. Mora Maldonado" (no label, own line)
+    /^([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+(?:[A-Z][a-z]+-)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*$/mg,
 
     // Date of birth — must follow label
-    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
-    /DOB\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
+    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
+    /\bDOB\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
+    // AGE value on same line as DOB (e.g. "DOB: 05/21/69  AGE: 56")
+    /\bAGE\s*[:\|]\s*(\d{1,3})\b/gi,
 
-    // SSN — only the xxx-xx-xxxx format (distinctive enough to match freely)
-    /(\d{3}-\d{2}-\d{4})/g,
+    // SSN
+    /(\d{3}-\d{2}-\d{4})/g,
 
     // MRN — must follow label
-    /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]{4,20})/gi,
+    /\b(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]{4,20})/gi,
 
     // Account / unit numbers — must follow explicit label
-    /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct#)\s*[:\|]\s*([A-Z0-9\-]{4,30})/gi,
-    /(?:UNIT\s*(?:NO\.?|NUMBER|#)|Unit\s*(?:No\.?|#)|Unit#)\s*[:\|]\s*([A-Z0-9\-]{4,30})/gi,
-    /FIN#?\s*[:\|]\s*([A-Z0-9\-]{4,20})/gi,
+    /\b(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct#)\s*[:\|]\s*([A-Z0-9\-]{4,30})/gi,
+    /\b(?:UNIT\s*(?:NO\.?|NUMBER|#)|Unit\s*(?:No\.?|#)|Unit#)\s*[:\|]\s*([A-Z0-9\-]{4,30})/gi,
+    /\bFIN#?\s*[:\|]\s*([A-Z0-9\-]{4,20})/gi,
 
-    // Insurance / claim IDs — must follow label
-    /(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#)\s*[:\|]?\s*([A-Z0-9\-]{4,30})/gi,
+    // Insurance / claim IDs
+    /\b(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#)\s*[:\|]?\s*([A-Z0-9\-]{4,30})/gi,
 
-    // Phone — must follow label OR be (xxx) xxx-xxxx format
-    /(?:PHONE|CELL|MOBILE|TEL(?:EPHONE)?)\s*[:\|]\s*([\d\(\)\-\.\s]{10,15})/gi,
+    // Phone — labeled OR (xxx) xxx-xxxx format
+    /\b(?:PHONE|CELL|MOBILE|TEL(?:EPHONE)?)\s*[:\|]\s*([\d\(\)\-\.\s]{10,15})/gi,
     /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
 
-    // Address — ONLY when explicitly labeled; do not free-match street addresses
+    // Address — labeled OR standalone street address line (for OT orders)
     /\b(?:HOME\s*)?ADDRESS\s*[:|]\s*(.{10,80})/gi,
+    /^\d{1,5}\s+[A-Z][A-Za-z0-9\s\.\#]{10,60}$/mg,
 
     // Email
-    /(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
+    /\b(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
   ];
 
   for (var i = 0; i < patterns.length; i++) {
