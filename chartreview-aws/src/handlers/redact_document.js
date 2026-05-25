@@ -65,43 +65,66 @@ async function updateJob(job_id, patch) {
 // ── STEP 1: Regex scan — extract all known PII values from stored text ────────
 
 function extractKnownPiiValues(extractedText) {
+  // Demographics-only redaction — clinical content is intentionally preserved
+  // Redact: patient name, DOB, SSN, MRN/account/unit numbers, address, phone, insurance IDs
   if (!extractedText || typeof extractedText !== 'string') return [];
-  const found = new Set();
-  const patterns = [
-    /(?:PATIENT(?:'S)?\s*(?:NAME?)?|PT\s*NAME|PATIENT\s*NAME|CLIENT\s*NAME|CLAIMANT)\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{2,60})/gi,
+  var found = new Set();
+
+  var patterns = [
+    // Patient name
+    /(?:PATIENT(?:'S)?\s*NAME?|PT\s*NAME|PATIENT\s*NAME|CLIENT\s*NAME|CLAIMANT)\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{4,60})/gi,
     /Patient(?:'s)?\s*(?:Name)?\s*[:\-]\s*([A-Za-z][A-Za-z ,'\-\.]{4,60})/g,
-    /\bName\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{4,50})/g,
-    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Date\s*of\s*Birth)\s*[:\-]\s*([\d\/\-\.]+(?:\s+AGE\s*[:\-]?\s*\d{1,3})?)/gi,
-    /(?:\bDOB|Patient\s*DOB)\s*[:\-]\s*([\d\/]+)/gi,
-    /\bAGE\s*[:\-]\s*(\d{1,3})\b/gi,
-    /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)?|Account\s*Number|ACCT\s*(?:NO\.?|#)?|FIN#?|FINANCIAL\s*NO?|VISIT#?|PATIENT\s*NO?|PAT#?|EPISODE\s*ID)\s*[:\-]\s*([A-Z0-9\-]{4,30})/g,
-    /\bAcct\s*[:\-]\s*([A-Z0-9\-]{4,20})/g,
-    /(?:UNIT\s*(?:NO\.?|NUMBER|#)?|Unit\s*Number|ROOM\s*(?:\/\s*BED)?|BED\b|WARD\b)\s*[:\-]\s*([A-Z0-9\-\.]{2,20})/g,
-    /\b(\d{3}-\d{2}-\d{4})\b/g,
-    /(?:MRN#?|MR#?|MED(?:ICAL)?\s*REC(?:ORD)?(?:\s*NO\.?)?|CHART#?|PATIENT\s*#|Patient\s*#)\s*[:\-]?\s*([A-Z0-9\-]{4,20})/gi,
-    /(?:PLAN\s*#?|GROUP\s*#?|MEMBER\s*(?:ID|#)?|POLICY\s*(?:NO\.?|#)?|SUBSCRIBER\s*(?:ID|#)?|CLAIM\s*#?)\s*[:\-]?\s*([A-Z0-9\-]{4,30})/gi,
-    /(?:DL#?|DRIVER\s*(?:S?\s*)?LICENSE|LICENSE\s*NO?)\s*[:\-]\s*([A-Z0-9\-]{4,20})/gi,
-    /(?:(?:HOME|CELL|MOBILE|PT|PATIENT|PERSONAL)\s+)?PHONE\s*[:\-]\s*([\(\d][\d\(\)\-\.\s]{8,14})/gi,
+    /PATIENT\s*[:\-]\s*([A-Z][A-Z ,'\-\.]{4,50})/g,
+
+    // Date of birth
+    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Date\s*of\s*Birth|Birth\s*Date)\s*[:\-]\s*([\d]{1,2}[\/\-\.][\d]{1,2}[\/\-\.][\d]{2,4})/gi,
+    /DOB\s*[:\-]\s*([\d]{1,2}[\/\-\.][\d]{1,2}[\/\-\.][\d]{2,4})/gi,
+
+    // SSN
+    /(\d{3}-\d{2}-\d{4})/g,
+
+    // MRN / chart number
+    /(?:MRN#?|MR#?|MED(?:ICAL)?\s*REC(?:ORD)?(?:\s*NO\.?)?|CHART#?|PATIENT\s*#|Patient\s*#|MRN\s*[:\-]?)\s*[:\-]?\s*([A-Z0-9\-]{4,20})/gi,
+
+    // Account / unit / financial number
+    /(?:ACCOUNT(?:NO\.?|NUMBER|#)?|ACCT\s*(?:NO\.?|#)?|Account\s*Number|Acct#?|UNIT\s*(?:NO\.?|NUMBER|#)?|Unit\s*Number|Unit#?|FIN#?|FINANCIAL\s*NO?)\s*[:\-]\s*([A-Z0-9\-]{4,30})/gi,
+    /Acct#\s*[:\-]\s*([A-Z0-9\-]{4,20})/g,
+    /Unit#\s*[:\-]\s*([A-Z0-9\-]{4,20})/g,
+
+    // Insurance / claim IDs
+    /(?:PLAN\s*#?|GROUP\s*#?|MEMBER\s*(?:ID|#)?|POLICY\s*(?:NO\.?|#)?|SUBSCRIBER\s*(?:ID|#)?|CLM#?|CLAIM\s*#?)\s*[:\-]?\s*([A-Z0-9\-]{4,30})/gi,
+
+    // Phone number
+    /(?:PHONE|CELL|MOBILE|TEL)\s*[:\-]\s*([\(\d][\d\(\)\-\.\s]{8,14})/gi,
     /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
+    /(\d{3}-\d{3}-\d{4})/g,
+
+    // Address — only when explicitly labeled
+    /(?:HOME\s*ADDRESS|ADDRESS|ADDR)\s*[:\-]\s*(.{10,60})/gi,
+    /(\d{1,5}\s+[A-Z][A-Za-z\s]{3,30}(?:Ave|St|Blvd|Dr|Rd|Hwy|Way|Ln|Ct|Pl)[A-Za-z0-9\s,\.]{0,20})/g,
+    /([A-Z][a-zA-Z\s]{2,20},\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)/g,
+
+    // Email
     /(?:EMAIL|E-MAIL)\s*[:\-]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
-    /(?:HOME\s*ADDRESS|ADDRESS|ADDR|MAILING\s*ADDRESS)\s*[:\-]\s*(.{10,80})/gi,
-    /\b(\d{1,5}\s+[A-Z][A-Za-z0-9\s,\.]{5,60}(?:Ave|St|Blvd|Dr|Rd|Hwy|Highway|Way|Ln|Ct|Pl|Box|Suite|Ste)\s*[\w\d\s,\.]{0,20})/g,
-    /\b([A-Z][a-zA-Z\s]{2,25},\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)\b/g,
   ];
+
   for (var i = 0; i < patterns.length; i++) {
     var pattern = patterns[i];
     var match;
     pattern.lastIndex = 0;
     while ((match = pattern.exec(extractedText)) !== null) {
       var val;
+      // Special case for phone (xxx) xxx-xxxx pattern
       if (pattern.source.indexOf('(\\d{3})') !== -1 && match[2]) {
         val = ('(' + match[1] + ') ' + match[2]).trim();
       } else {
         val = match[1] && match[1].trim();
       }
-      if (!val || val.length < 3) continue;
-      if (/^[\d\s\-\.]{1,6}$/.test(val)) continue;
+      if (!val || val.length < 6) continue;
+      // Skip values that look like pure clinical text (all lowercase long strings)
       if (/^[a-z\s,\.]{20,}$/.test(val)) continue;
+      // Skip ICD codes and CPT codes
+      if (/^[A-Z]\d{2}\.?\d{0,3}[A-Z]?$/.test(val.trim())) continue;
       found.add(val);
     }
   }
@@ -197,12 +220,14 @@ async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
     'Typed/printed text has already been redacted. Focus ONLY on:',
     '',
     confirmedSection,
-    '=== REDACT ONLY THESE HANDWRITTEN ELEMENTS ===',
+    '=== REDACT ONLY THESE HANDWRITTEN ELEMENTS (demographics only) ===',
     '',
     '1. Handwritten patient name (on C-4 forms, consent forms, signature pages)',
-    '2. Handwritten DOB, SSN, address, phone on form fields',
+    '2. Handwritten DOB, SSN, address, phone, insurance ID on form fields',
     '3. Patient handwritten signature',
     '4. Patient photo',
+    '',
+    'DO NOT redact: diagnoses, ICD codes, medications, clinical notes, dates of service, provider names, facility names',
     '',
     'DO NOT redact printed/typed text — it is already handled.',
     'DO NOT redact provider signatures or provider printed names.',
