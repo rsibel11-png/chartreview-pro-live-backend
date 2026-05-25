@@ -436,112 +436,32 @@ module.exports.redactDocumentWorker = async function(event) {
     const fileKey  = doc.file_key || doc.s3_key;
     const pdfBytes = await getS3Bytes(fileKey);
 
-    await updateJob(job_id, { progress_message: 'Scanning text for known PII...', updated_at: new Date().toISOString() });
-    const extractedText  = await fetchExtractedText(doc_id);
-    const knownPiiValues = extractKnownPiiValues(extractedText);
-    console.log('Regex PII (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues.slice(0, 20)));
-
-    // ── Try Textract-coordinate path first ──
-    var textractPii = {};
-    var usedTextract = false;
-    const wordBlocks = await loadTextractBlocks(fileKey);
-
-    if (wordBlocks && wordBlocks.length > 0 && knownPiiValues.length > 0) {
-      await updateJob(job_id, { progress_message: 'Mapping PII to Textract coordinates...', updated_at: new Date().toISOString() });
-      textractPii = findBoxesFromBlocks(wordBlocks, knownPiiValues);
-      const textractHits = Object.values(textractPii).reduce(function(s, b) { return s + b.length; }, 0);
-      console.log('Textract coordinate hits:', textractHits, 'across', Object.keys(textractPii).length, 'pages');
-      usedTextract = textractHits > 0;
-    }
-
-    // ── Always run Claude vision for handwritten content ──
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
     const CHUNK_SIZE = 20;
-    var claudePii    = {};
-
-    await updateJob(job_id, { progress_message: 'Scanning for handwritten PII...', updated_at: new Date().toISOString() });
+    const allPii     = {};
 
     for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
       const end     = Math.min(start + CHUNK_SIZE, totalPages);
       const indices = [];
       for (let i = start; i < end; i++) indices.push(i);
 
+      await updateJob(job_id, {
+        progress_message: 'Scanning pages ' + (start + 1) + ' to ' + end + ' of ' + totalPages + '...',
+        updated_at: new Date().toISOString(),
+      });
+
       const subDoc = await PDFDocument.create();
       const copied = await subDoc.copyPages(masterDoc, indices);
       copied.forEach(function(p) { subDoc.addPage(p); });
       const subBytes = Buffer.from(await subDoc.save());
 
-      const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
+      const chunkPii = await detectPiiInPdf(subBytes);
 
       for (const chunkPageStr of Object.keys(chunkPii)) {
         const globalPage = start + parseInt(chunkPageStr, 10);
         const boxes      = chunkPii[chunkPageStr];
-        if (boxes && boxes.length) claudePii[String(globalPage)] = boxes;
-      }
-    }
-
-    // ── If no Textract blocks available, also run full Claude pass ──
-    if (!usedTextract) {
-      console.log('No Textract blocks — running full Claude vision pass');
-      await updateJob(job_id, { progress_message: 'Running full visual PII scan (no Textract data)...', updated_at: new Date().toISOString() });
-
-      for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
-        const end     = Math.min(start + CHUNK_SIZE, totalPages);
-        const indices = [];
-        for (let i = start; i < end; i++) indices.push(i);
-
-        const subDoc = await PDFDocument.create();
-        const copied = await subDoc.copyPages(masterDoc, indices);
-        copied.forEach(function(p) { subDoc.addPage(p); });
-        const subBytes = Buffer.from(await subDoc.save());
-
-        // Full prompt for legacy docs without Textract blocks
-        const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
-        for (const chunkPageStr of Object.keys(chunkPii)) {
-          const globalPage = start + parseInt(chunkPageStr, 10);
-          const boxes      = chunkPii[chunkPageStr];
-          if (boxes && boxes.length) {
-            claudePii[String(globalPage)] = (claudePii[String(globalPage)] || []).concat(boxes);
-          }
-        }
-      }
-    }
-
-    // ── Merge Textract + Claude boxes ──
-    const allPii = mergePiiMaps(textractPii, claudePii);
-
-    // ── Post-filter: drop boxes that overlap a 'Date:' service-date label row ──
-    // The compact CorVel/Sunrise header has 'Date: 10/03/25' which is a service
-    // date, not a birth date. If a Textract word block with text 'Date' or 'DATE'
-    // exists on a page, protect that Y row from redaction.
-    if (wordBlocks && wordBlocks.length) {
-      const protectedRows = {};
-      for (const wb of wordBlocks) {
-        const wt = (wb.t || '').replace(/[:. ]/g, '').trim().toLowerCase();
-        // 'date' alone = service date label; 'dob' = birth date (keep)
-        if (wt === 'date') {
-          const pidx = String((wb.p || 1) - 1);
-          if (!protectedRows[pidx]) protectedRows[pidx] = [];
-          protectedRows[pidx].push({ minY: wb.tp - 0.008, maxY: wb.tp + wb.h + 0.008 });
-        }
-      }
-      for (const pg of Object.keys(allPii)) {
-        if (!protectedRows[pg]) continue;
-        const before = (allPii[pg] || []).length;
-        allPii[pg] = (allPii[pg] || []).filter(function(box) {
-          const boxTop = box.y;
-          const boxBot = box.y + box.height;
-          for (const row of protectedRows[pg]) {
-            if (boxTop <= row.maxY && boxBot >= row.minY) {
-              console.log('Service-date row filter dropped box:', box.label, 'y='+box.y.toFixed(3));
-              return false;
-            }
-          }
-          return true;
-        });
-        const after = allPii[pg].length;
-        if (before !== after) console.log('Page ' + pg + ': filtered ' + (before-after) + ' service-date boxes');
+        if (boxes && boxes.length) allPii[String(globalPage)] = boxes;
       }
     }
 
@@ -561,11 +481,13 @@ module.exports.redactDocumentWorker = async function(event) {
     const redactedKey  = keyParts.concat([baseName + '_REDACTED.pdf']).join('/');
     const redactedName = baseName + '_REDACTED.pdf';
 
-    await updateJob(job_id, { progress_message: 'Saving redacted file...', updated_at: new Date().toISOString() });
+    await updateJob(job_id, { progress_message: 'Saving redacted document...', updated_at: new Date().toISOString() });
 
     await s3.send(new PutObjectCommand({
-      Bucket: BUCKET, Key: redactedKey,
-      Body: redactedBytes, ContentType: 'application/pdf',
+      Bucket:      BUCKET,
+      Key:         redactedKey,
+      Body:        redactedBytes,
+      ContentType: 'application/pdf',
     }));
 
     const newDocId = randomUUID();
@@ -573,21 +495,19 @@ module.exports.redactDocumentWorker = async function(event) {
       TableName: DOCS_TABLE,
       Item: {
         aws_document_id:   newDocId,
-        org_id:            doc.org_id       || null,
-        patient_id:        doc.patient_id   || null,
-        folder_name:       doc.folder_name  || null,
-        provider_name:     doc.provider_name|| null,
+        org_id:            doc.org_id            || null,
+        patient_id:        doc.patient_id         || null,
+        folder_name:       doc.folder_name        || null,
+        provider_name:     doc.provider_name      || null,
         original_filename: redactedName,
         file_key:          redactedKey,
         s3_key:            redactedKey,
         is_redacted:       true,
         redacted_from:     doc_id,
-        redaction_method:  usedTextract ? 'textract+claude' : 'claude_only',
         redaction_count:   totalRedactions,
         redacted_pages:    totalPagesAffected,
-        confirmed_pii:     knownPiiValues.length,
         status:            'processed',
-        is_clinical:       doc.is_clinical || false,
+        is_clinical:       doc.is_clinical        || false,
         created_at:        new Date().toISOString(),
         updated_at:        new Date().toISOString(),
       },
@@ -601,15 +521,12 @@ module.exports.redactDocumentWorker = async function(event) {
 
     await updateJob(job_id, {
       status:           'complete',
-      progress_message: 'Redaction complete — ' + totalRedactions + ' item(s) across ' + totalPagesAffected +
-                        ' page(s). Method: ' + (usedTextract ? 'Textract coordinates + Claude handwriting' : 'Claude vision only'),
+      progress_message: 'Redaction complete - ' + totalRedactions + ' item(s) redacted across ' + totalPagesAffected + ' page(s).',
       result: {
-        new_doc_id:       newDocId,
-        download_url:     downloadUrl,
-        redaction_count:  totalRedactions,
-        redacted_pages:   totalPagesAffected,
-        confirmed_pii:    knownPiiValues.length,
-        method:           usedTextract ? 'textract+claude' : 'claude_only',
+        new_doc_id:      newDocId,
+        download_url:    downloadUrl,
+        redaction_count: totalRedactions,
+        redacted_pages:  totalPagesAffected,
       },
       updated_at: new Date().toISOString(),
     });
