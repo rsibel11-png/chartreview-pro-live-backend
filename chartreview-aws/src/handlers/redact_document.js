@@ -79,13 +79,13 @@ function extractKnownPiiValues(extractedText) {
     // Standalone patient name as first non-empty line (bare name, no label) — caught by Bedrock visual
     // DOB — all variants
     /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Date\s*of\s*Birth)\s*[:\-]\s*([\d\/\-\.]+(?:\s+AGE\s*[:\-]?\s*\d{1,3})?)/gi,
-    /\bDOB\s*[:\-]\s*([\d\/]+)/gi,
+    /(?:\bDOB|Patient\s*DOB)\s*[:\-]\s*([\d\/]+)/gi,
     /\bAGE\s*[:\-]\s*(\d{1,3})\b/gi,
     // Account / financial — all variants including "Acct:" (abbreviated radiology format)
     /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)?|ACCT\s*(?:NO\.?|#)?|FIN#?|FINANCIAL\s*NO?|VISIT#?|PATIENT\s*NO?|PAT#?|EPISODE\s*ID)\s*[:\-]\s*([A-Z0-9\-]{4,30})/gi,
     /\bAcct\s*[:\-]\s*([A-Z0-9\-]{4,20})/g,
     // Unit / room / bed
-    /(?:UNIT\s*(?:NO\.?|NUMBER|#)?|ROOM\s*(?:\/\s*BED)?|BED\b|WARD\b)\s*[:\-]\s*([A-Z0-9\-\.]{2,20})/gi,
+    /(?:UNIT\s*(?:NO\.?|NUMBER|#)?|ROOM\s*(?:\/\s*BED)?|BED\b|WARD\b|Unit\s*Number)\s*[:\-]\s*([A-Z0-9\-\.]{2,20})/g,
     // SSN
     /\b(\d{3}-\d{2}-\d{4})\b/g,
     // MRN — all variants
@@ -174,7 +174,7 @@ async function detectPiiInPdf(pdfBytes, knownPiiValues) {
     '   Also: "Acct: D00136377973" in radiology headers (abbreviated format).',
     '',
     '4. UNIT / ROOM / BED',
-    '   Labels: UNIT#, UNIT NO, UNIT NUMBER, ROOM, ROOM/BED, BED, WARD, LOCATION',
+    '   Labels: UNIT#, UNIT NO, UNIT NUMBER, Unit Number, ROOM, ROOM/BED, BED, WARD, LOCATION',
     '',
     '5. SSN — XXX-XX-XXXX pattern anywhere, including handwritten C-4 forms.',
     '',
