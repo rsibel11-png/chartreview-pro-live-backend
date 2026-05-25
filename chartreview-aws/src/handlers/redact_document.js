@@ -139,12 +139,12 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
       var pageWords = pageMap[pageNum];
       var pageIdx = pageNum - 1; // convert to 0-based
 
-      // Sliding window: try 1 to 6 consecutive words
+      // Sliding window: try 1 to 6 consecutive words — exact match only, min 6 chars
       for (var start = 0; start < pageWords.length; start++) {
         for (var len = 1; len <= 6 && start + len <= pageWords.length; len++) {
           var slice = pageWords.slice(start, start + len);
           var concat = normalizeForMatch(slice.map(function(w) { return w.t; }).join(''));
-          if (concat === piiNorm || (piiNorm.length >= 4 && concat.includes(piiNorm))) {
+          if (piiNorm.length >= 6 && concat === piiNorm) {
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
             var minT = Math.min.apply(null, slice.map(function(w) { return w.tp; }));
