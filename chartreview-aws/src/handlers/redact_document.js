@@ -102,8 +102,7 @@ function extractKnownPiiValues(extractedText) {
     /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
 
     // Address — ONLY when explicitly labeled; do not free-match street addresses
-    /(?:HOME\s*)?ADDRESS\s*[:\|]\s*(.{10,80}?)(?:
-|$)/gi,
+    /\b(?:HOME\s*)?ADDRESS\s*[:|]\s*(.{10,80})/gi,
 
     // Email
     /(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
