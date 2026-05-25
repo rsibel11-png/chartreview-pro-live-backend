@@ -158,7 +158,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
               width: Math.min(1, (maxR - minL) + 0.01),
               height: maxB - minT,
             });
-            break; // found this pii value on this page, move to next start
+            // Do NOT break -- continue scanning to find ALL occurrences on this page
           }
         }
       }
