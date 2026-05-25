@@ -509,7 +509,42 @@ module.exports.redactDocumentWorker = async function(event) {
     }
 
     // ── Merge Textract + Claude boxes ──
-    const allPii             = mergePiiMaps(textractPii, claudePii);
+    const allPii = mergePiiMaps(textractPii, claudePii);
+
+    // ── Post-filter: drop boxes that overlap a 'Date:' service-date label row ──
+    // The compact CorVel/Sunrise header has 'Date: 10/03/25' which is a service
+    // date, not a birth date. If a Textract word block with text 'Date' or 'DATE'
+    // exists on a page, protect that Y row from redaction.
+    if (wordBlocks && wordBlocks.length) {
+      const protectedRows = {};
+      for (const wb of wordBlocks) {
+        const wt = (wb.t || '').replace(/[:. ]/g, '').trim().toLowerCase();
+        // 'date' alone = service date label; 'dob' = birth date (keep)
+        if (wt === 'date') {
+          const pidx = String((wb.p || 1) - 1);
+          if (!protectedRows[pidx]) protectedRows[pidx] = [];
+          protectedRows[pidx].push({ minY: wb.tp - 0.008, maxY: wb.tp + wb.h + 0.008 });
+        }
+      }
+      for (const pg of Object.keys(allPii)) {
+        if (!protectedRows[pg]) continue;
+        const before = (allPii[pg] || []).length;
+        allPii[pg] = (allPii[pg] || []).filter(function(box) {
+          const boxTop = box.y;
+          const boxBot = box.y + box.height;
+          for (const row of protectedRows[pg]) {
+            if (boxTop <= row.maxY && boxBot >= row.minY) {
+              console.log('Service-date row filter dropped box:', box.label, 'y='+box.y.toFixed(3));
+              return false;
+            }
+          }
+          return true;
+        });
+        const after = allPii[pg].length;
+        if (before !== after) console.log('Page ' + pg + ': filtered ' + (before-after) + ' service-date boxes');
+      }
+    }
+
     const totalRedactions    = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
     const totalPagesAffected = Object.keys(allPii).length;
 
