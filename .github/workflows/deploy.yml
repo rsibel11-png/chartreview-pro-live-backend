@@ -254,6 +254,18 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Upload zip to S3 (bypasses 70MB direct-upload limit)
+        working-directory: chartreview-aws
+        run: |
+          DEPLOY_KEY="lambda-deploys/function-$(date +%Y%m%d%H%M%S).zip"
+          echo "Uploading to s3://chartreview-documents-prod/$DEPLOY_KEY"
+          aws s3 cp function.zip s3://chartreview-documents-prod/$DEPLOY_KEY --region us-east-1
+          echo "DEPLOY_KEY=$DEPLOY_KEY" >> $GITHUB_ENV
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
@@ -297,7 +309,8 @@ jobs:
             echo "Updating $FUNC..."
             aws lambda update-function-code \
               --function-name "$FUNC" \
-              --zip-file fileb://function.zip \
+              --s3-bucket chartreview-documents-prod \
+              --s3-key "$DEPLOY_KEY" \
               --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
           done
           echo "All Lambda functions updated!"
