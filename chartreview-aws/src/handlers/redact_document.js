@@ -437,6 +437,11 @@ module.exports.redactDocumentWorker = async function(event) {
     const fileKey  = doc.file_key || doc.s3_key;
     const pdfBytes = await getS3Bytes(fileKey);
 
+    // Extract known PII values from stored Textract text to anchor Claude's redaction
+    const extractedText  = await fetchExtractedText(doc_id);
+    const knownPiiValues = extractKnownPiiValues(extractedText);
+    console.log('Known PII values (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues.slice(0, 15)));
+
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
     const CHUNK_SIZE = 20;
@@ -457,7 +462,7 @@ module.exports.redactDocumentWorker = async function(event) {
       copied.forEach(function(p) { subDoc.addPage(p); });
       const subBytes = Buffer.from(await subDoc.save());
 
-      const chunkPii = await detectHandwrittenPii(subBytes);
+      const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
 
       for (const chunkPageStr of Object.keys(chunkPii)) {
         const globalPage = start + parseInt(chunkPageStr, 10);
