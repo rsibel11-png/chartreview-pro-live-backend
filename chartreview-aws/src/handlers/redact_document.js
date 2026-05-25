@@ -295,7 +295,7 @@ module.exports.redactDocumentWorker = async function(event) {
     const piiByPage  = {};
 
     for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
-      if (pageIdx % 5 === 0) {
+      if (pageIdx % 20 === 0) {
         await updateJob(job_id, {
           progress_message: 'Scanning page ' + (pageIdx + 1) + ' of ' + totalPages + '...',
           updated_at: new Date().toISOString(),
