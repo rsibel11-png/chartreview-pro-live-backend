@@ -458,7 +458,7 @@ module.exports.redactDocumentWorker = async function(event) {
       const svgStr     = serializer.serializeToString(svgEl);
 
       // Convert SVG to PNG via sharp (prebuilt binary, no node-gyp)
-      const pngBuffer  = await sharp(Buffer.from(svgStr)).resize(imgW, imgH).png().toBuffer();
+      const pngBuffer  = await sharp(Buffer.from(svgStr)).resize(imgW, imgH, { fit: 'fill' }).png().toBuffer();
       const pngBase64  = pngBuffer.toString('base64');
 
       const boxes = await detectPiiInImage(pngBase64, imgW, imgH, knownPiiValues);
