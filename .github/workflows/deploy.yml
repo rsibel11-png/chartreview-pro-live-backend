@@ -254,13 +254,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Upload zip to S3 (bypasses 70MB direct-upload limit)
+      - name: Build and upload zips to S3
         working-directory: chartreview-aws
         run: |
-          DEPLOY_KEY="lambda-deploys/function-$(date +%Y%m%d%H%M%S).zip"
-          echo "Uploading to s3://chartreview-documents-prod/$DEPLOY_KEY"
-          aws s3 cp function.zip s3://chartreview-documents-prod/$DEPLOY_KEY --region us-east-1
-          echo "DEPLOY_KEY=$DEPLOY_KEY" >> $GITHUB_ENV
+          TS=$(date +%Y%m%d%H%M%S)
+
+          # Main zip: remove heavy redact-only packages to stay under 250MB unzipped
+          cp function.zip function_main.zip
+          zip -d function_main.zip "node_modules/sharp/*" "node_modules/pdfjs-dist/*" "node_modules/jsdom/*" "node_modules/canvas/*" 2>/dev/null || true
+          MAIN_KEY="lambda-deploys/function-main-${TS}.zip"
+          aws s3 cp function_main.zip s3://chartreview-documents-prod/$MAIN_KEY --region us-east-1
+          echo "MAIN_KEY=$MAIN_KEY" >> $GITHUB_ENV
+
+          # Redact zip: full zip including sharp/pdfjs-dist/jsdom
+          REDACT_KEY="lambda-deploys/function-redact-${TS}.zip"
+          aws s3 cp function.zip s3://chartreview-documents-prod/$REDACT_KEY --region us-east-1
+          echo "REDACT_KEY=$REDACT_KEY" >> $GITHUB_ENV
+          echo "Main zip: $MAIN_KEY | Redact zip: $REDACT_KEY"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -310,7 +320,17 @@ jobs:
             aws lambda update-function-code \
               --function-name "$FUNC" \
               --s3-bucket chartreview-documents-prod \
-              --s3-key "$DEPLOY_KEY" \
+              --s3-key "$MAIN_KEY" \
+              --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
+          done
+
+          # Redact functions use the full zip (includes sharp/pdfjs-dist/jsdom)
+          for FUNC in "chartreview-pro-prod-redactDocumentStart" "chartreview-pro-prod-redactDocumentWorker"; do
+            echo "Updating redact function $FUNC with redact zip..."
+            aws lambda update-function-code \
+              --function-name "$FUNC" \
+              --s3-bucket chartreview-documents-prod \
+              --s3-key "$REDACT_KEY" \
               --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
           done
           echo "All Lambda functions updated!"
