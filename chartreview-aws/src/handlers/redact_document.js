@@ -456,7 +456,7 @@ module.exports.redactDocumentWorker = async function(event) {
       copied.forEach(function(p) { subDoc.addPage(p); });
       const subBytes = Buffer.from(await subDoc.save());
 
-      const chunkPii = await detectPiiInPdf(subBytes);
+      const chunkPii = await detectHandwrittenPii(subBytes);
 
       for (const chunkPageStr of Object.keys(chunkPii)) {
         const globalPage = start + parseInt(chunkPageStr, 10);
