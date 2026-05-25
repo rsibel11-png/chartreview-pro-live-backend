@@ -12,7 +12,8 @@ const { BedrockRuntimeClient, InvokeModelCommand }     = require('@aws-sdk/clien
 const { LambdaClient, InvokeCommand }                  = require('@aws-sdk/client-lambda');
 const { PDFDocument, rgb }                             = require('pdf-lib');
 const pdfjsLib                                         = require('pdfjs-dist/legacy/build/pdf.js');
-const { createCanvas }                                 = require('canvas');
+const sharp                                            = require('sharp');
+const { JSDOM }                                        = require('jsdom');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
@@ -434,10 +435,18 @@ module.exports.redactDocumentWorker = async function(event) {
       const viewport   = pdfJsPage.getViewport({ scale: RENDER_SCALE });
       const imgW       = Math.round(viewport.width);
       const imgH       = Math.round(viewport.height);
-      const nodeCanvas = createCanvas(imgW, imgH);
-      const ctx        = nodeCanvas.getContext('2d');
-      await pdfJsPage.render({ canvasContext: ctx, viewport }).promise;
-      const pngBuffer  = nodeCanvas.toBuffer('image/png');
+
+      // Render PDF page to SVG via pdfjs (pure JS, no native binaries)
+      const dom        = new JSDOM('<!DOCTYPE html><html><body></body></html>');
+      global.document  = dom.window.document;
+      const opList     = await pdfJsPage.getOperatorList();
+      const svgGfx     = new pdfjsLib.SVGGraphics(pdfJsPage.commonObjs, pdfJsPage.objs);
+      const svgEl      = await svgGfx.getSVG(opList, viewport);
+      const serializer = new dom.window.XMLSerializer();
+      const svgStr     = serializer.serializeToString(svgEl);
+
+      // Convert SVG to PNG via sharp (prebuilt binary, no node-gyp)
+      const pngBuffer  = await sharp(Buffer.from(svgStr)).resize(imgW, imgH).png().toBuffer();
       const pngBase64  = pngBuffer.toString('base64');
 
       const boxes = await detectPiiInImage(pngBase64, imgW, imgH, knownPiiValues);
