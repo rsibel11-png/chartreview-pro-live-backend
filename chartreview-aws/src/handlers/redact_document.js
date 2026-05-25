@@ -294,30 +294,35 @@ module.exports.redactDocumentWorker = async function(event) {
     const totalPages = masterDoc.getPageCount();
     const piiByPage  = {};
 
-    for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
-      if (pageIdx % 20 === 0) {
-        await updateJob(job_id, {
-          progress_message: 'Scanning page ' + (pageIdx + 1) + ' of ' + totalPages + '...',
-          updated_at: new Date().toISOString(),
-        });
-      }
+    const BATCH_SIZE = 10;
+    for (let batchStart = 0; batchStart < totalPages; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, totalPages);
+      await updateJob(job_id, {
+        progress_message: 'Scanning pages ' + (batchStart + 1) + '-' + batchEnd + ' of ' + totalPages + '...',
+        updated_at: new Date().toISOString(),
+      });
 
-      // Extract this single page as its own PDF
-      const singleDoc = await PDFDocument.create();
-      const [copiedPage] = await singleDoc.copyPages(masterDoc, [pageIdx]);
-      singleDoc.addPage(copiedPage);
-      const singlePageBytes = Buffer.from(await singleDoc.save());
+      // Build all single-page PDFs for this batch
+      const batchIndices = [];
+      for (let i = batchStart; i < batchEnd; i++) batchIndices.push(i);
 
-      // Get page dimensions (PDF points)
-      const page       = masterDoc.getPages()[pageIdx];
-      const { width, height } = page.getSize();
+      const batchPromises = batchIndices.map(async function(pageIdx) {
+        const singleDoc = await PDFDocument.create();
+        const [copiedPage] = await singleDoc.copyPages(masterDoc, [pageIdx]);
+        singleDoc.addPage(copiedPage);
+        const singlePageBytes = Buffer.from(await singleDoc.save());
+        const page = masterDoc.getPages()[pageIdx];
+        const { width, height } = page.getSize();
+        const boxes = await detectPiiOnPage(singlePageBytes, width, height, knownPiiValues);
+        console.log('[REDACT] page ' + pageIdx + ' (' + Math.round(width) + 'x' + Math.round(height) + ' pts) boxes:', boxes.length, boxes.length ? JSON.stringify(boxes) : '');
+        return { pageIdx, boxes };
+      });
 
-      // Send raw PDF page to Claude — no rasterization needed
-      const boxes = await detectPiiOnPage(singlePageBytes, width, height, knownPiiValues);
-      console.log('[REDACT] page ' + pageIdx + ' (' + Math.round(width) + 'x' + Math.round(height) + ' pts) boxes:', boxes.length, boxes.length ? JSON.stringify(boxes) : '');
-
-      if (boxes && boxes.length) {
-        piiByPage[String(pageIdx)] = boxes;
+      const batchResults = await Promise.all(batchPromises);
+      for (const result of batchResults) {
+        if (result.boxes && result.boxes.length) {
+          piiByPage[String(result.pageIdx)] = result.boxes;
+        }
       }
     }
 
