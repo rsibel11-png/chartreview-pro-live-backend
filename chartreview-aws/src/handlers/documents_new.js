@@ -646,6 +646,31 @@ Return ONLY a JSON object with these exact fields:
         if (jobStatus === 'SUCCEEDED') {
           extractedText = buildPagedText(allBlocks);
           textract_page_count = allBlocks.filter(function(b) { return b.BlockType === 'PAGE'; }).length || null;
+          // Save compact word-geometry blocks to S3 for precise redaction
+          try {
+            var wordBlocks = allBlocks
+              .filter(function(b) { return b.BlockType === 'WORD' && b.Geometry && b.Geometry.BoundingBox; })
+              .map(function(b) {
+                return {
+                  t: b.Text || '',
+                  p: b.Page || 1,
+                  l: b.Geometry.BoundingBox.Left,
+                  tp: b.Geometry.BoundingBox.Top,
+                  w: b.Geometry.BoundingBox.Width,
+                  h: b.Geometry.BoundingBox.Height,
+                };
+              });
+            var blocksKey = (doc.file_key || '').replace(/\/[^\/]+$/, '') + '/textract_blocks.json';
+            await s3.send(new PutObjectCommand({
+              Bucket: BUCKET,
+              Key: blocksKey,
+              Body: JSON.stringify(wordBlocks),
+              ContentType: 'application/json',
+            }));
+            console.log('Saved', wordBlocks.length, 'word blocks to', blocksKey);
+          } catch (blockSaveErr) {
+            console.warn('Could not save textract blocks (non-fatal):', blockSaveErr.message);
+          }
         } else {
           extractedText = '[Textract job status: ' + jobStatus + ']';
         }
