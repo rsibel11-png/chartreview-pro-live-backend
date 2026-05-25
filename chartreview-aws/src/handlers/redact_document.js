@@ -112,6 +112,11 @@ function extractKnownPiiValues(extractedText) {
     /\b(?:HOME\s*)?ADDRESS\s*[:|]\s*(.{10,80})/gi,
     /^\d{1,5}\s+[A-Z][A-Za-z0-9\s\.\#]{10,60}$/mg,
 
+    // Spouse / family member names — parenthetical after relational label
+    // e.g. "her spouse (Luis Mora)" or "Next of Kin: John Smith"
+    /\b(?:spouse|husband|wife|partner|next[- ]of[- ]kin|NOK|emergency[- ]contact|POA|power[- ]of[- ]attorney|caregiver|guardian)\s*[:\-]?\s*\(([A-Za-z][A-Za-z\-'\. ]{3,40})\)/gi,
+    /\b(?:spouse|husband|wife|partner|next[- ]of[- ]kin|NOK|emergency[- ]contact|POA|caregiver|guardian)\s*[:\-]\s*([A-Za-z][A-Za-z\-'\. ]{3,40})/gi,
+
     // Email
     /\b(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
   ];
@@ -417,8 +422,10 @@ module.exports.redactDocumentWorker = async function(event) {
 
     // Extract known PII values from stored Textract text to anchor Claude's redaction
     const extractedText  = await fetchExtractedText(doc_id);
+    console.log('[REDACT] extractedText length:', extractedText ? extractedText.length : 'NULL', 'doc_id:', doc_id);
+    console.log('[REDACT] extractedText sample:', extractedText ? extractedText.slice(0, 300) : 'EMPTY');
     const knownPiiValues = extractKnownPiiValues(extractedText);
-    console.log('Known PII values (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues.slice(0, 15)));
+    console.log('[REDACT] knownPiiValues (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
@@ -455,6 +462,7 @@ module.exports.redactDocumentWorker = async function(event) {
       const pngBase64  = pngBuffer.toString('base64');
 
       const boxes = await detectPiiInImage(pngBase64, imgW, imgH, knownPiiValues);
+      console.log('[REDACT] page ' + pageIdx + ' boxes:', boxes ? boxes.length : 0, boxes && boxes.length ? JSON.stringify(boxes) : '');
       if (boxes && boxes.length) {
         allPii[String(pageIdx)] = { boxes, imgW, imgH, scale: RENDER_SCALE };
       }
