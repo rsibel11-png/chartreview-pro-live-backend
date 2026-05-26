@@ -464,6 +464,7 @@ resources:
   redactDocumentStart:
     handler: src/handlers/redact_document.redactDocumentStart
     timeout: 29
+    memorySize: 1024
     environment:
       S3_BUCKET: chartreview-documents-prod
       DOCUMENTS_TABLE: chartreview-documents-prod
