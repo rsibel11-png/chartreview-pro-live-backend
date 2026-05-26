@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-05-25 — Claude vision on raw PDF bytes (no rasterization)
+// Updated: 2026-05-25 — Textract-coordinate-first redaction + Claude vision for handwritten only
 
 'use strict';
 
@@ -11,6 +11,9 @@ const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = requir
 const { BedrockRuntimeClient, InvokeModelCommand }     = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand }                  = require('@aws-sdk/client-lambda');
 const { PDFDocument, rgb }                             = require('pdf-lib');
+const pdfjsLib                                         = require('pdfjs-dist/legacy/build/pdf.js');
+const sharp                                            = require('sharp');
+const { JSDOM }                                        = require('jsdom');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
@@ -25,7 +28,19 @@ const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+const respond = function(statusCode, body) {
+  return {
+    statusCode,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-api-key,x-org-id',
+    },
+    body: JSON.stringify(body),
+  };
+};
 
 async function getS3Bytes(key) {
   const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
@@ -35,119 +50,224 @@ async function getS3Bytes(key) {
 }
 
 async function updateJob(job_id, patch) {
+  const keys   = Object.keys(patch);
+  const sets   = keys.map(function(k, i) { return '#f' + i + ' = :v' + i; }).join(', ');
+  const names  = {};
+  const values = {};
+  keys.forEach(function(k, i) { names['#f' + i] = k; });
+  Object.values(patch).forEach(function(v, i) { values[':v' + i] = v; });
   await dynamo.send(new UpdateCommand({
     TableName: JOBS_TABLE,
     Key: { job_id },
-    UpdateExpression: 'SET ' + Object.keys(patch).map((k, i) => '#k' + i + ' = :v' + i).join(', '),
-    ExpressionAttributeNames:  Object.fromEntries(Object.keys(patch).map((k, i) => ['#k' + i, k])),
-    ExpressionAttributeValues: Object.fromEntries(Object.keys(patch).map((k, i) => [':v' + i, patch[k]])),
+    UpdateExpression: 'SET ' + sets,
+    ExpressionAttributeNames: names,
+    ExpressionAttributeValues: values,
   }));
 }
 
-async function fetchExtractedText(doc_id) {
-  try {
-    const resp = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
-    return (resp.Item && resp.Item.extracted_text) ? resp.Item.extracted_text : '';
-  } catch (e) {
-    console.warn('fetchExtractedText error:', e.message);
-    return '';
-  }
-}
+// ── STEP 1: Regex scan — extract all known PII values from stored text ────────
 
 function extractKnownPiiValues(extractedText) {
-  if (!extractedText) return [];
-  const values = [];
+  // Demographics-only: ONLY extract values that appear after an explicit demographic label.
+  // This prevents matching clinical narrative text.
+  if (!extractedText || typeof extractedText !== 'string') return [];
+  var found = new Set();
 
-  // Patient name — various label formats
-  var namePatterns = [
-    /PATIENT[:\s]+([A-Z][A-Z\-,\.\s']+(?:N|M|F)?)\s*$/im,
-    /PATIENT'?S?\s*NAME[:\s]+([A-Z][A-Z\-,\.\s']+)/im,
-    /Patient:\s*([A-Z][A-Z\-,\.\s']+)/im,
-    /^([A-Z][A-Z\-]+,\s*[A-Z][A-Z\s]+)\s+(?:DOB|MRN|UNIT)/im,
+  var patterns = [
+    // Patient name — explicit label; removed $ end anchor so trailing content on same line is OK
+    /(?:^|\n)[ \t]*(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]{4,50})/mg,
+    /(?:^|\n)[ \t]*(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})/mgi,
+    /(?:^|\n)[ \t]*Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})/mgi,
+    /(?:^|\n)[ \t]*(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})/mgi,
+    // PPR form "Patient's Name:" value (mixed case)
+    /Patient['s]*\s*Name\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})/gi,
+    // Nevada Ortho bold standalone name: "Vilma N. Mora Maldonado" (no label, own line)
+    /^([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+(?:[A-Z][a-z]+-)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*$/mg,
+
+    // Date of birth — must follow label
+    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
+    /\bDOB\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
+    // AGE value on same line as DOB (e.g. "DOB: 05/21/69  AGE: 56")
+    /\bAGE\s*[:\|]\s*(\d{1,3})\b/gi,
+
+    // SSN
+    /(\d{3}-\d{2}-\d{4})/g,
+
+    // MRN — must follow label
+    /\b(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]{4,20})/gi,
+
+    // Account / unit numbers — must follow explicit label
+    /\b(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct#)\s*[:\|]\s*([A-Z0-9\-]{4,30})/gi,
+    /\b(?:UNIT\s*(?:NO\.?|NUMBER|#)|Unit\s*(?:No\.?|#)|Unit#)\s*[:\|]\s*([A-Z0-9\-]{4,30})/gi,
+    /\bFIN#?\s*[:\|]\s*([A-Z0-9\-]{4,20})/gi,
+
+    // Insurance / claim IDs
+    /\b(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#)\s*[:\|]?\s*([A-Z0-9\-]{4,30})/gi,
+
+    // Phone — labeled OR (xxx) xxx-xxxx format
+    /\b(?:PHONE|CELL|MOBILE|TEL(?:EPHONE)?)\s*[:\|]\s*([\d\(\)\-\.\s]{10,15})/gi,
+    /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
+
+    // Address — labeled OR standalone street address line (for OT orders)
+    /\b(?:HOME\s*)?ADDRESS\s*[:|]\s*(.{10,80})/gi,
+    /^\d{1,5}\s+[A-Z][A-Za-z0-9\s\.\#]{10,60}$/mg,
+
+    // Spouse / family member names — parenthetical after relational label
+    // e.g. "her spouse (Luis Mora)" or "Next of Kin: John Smith"
+    /\b(?:spouse|husband|wife|partner|next[- ]of[- ]kin|NOK|emergency[- ]contact|POA|power[- ]of[- ]attorney|caregiver|guardian)\s*[:\-]?\s*\(([A-Za-z][A-Za-z\-'\. ]{3,40})\)/gi,
+    /\b(?:spouse|husband|wife|partner|next[- ]of[- ]kin|NOK|emergency[- ]contact|POA|caregiver|guardian)\s*[:\-]\s*([A-Za-z][A-Za-z\-'\. ]{3,40})/gi,
+
+    // Email
+    /\b(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
   ];
-  for (var i = 0; i < namePatterns.length; i++) {
-    var m = extractedText.match(namePatterns[i]);
-    if (m && m[1] && m[1].trim().length > 3) {
-      var name = m[1].trim().replace(/\s+/g, ' ');
-      if (!values.includes(name)) values.push(name);
-      // Also add comma-flipped version
-      var parts = name.split(',');
-      if (parts.length === 2) {
-        var flipped = parts[1].trim() + ' ' + parts[0].trim();
-        if (!values.includes(flipped)) values.push(flipped);
+
+  for (var i = 0; i < patterns.length; i++) {
+    var pattern = patterns[i];
+    var match;
+    pattern.lastIndex = 0;
+    while ((match = pattern.exec(extractedText)) !== null) {
+      var val;
+      if (pattern.source.indexOf('(\d{3})') !== -1 && match[2]) {
+        val = ('(' + match[1] + ') ' + match[2]).trim();
+      } else {
+        val = (match[1] || '').trim();
       }
-      break;
+      if (!val || val.length < 5) continue;
+      // Skip ICD/CPT codes
+      if (/^[A-Z]\d{2}\.?\d{0,3}[A-Z]?$/.test(val)) continue;
+      // Skip pure clinical lowercase text
+      if (/^[a-z\s,\.]{15,}$/.test(val)) continue;
+      // Skip values that are just a number — too ambiguous
+      if (/^\d{1,3}$/.test(val)) continue;
+      found.add(val);
+    }
+  }
+  return Array.from(found);
+}
+
+// ── STEP 2A: Textract-coordinate-based redaction ──────────────────────────────
+// Returns piiByPage map using exact Textract bounding boxes — no LLM needed
+
+function normalizeForMatch(str) {
+  return (str || '').toLowerCase().replace(/[\s\-,\.]/g, '');
+}
+
+function findBoxesFromBlocks(wordBlocks, piiValues) {
+  // Build a map of page -> list of word blocks
+  var pageMap = {};
+  for (var i = 0; i < wordBlocks.length; i++) {
+    var b = wordBlocks[i];
+    var pg = b.p || 1;
+    if (!pageMap[pg]) pageMap[pg] = [];
+    pageMap[pg].push(b);
+  }
+
+  var result = {}; // page (0-indexed) -> array of boxes
+
+  for (var pi = 0; pi < piiValues.length; pi++) {
+    var pii = piiValues[pi];
+    var piiNorm = normalizeForMatch(pii);
+    if (piiNorm.length < 2) continue;
+
+    // Try to match pii value against concatenated word sequences on each page
+    var pageNums = Object.keys(pageMap);
+    for (var pg2i = 0; pg2i < pageNums.length; pg2i++) {
+      var pageNum = parseInt(pageNums[pg2i], 10);
+      var pageWords = pageMap[pageNum];
+      var pageIdx = pageNum - 1; // convert to 0-based
+
+      // Sliding window: try 1 to 6 consecutive words — exact match only, min 6 chars
+      for (var start = 0; start < pageWords.length; start++) {
+        for (var len = 1; len <= 6 && start + len <= pageWords.length; len++) {
+          var slice = pageWords.slice(start, start + len);
+          var concat = normalizeForMatch(slice.map(function(w) { return w.t; }).join(''));
+          if (piiNorm.length >= 6 && concat === piiNorm) {
+            // Compute bounding box that covers all words in slice
+            var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
+            var minT = Math.min.apply(null, slice.map(function(w) { return w.tp; }));
+            var maxR = Math.max.apply(null, slice.map(function(w) { return w.l + w.w; }));
+            var maxB = Math.max.apply(null, slice.map(function(w) { return w.tp + w.h; }));
+            if (!result[String(pageIdx)]) result[String(pageIdx)] = [];
+            result[String(pageIdx)].push({
+              label: 'textract:' + pii.substring(0, 30),
+              x: Math.max(0, minL - 0.005),
+              y: minT,
+              width: Math.min(1, (maxR - minL) + 0.01),
+              height: maxB - minT,
+            });
+            // Do NOT break -- continue scanning to find ALL occurrences on this page
+          }
+        }
+      }
     }
   }
 
-  // DOB
-  var dobMatch = extractedText.match(/(?:DOB|D\.O\.B\.|DATE OF BIRTH|Birth\s*Date)[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i);
-  if (dobMatch && !values.includes(dobMatch[1])) values.push(dobMatch[1]);
-
-  // MRN / Unit / Account
-  var idPatterns = [
-    /UNIT\s*#?[:\s]+([A-Z0-9]{6,})/i,
-    /ACCOUNT\s*#?[:\s]+([A-Z0-9]{6,})/i,
-    /ACCT\s*#?[:\s]+([A-Z0-9]{6,})/i,
-    /MRN\s*#?[:\s]+([A-Z0-9]{4,})/i,
-  ];
-  for (var j = 0; j < idPatterns.length; j++) {
-    var im = extractedText.match(idPatterns[j]);
-    if (im && !values.includes(im[1])) values.push(im[1]);
-  }
-
-  // Address — first street address line
-  var addrMatch = extractedText.match(/(\d{3,5}\s+[A-Z][A-Za-z0-9\s,\.#]+(?:Ave|St|Rd|Blvd|Pkwy|Hwy|Dr|Ln|Way|Ct)[^\n]*)/i);
-  if (addrMatch && !values.includes(addrMatch[1].trim())) values.push(addrMatch[1].trim());
-
-  console.log('[REDACT] Known PII values (' + values.length + '):', JSON.stringify(values));
-  return values;
+  return result;
 }
 
-// ── Claude vision on a single PDF page (sent as raw PDF bytes) ─────────────────
-// Claude accepts PDF documents natively — no rasterization needed.
-// Returns array of {label, x, y, width, height} in PDF points (origin = bottom-left).
+async function loadTextractBlocks(fileKey) {
+  try {
+    var blocksKey = fileKey.replace(/\/[^\/]+$/, '') + '/textract_blocks.json';
+    var resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: blocksKey }));
+    var chunks = [];
+    for await (var chunk of resp.Body) chunks.push(chunk);
+    return JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+  } catch (e) {
+    console.log('No textract blocks found (will use Claude vision):', e.message);
+    return null;
+  }
+}
 
-async function detectPiiOnPage(singlePagePdfBytes, pageWidth, pageHeight, knownPiiValues) {
+// ── STEP 2B: Claude vision pass — handwritten content only ───────────────────
+
+async function detectPiiInImage(pngBase64, imgW, imgH, knownPiiValues) {
   const confirmedSection = knownPiiValues && knownPiiValues.length > 0
-    ? '=== CONFIRMED PATIENT PII VALUES ===\n\nThese exact strings appear in this document. Find and box every occurrence:\n\n' +
+    ? '=== CONFIRMED PATIENT PII VALUES ===\n\n' +
+      'These exact strings appear in this document. Find and box every occurrence:\n\n' +
       knownPiiValues.map(function(v) { return '  - "' + v + '"'; }).join('\n') + '\n'
     : '';
 
   const prompt = [
     'You are a HIPAA redaction assistant for workers compensation medical records.',
-    'This PDF page is ' + Math.round(pageWidth) + ' x ' + Math.round(pageHeight) + ' points (PDF coordinate space).',
-    'PDF coordinates: origin (0,0) = BOTTOM-LEFT corner. x increases right, y increases up.',
-    'Return bounding boxes in PDF POINT coordinates.',
+    'This image is ' + imgW + ' x ' + imgH + ' pixels.',
+    'Return bounding boxes in PIXEL coordinates (origin = top-left corner of image).',
     '',
     confirmedSection,
     '=== WHAT TO REDACT ===',
     '',
-    'PATIENT NAME: Redact the name VALUE only, not the label.',
+    'PATIENT NAME:',
+    '  Redact only the NAME VALUE, not the label.',
     '  e.g. "PATIENT: MORA-MALDONADO,VILMA N" -> box covers "MORA-MALDONADO,VILMA N" only',
+    '  e.g. "PATIENT\'S NAME: [name]" -> box covers the name value only',
     '',
-    'DATE OF BIRTH: Redact the date VALUE when labeled DOB, D.O.B., DATE OF BIRTH, Birth Date.',
-    '  e.g. "DOB: 05/21/69" -> box covers "05/21/69" only',
+    'DATE OF BIRTH:',
+    '  Redact only the DATE VALUE when labeled: DOB, D.O.B., DATE OF BIRTH, Birth Date, Birthdate.',
+    '  e.g. "DOB: 05/21/69  AGE: 56" -> box covers "05/21/69" AND "56"',
+    '  e.g. "DATE OF BIRTH: 05/21/1969" -> box covers the date value only',
     '',
-    'MRN / UNIT / ACCOUNT NUMBERS: Redact the value only.',
+    'MRN / UNIT / ACCOUNT NUMBERS:',
     '  e.g. "UNIT #: D003081753" -> box covers "D003081753"',
     '  e.g. "ACCOUNT#: D00136377973" -> box covers "D00136377973"',
+    '  e.g. "Acct: D00136377973" -> box covers "D00136377973"',
+    '  e.g. "MRN#: 403522" -> box covers "403522"',
     '',
-    'ADDRESS / PHONE / SSN: Redact full street address lines, phone numbers labeled PHONE:, SSN values.',
+    'ADDRESS / PHONE / SSN:',
+    '  Redact full street address lines, phone numbers labeled PHONE:, SSN values.',
     '',
-    'COMPACT HEADER RULE: Many pages have a 4-line header: Patient / Unit# / Date / Acct#',
-    '  The "Date:" line in this block is a REPORT date. DO NOT REDACT it.',
+    'COMPACT HEADER RULE:',
+    '  Many pages have a 4-line header: Patient / Unit# / Date / Acct#',
+    '  The Date: line in this block is a REPORT date. DO NOT REDACT it.',
     '  Only redact Patient name value and Acct# value in this block.',
     '',
     'SERVICE DATE RULE - DO NOT redact dates labeled:',
     '  Date:  DATE:  ADM DT:  REP SRV DT:  SERVICE DT:  Discharge date:  Admission date:',
-    '  Any date in clinical notes, vitals tables, or medication orders.',
+    '  Any date appearing in clinical notes, vitals tables, medication orders.',
     '',
     '=== OUTPUT FORMAT ===',
     'Return a JSON array of boxes. Each box: {"label":"...","x":N,"y":N,"width":N,"height":N}',
-    'All values are numbers in PDF points. x,y = BOTTOM-LEFT corner of the box.',
-    'If nothing to redact on this page, return: []',
-    'Return ONLY valid JSON — no explanation, no markdown.',
+    'All values are INTEGERS in pixels. x,y = top-left corner of the box.',
+    'If nothing to redact on this page, return an empty array: []',
+    'Return ONLY valid JSON - no explanation, no markdown.',
   ].filter(Boolean).join('\n');
 
   const body = JSON.stringify({
@@ -157,14 +277,7 @@ async function detectPiiOnPage(singlePagePdfBytes, pageWidth, pageHeight, knownP
     messages: [{
       role: 'user',
       content: [
-        {
-          type: 'document',
-          source: {
-            type: 'base64',
-            media_type: 'application/pdf',
-            data: singlePagePdfBytes.toString('base64'),
-          },
-        },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
         { type: 'text', text: prompt },
       ],
     }],
@@ -179,100 +292,122 @@ async function detectPiiOnPage(singlePagePdfBytes, pageWidth, pageHeight, knownP
 
   const result  = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
   const rawText = (result.content && result.content[0] && result.content[0].text) || '[]';
-  // Extract JSON array from response — handles code fences and preamble text
-  let cleaned = rawText.trim();
-  cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  const firstBracket = cleaned.indexOf('[');
-  const lastBracket  = cleaned.lastIndexOf(']');
-  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
-    cleaned = cleaned.slice(firstBracket, lastBracket + 1);
-  }
+  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   try {
     const parsed = JSON.parse(cleaned);
     return Array.isArray(parsed) ? parsed : [];
   } catch (e) {
-    console.warn('detectPiiOnPage parse error:', e.message, 'raw:', rawText.slice(0, 200));
+    console.warn('detectPiiInImage parse error:', e.message, 'raw:', rawText.slice(0, 200));
     return [];
   }
 }
 
-// ── Apply redaction boxes to PDF ───────────────────────────────────────────────
-// Boxes are in PDF points with bottom-left origin — matches pdf-lib natively.
 
 async function applyRedactions(pdfBytes, piiByPage) {
   const pdfDoc = await PDFDocument.load(pdfBytes);
   const pages  = pdfDoc.getPages();
 
   for (const pageIndexStr of Object.keys(piiByPage)) {
-    const pageIndex = parseInt(pageIndexStr, 10);
-    const boxes     = piiByPage[pageIndexStr];
-    if (pageIndex >= pages.length || !boxes || !boxes.length) continue;
+    const pageIndex  = parseInt(pageIndexStr, 10);
+    const entry      = piiByPage[pageIndexStr];
+    if (pageIndex >= pages.length || !entry || !entry.boxes || !entry.boxes.length) continue;
 
-    const page = pages[pageIndex];
+    const page        = pages[pageIndex];
+    const sz          = page.getSize();
+    const pdfH        = sz.height;
+    const pdfW        = sz.width;
+    const renderScale = entry.scale;
 
-    for (const box of boxes) {
-      const x = Math.max(0, box.x);
-      const y = Math.max(0, box.y);
-      const w = box.width;
-      const h = box.height;
-      page.drawRectangle({ x, y, width: w, height: h, color: rgb(0, 0, 0), opacity: 1 });
+    for (const box of entry.boxes) {
+      const pdfX  = box.x / renderScale;
+      const pdfY  = pdfH - (box.y + box.height) / renderScale;
+      const pdfBW = box.width  / renderScale;
+      const pdfBH = box.height / renderScale;
+      page.drawRectangle({
+        x:      Math.max(0, pdfX),
+        y:      Math.max(0, pdfY),
+        width:  Math.min(pdfW - Math.max(0, pdfX), pdfBW),
+        height: Math.min(pdfH, pdfBH),
+        color:   rgb(0, 0, 0),
+        opacity: 1,
+      });
     }
   }
 
   return Buffer.from(await pdfDoc.save({ useObjectStreams: false }));
 }
 
-// ── START handler ──────────────────────────────────────────────────────────────
+// ── Merge two piiByPage maps ──────────────────────────────────────────────────
 
-async function _redactDocumentStart(event) {
-  try {
-    const body          = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
-    const aws_document_id = event.pathParameters && event.pathParameters.aws_document_id;
-    const org_id        = body.org_id || (event.requestContext && event.requestContext.authorizer && event.requestContext.authorizer.org_id);
-
-    if (!aws_document_id) return { statusCode: 400, headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Missing aws_document_id' }) };
-
-    // Load document record
-    const docResp = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id } }));
-    const doc     = docResp.Item;
-    if (!doc) return { statusCode: 404, headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Document not found' }) };
-
-    const job_id = randomUUID();
-    await dynamo.send(new PutCommand({
-      TableName: JOBS_TABLE,
-      Item: {
-        job_id,
-        type:             'redact',
-        aws_document_id,
-        org_id:           org_id || doc.org_id,
-        status:           'processing',
-        progress_message: 'Starting redaction...',
-        created_at:       new Date().toISOString(),
-        updated_at:       new Date().toISOString(),
-      },
-    }));
-
-    // Fire worker async
-    await lambdaClient.send(new InvokeCommand({
-      FunctionName:   WORKER_FN,
-      InvocationType: 'Event',
-      Payload:        Buffer.from(JSON.stringify({ job_id, doc_id: aws_document_id, doc })),
-    }));
-
-    return {
-      statusCode: 200,
-      headers: { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_id, status: 'processing' }),
-    };
-  } catch (err) {
-    console.error('redactDocumentStart error:', err);
-    return { statusCode: 500, headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: err.message }) };
-  }
+function mergePiiMaps(a, b) {
+  var out = {};
+  var keys = new Set(Object.keys(a).concat(Object.keys(b)));
+  keys.forEach(function(k) {
+    out[k] = (a[k] || []).concat(b[k] || []);
+  });
+  return out;
 }
+
+// ── Fetch extracted_text from DynamoDB ────────────────────────────────────────
+
+async function fetchExtractedText(doc_id) {
+  const docRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
+  const doc    = docRes.Item || {};
+  let text     = doc.extracted_text || '';
+  try {
+    if (doc.original_document_id) {
+      const parentRes = await dynamo.send(new GetCommand({
+        TableName: DOCS_TABLE,
+        Key: { aws_document_id: doc.original_document_id },
+      }));
+      if (parentRes.Item && parentRes.Item.extracted_text) {
+        text = parentRes.Item.extracted_text + '\n' + text;
+      }
+    }
+  } catch (e) {
+    console.warn('Could not fetch parent doc:', e.message);
+  }
+  return text;
+}
+
+// ── START handler ─────────────────────────────────────────────────────────────
+
+const _redactDocumentStart = async function(event) {
+  const doc_id = event.pathParameters && event.pathParameters.aws_document_id;
+  if (!doc_id) return respond(400, { error: 'Missing document ID' });
+
+  const docRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
+  const doc    = docRes.Item;
+  if (!doc) return respond(404, { error: 'Document not found' });
+
+  const fileKey = doc.file_key || doc.s3_key;
+  if (!fileKey) return respond(400, { error: 'Document has no S3 key' });
+
+  const job_id = randomUUID();
+  const now    = new Date().toISOString();
+
+  await dynamo.send(new PutCommand({
+    TableName: JOBS_TABLE,
+    Item: {
+      job_id, type: 'redact', status: 'processing',
+      doc_id, org_id: doc.org_id || null,
+      created_at: now, updated_at: now,
+      progress_message: 'Starting redaction...',
+    },
+  }));
+
+  await lambdaClient.send(new InvokeCommand({
+    FunctionName:   WORKER_FN,
+    InvocationType: 'Event',
+    Payload:        Buffer.from(JSON.stringify({ job_id, doc_id, doc })),
+  }));
+
+  return respond(200, { job_id, status: 'processing' });
+};
 
 module.exports.redactDocumentStart = validateApiKey(_redactDocumentStart);
 
-// ── WORKER handler ─────────────────────────────────────────────────────────────
+// ── WORKER handler ────────────────────────────────────────────────────────────
 
 module.exports.redactDocumentWorker = async function(event) {
   const job_id = event.job_id;
@@ -287,12 +422,19 @@ module.exports.redactDocumentWorker = async function(event) {
 
     // Extract known PII values from stored Textract text to anchor Claude's redaction
     const extractedText  = await fetchExtractedText(doc_id);
+    console.log('[REDACT] extractedText length:', extractedText ? extractedText.length : 'NULL', 'doc_id:', doc_id);
+    console.log('[REDACT] extractedText sample:', extractedText ? extractedText.slice(0, 300) : 'EMPTY');
     const knownPiiValues = extractKnownPiiValues(extractedText);
+    console.log('[REDACT] knownPiiValues (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues));
 
-    // Load PDF and split into single-page PDFs for Claude
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
-    const piiByPage  = {};
+    const CHUNK_SIZE = 20;
+    const allPii     = {};
+
+    const RENDER_DPI   = 150;
+    const RENDER_SCALE = RENDER_DPI / 72;
+    const pdfJsDoc = await pdfjsLib.getDocument({ data: new Uint8Array(pdfBytes) }).promise;
 
     for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
       if (pageIdx % 5 === 0) {
@@ -301,35 +443,40 @@ module.exports.redactDocumentWorker = async function(event) {
           updated_at: new Date().toISOString(),
         });
       }
+      const pdfJsPage  = await pdfJsDoc.getPage(pageIdx + 1);
+      const viewport   = pdfJsPage.getViewport({ scale: RENDER_SCALE });
+      const imgW       = Math.round(viewport.width);
+      const imgH       = Math.round(viewport.height);
 
-      // Extract this single page as its own PDF
-      const singleDoc = await PDFDocument.create();
-      const [copiedPage] = await singleDoc.copyPages(masterDoc, [pageIdx]);
-      singleDoc.addPage(copiedPage);
-      const singlePageBytes = Buffer.from(await singleDoc.save());
+      // Render PDF page to SVG via pdfjs (pure JS, no native binaries)
+      const dom        = new JSDOM('<!DOCTYPE html><html><body></body></html>');
+      global.document  = dom.window.document;
+      const opList     = await pdfJsPage.getOperatorList();
+      const svgGfx     = new pdfjsLib.SVGGraphics(pdfJsPage.commonObjs, pdfJsPage.objs);
+      const svgEl      = await svgGfx.getSVG(opList, viewport);
+      const serializer = new dom.window.XMLSerializer();
+      const svgStr     = serializer.serializeToString(svgEl);
 
-      // Get page dimensions (PDF points)
-      const page       = masterDoc.getPages()[pageIdx];
-      const { width, height } = page.getSize();
+      // Convert SVG to PNG via sharp (prebuilt binary, no node-gyp)
+      const pngBuffer  = await sharp(Buffer.from(svgStr)).resize(imgW, imgH).png().toBuffer();
+      const pngBase64  = pngBuffer.toString('base64');
 
-      // Send raw PDF page to Claude — no rasterization needed
-      const boxes = await detectPiiOnPage(singlePageBytes, width, height, knownPiiValues);
-      console.log('[REDACT] page ' + pageIdx + ' (' + Math.round(width) + 'x' + Math.round(height) + ' pts) boxes:', boxes.length, boxes.length ? JSON.stringify(boxes) : '');
-
+      const boxes = await detectPiiInImage(pngBase64, imgW, imgH, knownPiiValues);
+      console.log('[REDACT] page ' + pageIdx + ' boxes:', boxes ? boxes.length : 0, boxes && boxes.length ? JSON.stringify(boxes) : '');
       if (boxes && boxes.length) {
-        piiByPage[String(pageIdx)] = boxes;
+        allPii[String(pageIdx)] = { boxes, imgW, imgH, scale: RENDER_SCALE };
       }
     }
 
-    const totalRedactions    = Object.values(piiByPage).reduce(function(s, b) { return s + b.length; }, 0);
-    const totalPagesAffected = Object.keys(piiByPage).length;
+    const totalRedactions    = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
+    const totalPagesAffected = Object.keys(allPii).length;
 
     await updateJob(job_id, {
       progress_message: 'Applying ' + totalRedactions + ' redaction(s) across ' + totalPagesAffected + ' page(s)...',
       updated_at: new Date().toISOString(),
     });
 
-    const redactedBytes = await applyRedactions(pdfBytes, piiByPage);
+    const redactedBytes = await applyRedactions(pdfBytes, allPii);
 
     const keyParts     = fileKey.split('/');
     const origFilename = keyParts.pop();
@@ -346,41 +493,53 @@ module.exports.redactDocumentWorker = async function(event) {
       ContentType: 'application/pdf',
     }));
 
-    // Update DynamoDB document record with redacted file info
-    await dynamo.send(new UpdateCommand({
+    const newDocId = randomUUID();
+    await dynamo.send(new PutCommand({
       TableName: DOCS_TABLE,
-      Key: { aws_document_id: doc_id },
-      UpdateExpression: 'SET redacted_file_key = :rk, redacted_filename = :rf, has_redacted_version = :t, updated_at = :ua',
-      ExpressionAttributeValues: {
-        ':rk': redactedKey,
-        ':rf': redactedName,
-        ':t':  true,
-        ':ua': new Date().toISOString(),
+      Item: {
+        aws_document_id:   newDocId,
+        org_id:            doc.org_id            || null,
+        patient_id:        doc.patient_id         || null,
+        folder_name:       doc.folder_name        || null,
+        provider_name:     doc.provider_name      || null,
+        original_filename: redactedName,
+        file_key:          redactedKey,
+        s3_key:            redactedKey,
+        is_redacted:       true,
+        redacted_from:     doc_id,
+        redaction_count:   totalRedactions,
+        redacted_pages:    totalPagesAffected,
+        status:            'processed',
+        is_clinical:       doc.is_clinical        || false,
+        created_at:        new Date().toISOString(),
+        updated_at:        new Date().toISOString(),
       },
     }));
 
+    const downloadUrl = await getSignedUrl(
+      s3,
+      new GetObjectCommand({ Bucket: BUCKET, Key: redactedKey }),
+      { expiresIn: 3600 }
+    );
+
     await updateJob(job_id, {
       status:           'complete',
-      progress_message: 'Redaction complete. ' + totalRedactions + ' item(s) redacted across ' + totalPagesAffected + ' page(s).',
-      redacted_file_key: redactedKey,
-      redacted_filename: redactedName,
+      progress_message: 'Redaction complete - ' + totalRedactions + ' item(s) redacted across ' + totalPagesAffected + ' page(s).',
       result: {
+        new_doc_id:      newDocId,
+        download_url:    downloadUrl,
         redaction_count: totalRedactions,
         redacted_pages:  totalPagesAffected,
-        download_url:    redactedKey,
       },
-      completed_at:     new Date().toISOString(),
-      updated_at:       new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     });
 
-    console.log('[REDACT] Complete — job:', job_id, 'pages affected:', totalPagesAffected, 'total boxes:', totalRedactions);
-
   } catch (err) {
-    console.error('[REDACT] Worker error:', err);
+    console.error('Redaction worker error:', err);
     await updateJob(job_id, {
       status:           'error',
       progress_message: 'Redaction failed: ' + err.message,
       updated_at:       new Date().toISOString(),
-    }).catch(function() {});
+    });
   }
 };
