@@ -152,7 +152,7 @@ async function detectPiiOnPage(singlePagePdfBytes, pageWidth, pageHeight, knownP
 
   const body = JSON.stringify({
     anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 4096,
+    max_tokens: 8192,
     temperature: 0,
     messages: [{
       role: 'user',
@@ -369,6 +369,11 @@ module.exports.redactDocumentWorker = async function(event) {
       progress_message: 'Redaction complete. ' + totalRedactions + ' item(s) redacted across ' + totalPagesAffected + ' page(s).',
       redacted_file_key: redactedKey,
       redacted_filename: redactedName,
+      result: {
+        redaction_count:  totalRedactions,
+        redacted_pages:   totalPagesAffected,
+        download_url:     redactedKey,
+      },
       completed_at:     new Date().toISOString(),
       updated_at:       new Date().toISOString(),
     });
