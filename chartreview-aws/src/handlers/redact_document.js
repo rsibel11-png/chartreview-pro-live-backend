@@ -294,7 +294,7 @@ module.exports.redactDocumentWorker = async function(event) {
     const totalPages = masterDoc.getPageCount();
     const piiByPage  = {};
 
-    const BATCH_SIZE = 10;
+    const BATCH_SIZE = 3;
     for (let batchStart = 0; batchStart < totalPages; batchStart += BATCH_SIZE) {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, totalPages);
       await updateJob(job_id, {
