@@ -448,31 +448,40 @@ module.exports.redactDocumentWorker = async function(event) {
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
-    const CHUNK_SIZE = 20;
+    const PAGE_CONCURRENCY = 10;
     const allPii     = {};
 
-    for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
-      const end     = Math.min(start + CHUNK_SIZE, totalPages);
-      const indices = [];
-      for (let i = start; i < end; i++) indices.push(i);
+    await updateJob(job_id, {
+      progress_message: 'Scanning ' + totalPages + ' pages (per-page mode)...',
+      updated_at: new Date().toISOString(),
+    });
+
+    // Process pages in batches of PAGE_CONCURRENCY — each page sent individually
+    // so Claude always has a single-page coordinate frame (0,0 top-left to 1,1 bottom-right)
+    for (let batchStart = 0; batchStart < totalPages; batchStart += PAGE_CONCURRENCY) {
+      const batchEnd     = Math.min(batchStart + PAGE_CONCURRENCY, totalPages);
+      const batchIndices = [];
+      for (let i = batchStart; i < batchEnd; i++) batchIndices.push(i);
 
       await updateJob(job_id, {
-        progress_message: 'Scanning pages ' + (start + 1) + ' to ' + end + ' of ' + totalPages + '...',
+        progress_message: 'Scanning pages ' + (batchStart + 1) + ' to ' + batchEnd + ' of ' + totalPages + '...',
         updated_at: new Date().toISOString(),
       });
 
-      const subDoc = await PDFDocument.create();
-      const copied = await subDoc.copyPages(masterDoc, indices);
-      copied.forEach(function(p) { subDoc.addPage(p); });
-      const subBytes = Buffer.from(await subDoc.save());
+      await Promise.all(batchIndices.map(async function(globalPageIdx) {
+        // Extract single page as its own PDF
+        const singleDoc = await PDFDocument.create();
+        const [copiedPage] = await singleDoc.copyPages(masterDoc, [globalPageIdx]);
+        singleDoc.addPage(copiedPage);
+        const singleBytes = Buffer.from(await singleDoc.save());
 
-      const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
-
-      for (const chunkPageStr of Object.keys(chunkPii)) {
-        const globalPage = start + parseInt(chunkPageStr, 10);
-        const boxes      = chunkPii[chunkPageStr];
-        if (boxes && boxes.length) allPii[String(globalPage)] = boxes;
-      }
+        // Claude always sees page "0" — map result back to global index
+        const pagePii = await detectHandwrittenPii(singleBytes, knownPiiValues);
+        const boxes   = pagePii['0'];
+        if (boxes && boxes.length) {
+          allPii[String(globalPageIdx)] = boxes;
+        }
+      }));
     }
 
     const totalRedactions    = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
