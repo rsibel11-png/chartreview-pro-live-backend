@@ -1,31 +1,27 @@
-// redact_document.js — ChartReview Pro redaction Lambda
-// Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-05-25 — Claude vision on raw PDF bytes (no rasterization)
-
 'use strict';
 
 const { S3Client, GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl }                                  = require('@aws-sdk/s3-request-presigner');
 const { DynamoDBClient }                               = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { BedrockRuntimeClient, InvokeModelCommand }     = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand }                  = require('@aws-sdk/client-lambda');
 const { PDFDocument, rgb }                             = require('pdf-lib');
-const { randomUUID }                                   = require('crypto');
-const { validateApiKey }                               = require('./auth');
+const { validateApiKey }                               = require('../middleware/auth');
 
-const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
-const dynamo       = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
-const bedrock      = new BedrockRuntimeClient({ region: 'us-east-1' });
-const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
+const REGION      = process.env.AWS_REGION    || 'us-east-1';
+const BUCKET      = process.env.S3_BUCKET     || 'chartreview-documents-prod';
+const DOCS_TABLE  = process.env.DOCS_TABLE    || 'chartreview-documents-prod';
+const JOBS_TABLE  = process.env.JOBS_TABLE    || 'chartreview-jobs-prod';
+const MODEL_ID    = process.env.MODEL_ID      || 'us.anthropic.claude-sonnet-4-6';
+const CHUNK_FN    = process.env.REDACT_CHUNK_FUNCTION || 'chartreview-pro-prod-redactDocumentChunkWorker';
+const PAGES_PER_CHUNK = 20;
 
-const BUCKET     = process.env.S3_BUCKET       || 'chartreview-documents-prod';
-const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
-const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
-const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
-const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
+const s3      = new S3Client({ region: REGION });
+const dynamo  = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
+const bedrock = new BedrockRuntimeClient({ region: REGION });
+const lambda  = new LambdaClient({ region: REGION });
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────────────
 
 async function getS3Bytes(key) {
   const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
@@ -35,120 +31,94 @@ async function getS3Bytes(key) {
 }
 
 async function updateJob(job_id, patch) {
+  const sets  = Object.keys(patch).map(function(k, i) { return '#f' + i + ' = :v' + i; });
+  const names = {};
+  const vals  = {};
+  Object.keys(patch).forEach(function(k, i) { names['#f' + i] = k; vals[':v' + i] = patch[k]; });
   await dynamo.send(new UpdateCommand({
     TableName: JOBS_TABLE,
     Key: { job_id },
-    UpdateExpression: 'SET ' + Object.keys(patch).map((k, i) => '#k' + i + ' = :v' + i).join(', '),
-    ExpressionAttributeNames:  Object.fromEntries(Object.keys(patch).map((k, i) => ['#k' + i, k])),
-    ExpressionAttributeValues: Object.fromEntries(Object.keys(patch).map((k, i) => [':v' + i, patch[k]])),
+    UpdateExpression: 'SET ' + sets.join(', '),
+    ExpressionAttributeNames: names,
+    ExpressionAttributeValues: vals,
   }));
 }
 
 async function fetchExtractedText(doc_id) {
   try {
-    const resp = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
-    return (resp.Item && resp.Item.extracted_text) ? resp.Item.extracted_text : '';
+    const key  = 'orgs/' + doc_id.split('/')[1] + '/documents/' + doc_id + '/textract_blocks.json';
+    const data = await getS3Bytes(key);
+    const blocks = JSON.parse(data.toString('utf8'));
+    return blocks.filter(function(b) { return b.BlockType === 'LINE'; }).map(function(b) { return b.Text || ''; }).join('\n');
   } catch (e) {
-    console.warn('fetchExtractedText error:', e.message);
-    return '';
+    try {
+      const docResp = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
+      return (docResp.Item && docResp.Item.extracted_text) || '';
+    } catch (e2) { return ''; }
   }
 }
 
-function extractKnownPiiValues(extractedText) {
-  if (!extractedText) return [];
-  const values = [];
+function extractKnownPiiValues(text) {
+  if (!text) return [];
+  const values = new Set();
 
-  // Patient name — various label formats
-  var namePatterns = [
-    /PATIENT[:\s]+([A-Z][A-Z\-,\.\s']+(?:N|M|F)?)\s*$/im,
-    /PATIENT'?S?\s*NAME[:\s]+([A-Z][A-Z\-,\.\s']+)/im,
-    /Patient:\s*([A-Z][A-Z\-,\.\s']+)/im,
-    /^([A-Z][A-Z\-]+,\s*[A-Z][A-Z\s]+)\s+(?:DOB|MRN|UNIT)/im,
+  const nameMatch = text.match(/(?:Patient(?:'s)?\s+Name|PATIENT\s+NAME|Name)[:\s]+([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){1,4})/);
+  if (nameMatch) { values.add(nameMatch[1].trim()); }
+
+  const nameMatch2 = text.match(/^([A-Z]{2,}[A-Z\-]+,\s*[A-Z]{2,}(?:\s+[A-Z])?)\s*$/m);
+  if (nameMatch2) { values.add(nameMatch2[1].trim()); }
+
+  const nameMatch3 = text.match(/(?:RE:|Patient:)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s+)?[A-Z][a-z\-]+(?:\s+[A-Z][a-z\-]+)?)/);
+  if (nameMatch3) { values.add(nameMatch3[1].trim()); }
+
+  const dobPatterns = [
+    /(?:DOB|Date\s+of\s+Birth|Birth\s+Date|BIRTH\s+DATE)[:\s]+(\d{1,2}\/\d{1,2}\/\d{2,4})/i,
+    /(?:DOB|Date\s+of\s+Birth)[:\s]+(\d{2}\/\d{2}\/\d{2})/i,
   ];
-  for (var i = 0; i < namePatterns.length; i++) {
-    var m = extractedText.match(namePatterns[i]);
-    if (m && m[1] && m[1].trim().length > 3) {
-      var name = m[1].trim().replace(/\s+/g, ' ');
-      if (!values.includes(name)) values.push(name);
-      // Also add comma-flipped version
-      var parts = name.split(',');
-      if (parts.length === 2) {
-        var flipped = parts[1].trim() + ' ' + parts[0].trim();
-        if (!values.includes(flipped)) values.push(flipped);
-      }
-      break;
-    }
+  for (const pat of dobPatterns) {
+    const m = text.match(pat);
+    if (m) { values.add(m[1].trim()); break; }
   }
 
-  // DOB
-  var dobMatch = extractedText.match(/(?:DOB|D\.O\.B\.|DATE OF BIRTH|Birth\s*Date)[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i);
-  if (dobMatch && !values.includes(dobMatch[1])) values.push(dobMatch[1]);
-
-  // MRN / Unit / Account
-  var idPatterns = [
-    /UNIT\s*#?[:\s]+([A-Z0-9]{6,})/i,
-    /ACCOUNT\s*#?[:\s]+([A-Z0-9]{6,})/i,
-    /ACCT\s*#?[:\s]+([A-Z0-9]{6,})/i,
-    /MRN\s*#?[:\s]+([A-Z0-9]{4,})/i,
+  const mrnPatterns = [
+    /(?:MRN|MR#|MRN#|Medical\s+Record)[:\s#]+([A-Z0-9]{4,12})/i,
+    /(?:Unit\s*(?:No|Number|#)|UNIT\s*(?:NO|NUMBER|#))[:\s]+([A-Z0-9]{4,12})/i,
+    /(?:Account\s*(?:No|Number|#)|ACCT\s*(?:NO|#))[:\s]+([A-Z0-9]{6,14})/i,
   ];
-  for (var j = 0; j < idPatterns.length; j++) {
-    var im = extractedText.match(idPatterns[j]);
-    if (im && !values.includes(im[1])) values.push(im[1]);
+  for (const pat of mrnPatterns) {
+    const m = text.match(pat);
+    if (m) values.add(m[1].trim());
   }
 
-  // Address — first street address line
-  var addrMatch = extractedText.match(/(\d{3,5}\s+[A-Z][A-Za-z0-9\s,\.#]+(?:Ave|St|Rd|Blvd|Pkwy|Hwy|Dr|Ln|Way|Ct)[^\n]*)/i);
-  if (addrMatch && !values.includes(addrMatch[1].trim())) values.push(addrMatch[1].trim());
+  const claimPatterns = [
+    /(?:Claim\s*(?:No|Number|#)|CLAIM)[:\s]+([A-Z0-9\-]{5,20})/i,
+    /(?:Insurance\s*(?:ID|Number)|Policy\s*(?:No|Number))[:\s]+([A-Z0-9\-]{5,20})/i,
+  ];
+  for (const pat of claimPatterns) {
+    const m = text.match(pat);
+    if (m) values.add(m[1].trim());
+  }
 
-  console.log('[REDACT] Known PII values (' + values.length + '):', JSON.stringify(values));
-  return values;
+  return Array.from(values).filter(function(v) { return v && v.length > 2; });
 }
 
-// ── Claude vision on a single PDF page (sent as raw PDF bytes) ─────────────────
-// Claude accepts PDF documents natively — no rasterization needed.
-// Returns array of {label, x, y, width, height} in PDF points (origin = bottom-left).
+// ── Claude PII detection for a single page ──────────────────────────────────
 
 async function detectPiiOnPage(singlePagePdfBytes, pageWidth, pageHeight, knownPiiValues) {
-  const confirmedSection = knownPiiValues && knownPiiValues.length > 0
-    ? '=== CONFIRMED PATIENT PII VALUES ===\n\nThese exact strings appear in this document. Find and box every occurrence:\n\n' +
-      knownPiiValues.map(function(v) { return '  - "' + v + '"'; }).join('\n') + '\n'
-    : '';
+  const piiList  = knownPiiValues.length
+    ? 'Confirmed PII values to find:\n' + knownPiiValues.map(function(v) { return '- "' + v + '"'; }).join('\n')
+    : 'No confirmed PII values provided — use visual judgment.';
 
-  const prompt = [
-    'You are a HIPAA redaction assistant for workers compensation medical records.',
-    'This PDF page is ' + Math.round(pageWidth) + ' x ' + Math.round(pageHeight) + ' points (PDF coordinate space).',
-    'PDF coordinates: origin (0,0) = BOTTOM-LEFT corner. x increases right, y increases up.',
-    'Return bounding boxes in PDF POINT coordinates.',
-    '',
-    confirmedSection,
-    '=== WHAT TO REDACT ===',
-    '',
-    'PATIENT NAME: Redact the name VALUE only, not the label.',
-    '  e.g. "PATIENT: MORA-MALDONADO,VILMA N" -> box covers "MORA-MALDONADO,VILMA N" only',
-    '',
-    'DATE OF BIRTH: Redact the date VALUE when labeled DOB, D.O.B., DATE OF BIRTH, Birth Date.',
-    '  e.g. "DOB: 05/21/69" -> box covers "05/21/69" only',
-    '',
-    'MRN / UNIT / ACCOUNT NUMBERS: Redact the value only.',
-    '  e.g. "UNIT #: D003081753" -> box covers "D003081753"',
-    '  e.g. "ACCOUNT#: D00136377973" -> box covers "D00136377973"',
-    '',
-    'ADDRESS / PHONE / SSN: Redact full street address lines, phone numbers labeled PHONE:, SSN values.',
-    '',
-    'COMPACT HEADER RULE: Many pages have a 4-line header: Patient / Unit# / Date / Acct#',
-    '  The "Date:" line in this block is a REPORT date. DO NOT REDACT it.',
-    '  Only redact Patient name value and Acct# value in this block.',
-    '',
-    'SERVICE DATE RULE - DO NOT redact dates labeled:',
-    '  Date:  DATE:  ADM DT:  REP SRV DT:  SERVICE DT:  Discharge date:  Admission date:',
-    '  Any date in clinical notes, vitals tables, or medication orders.',
-    '',
-    '=== OUTPUT FORMAT ===',
-    'Return a JSON array of boxes. Each box: {"label":"...","x":N,"y":N,"width":N,"height":N}',
-    'All values are numbers in PDF points. x,y = BOTTOM-LEFT corner of the box.',
-    'If nothing to redact on this page, return: []',
-    'Return ONLY valid JSON — no explanation, no markdown.',
-  ].filter(Boolean).join('\n');
+  const prompt = 'You are a HIPAA compliance redaction assistant.\n\n' +
+    piiList + '\n\n' +
+    'This PDF page is ' + Math.round(pageWidth) + ' x ' + Math.round(pageHeight) + ' points.\n' +
+    'PDF coordinate origin is BOTTOM-LEFT. Y=0 is the bottom edge, Y=' + Math.round(pageHeight) + ' is the top.\n\n' +
+    'Find ALL occurrences of patient PII: name, DOB, SSN, MRN, unit#, account#, address, phone, insurance ID, claim#.\n' +
+    'Redact VALUE fields only — not labels like "Patient Name:" or "DOB:".\n' +
+    'DO NOT redact: provider names, facility names, service dates, diagnosis codes, clinical content.\n\n' +
+    'Return ONLY a JSON array (no preamble, no explanation, no markdown):\n' +
+    '[{"label":"description","x":number,"y":number,"width":number,"height":number},...]\n' +
+    'Coordinates are in PDF points (bottom-left origin). Return [] if no PII found.';
 
   const body = JSON.stringify({
     anthropic_version: 'bedrock-2023-05-31',
@@ -156,30 +126,20 @@ async function detectPiiOnPage(singlePagePdfBytes, pageWidth, pageHeight, knownP
     temperature: 0,
     messages: [{
       role: 'user',
-      content: [
-        {
-          type: 'document',
-          source: {
-            type: 'base64',
-            media_type: 'application/pdf',
-            data: singlePagePdfBytes.toString('base64'),
-          },
-        },
-        { type: 'text', text: prompt },
-      ],
+      content: [{
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data: singlePagePdfBytes.toString('base64') },
+      }, {
+        type: 'text',
+        text: prompt,
+      }],
     }],
   });
 
-  const resp = await bedrock.send(new InvokeModelCommand({
-    modelId: MODEL_ID,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body,
-  }));
+  const resp    = await bedrock.send(new InvokeModelCommand({ modelId: MODEL_ID, contentType: 'application/json', accept: 'application/json', body }));
+  const rawText = JSON.parse(Buffer.from(resp.body).toString('utf8')).content[0].text;
 
-  const result  = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
-  const rawText = (result.content && result.content[0] && result.content[0].text) || '[]';
-  // Extract JSON array from response — handles code fences and preamble text
+  // Extract JSON array — handles code fences and reasoning preambles
   let cleaned = rawText.trim();
   cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   const firstBracket = cleaned.indexOf('[');
@@ -196,8 +156,7 @@ async function detectPiiOnPage(singlePagePdfBytes, pageWidth, pageHeight, knownP
   }
 }
 
-// ── Apply redaction boxes to PDF ───────────────────────────────────────────────
-// Boxes are in PDF points with bottom-left origin — matches pdf-lib natively.
+// ── Apply redaction boxes to PDF ─────────────────────────────────────────────
 
 async function applyRedactions(pdfBytes, piiByPage) {
   const pdfDoc = await PDFDocument.load(pdfBytes);
@@ -213,48 +172,44 @@ async function applyRedactions(pdfBytes, piiByPage) {
     for (const box of boxes) {
       const x = Math.max(0, box.x);
       const y = Math.max(0, box.y);
-      const w = box.width;
-      const h = box.height;
-      page.drawRectangle({ x, y, width: w, height: h, color: rgb(0, 0, 0), opacity: 1 });
+      const w = Math.min(box.width,  page.getWidth()  - x);
+      const h = Math.min(box.height, page.getHeight() - y);
+      if (w <= 0 || h <= 0) continue;
+      page.drawRectangle({ x, y, width: w, height: h, color: rgb(0, 0, 0) });
     }
   }
-
-  return Buffer.from(await pdfDoc.save({ useObjectStreams: false }));
+  return Buffer.from(await pdfDoc.save());
 }
 
-// ── START handler ──────────────────────────────────────────────────────────────
+// ── START handler ────────────────────────────────────────────────────────────
 
 async function _redactDocumentStart(event) {
   try {
-    const body          = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
+    const body            = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
     const aws_document_id = event.pathParameters && event.pathParameters.aws_document_id;
-    const org_id        = body.org_id || (event.requestContext && event.requestContext.authorizer && event.requestContext.authorizer.org_id);
+    const org_id          = body.org_id || (event.requestContext && event.requestContext.authorizer && event.requestContext.authorizer.org_id);
 
     if (!aws_document_id) return { statusCode: 400, headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Missing aws_document_id' }) };
 
-    // Load document record
     const docResp = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id } }));
     const doc     = docResp.Item;
     if (!doc) return { statusCode: 404, headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: 'Document not found' }) };
 
-    const job_id = randomUUID();
-    await dynamo.send(new PutCommand({
-      TableName: JOBS_TABLE,
-      Item: {
-        job_id,
-        type:             'redact',
-        aws_document_id,
-        org_id:           org_id || doc.org_id,
-        status:           'processing',
-        progress_message: 'Starting redaction...',
-        created_at:       new Date().toISOString(),
-        updated_at:       new Date().toISOString(),
-      },
-    }));
+    const job_id = require('crypto').randomUUID();
+    await updateJob(job_id, {
+      job_id,
+      status:           'processing',
+      job_type:         'redact',
+      org_id:           org_id || doc.org_id,
+      doc_id:           aws_document_id,
+      progress_message: 'Starting redaction...',
+      created_at:       new Date().toISOString(),
+      updated_at:       new Date().toISOString(),
+    });
 
-    // Fire worker async
-    await lambdaClient.send(new InvokeCommand({
-      FunctionName:   WORKER_FN,
+    // Fire the coordinator worker asynchronously
+    await lambda.send(new InvokeCommand({
+      FunctionName:   CHUNK_FN.replace('ChunkWorker', 'Worker'),
       InvocationType: 'Event',
       Payload:        Buffer.from(JSON.stringify({ job_id, doc_id: aws_document_id, doc })),
     }));
@@ -262,17 +217,17 @@ async function _redactDocumentStart(event) {
     return {
       statusCode: 200,
       headers: { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_id, status: 'processing' }),
+      body: JSON.stringify({ job_id }),
     };
   } catch (err) {
-    console.error('redactDocumentStart error:', err);
+    console.error('[REDACT] Start error:', err);
     return { statusCode: 500, headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify({ error: err.message }) };
   }
 }
 
 module.exports.redactDocumentStart = validateApiKey(_redactDocumentStart);
 
-// ── WORKER handler ─────────────────────────────────────────────────────────────
+// ── COORDINATOR WORKER — fires chunk workers in parallel, merges, applies ────
 
 module.exports.redactDocumentWorker = async function(event) {
   const job_id = event.job_id;
@@ -282,47 +237,46 @@ module.exports.redactDocumentWorker = async function(event) {
   try {
     await updateJob(job_id, { progress_message: 'Fetching document...', updated_at: new Date().toISOString() });
 
-    const fileKey  = doc.file_key || doc.s3_key;
-    const pdfBytes = await getS3Bytes(fileKey);
-
-    // Extract known PII values from stored Textract text to anchor Claude's redaction
+    const fileKey        = doc.file_key || doc.s3_key;
+    const pdfBytes       = await getS3Bytes(fileKey);
     const extractedText  = await fetchExtractedText(doc_id);
     const knownPiiValues = extractKnownPiiValues(extractedText);
 
-    // Load PDF and split into single-page PDFs for Claude
-    const masterDoc  = await PDFDocument.load(pdfBytes);
-    const totalPages = masterDoc.getPageCount();
-    const piiByPage  = {};
+    console.log('[REDACT] Known PII values (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues));
 
-    const BATCH_SIZE = 3;
-    for (let batchStart = 0; batchStart < totalPages; batchStart += BATCH_SIZE) {
-      const batchEnd = Math.min(batchStart + BATCH_SIZE, totalPages);
-      await updateJob(job_id, {
-        progress_message: 'Scanning pages ' + (batchStart + 1) + '-' + batchEnd + ' of ' + totalPages + '...',
-        updated_at: new Date().toISOString(),
-      });
+    const masterDoc   = await PDFDocument.load(pdfBytes);
+    const totalPages  = masterDoc.getPageCount();
+    const numChunks   = Math.ceil(totalPages / PAGES_PER_CHUNK);
 
-      // Build all single-page PDFs for this batch
-      const batchIndices = [];
-      for (let i = batchStart; i < batchEnd; i++) batchIndices.push(i);
+    await updateJob(job_id, {
+      progress_message: 'Scanning ' + totalPages + ' pages in ' + numChunks + ' parallel chunk(s)...',
+      updated_at: new Date().toISOString(),
+    });
 
-      const batchPromises = batchIndices.map(async function(pageIdx) {
-        const singleDoc = await PDFDocument.create();
-        const [copiedPage] = await singleDoc.copyPages(masterDoc, [pageIdx]);
-        singleDoc.addPage(copiedPage);
-        const singlePageBytes = Buffer.from(await singleDoc.save());
-        const page = masterDoc.getPages()[pageIdx];
-        const { width, height } = page.getSize();
-        const boxes = await detectPiiOnPage(singlePageBytes, width, height, knownPiiValues);
-        console.log('[REDACT] page ' + pageIdx + ' (' + Math.round(width) + 'x' + Math.round(height) + ' pts) boxes:', boxes.length, boxes.length ? JSON.stringify(boxes) : '');
-        return { pageIdx, boxes };
-      });
+    // Fire all chunk workers in parallel
+    const chunkResults = await Promise.all(
+      Array.from({ length: numChunks }, function(_, ci) {
+        const startPage = ci * PAGES_PER_CHUNK;
+        const endPage   = Math.min(startPage + PAGES_PER_CHUNK, totalPages);
+        return lambda.send(new InvokeCommand({
+          FunctionName:   CHUNK_FN,
+          InvocationType: 'RequestResponse',
+          Payload:        Buffer.from(JSON.stringify({
+            job_id, doc_id, fileKey, startPage, endPage, totalPages, knownPiiValues, chunkIndex: ci,
+          })),
+        })).then(function(res) {
+          const result = JSON.parse(Buffer.from(res.Payload).toString('utf8'));
+          if (result.errorMessage) throw new Error('Chunk ' + ci + ' failed: ' + result.errorMessage);
+          return result;
+        });
+      })
+    );
 
-      const batchResults = await Promise.all(batchPromises);
-      for (const result of batchResults) {
-        if (result.boxes && result.boxes.length) {
-          piiByPage[String(result.pageIdx)] = result.boxes;
-        }
+    // Merge piiByPage from all chunks
+    const piiByPage = {};
+    for (const chunkResult of chunkResults) {
+      if (chunkResult.piiByPage) {
+        Object.assign(piiByPage, chunkResult.piiByPage);
       }
     }
 
@@ -345,37 +299,28 @@ module.exports.redactDocumentWorker = async function(event) {
     await updateJob(job_id, { progress_message: 'Saving redacted document...', updated_at: new Date().toISOString() });
 
     await s3.send(new PutObjectCommand({
-      Bucket:      BUCKET,
-      Key:         redactedKey,
-      Body:        redactedBytes,
-      ContentType: 'application/pdf',
+      Bucket: BUCKET, Key: redactedKey, Body: redactedBytes, ContentType: 'application/pdf',
     }));
 
-    // Update DynamoDB document record with redacted file info
     await dynamo.send(new UpdateCommand({
       TableName: DOCS_TABLE,
       Key: { aws_document_id: doc_id },
       UpdateExpression: 'SET redacted_file_key = :rk, redacted_filename = :rf, has_redacted_version = :t, updated_at = :ua',
-      ExpressionAttributeValues: {
-        ':rk': redactedKey,
-        ':rf': redactedName,
-        ':t':  true,
-        ':ua': new Date().toISOString(),
-      },
+      ExpressionAttributeValues: { ':rk': redactedKey, ':rf': redactedName, ':t': true, ':ua': new Date().toISOString() },
     }));
 
     await updateJob(job_id, {
-      status:           'complete',
-      progress_message: 'Redaction complete. ' + totalRedactions + ' item(s) redacted across ' + totalPagesAffected + ' page(s).',
+      status:            'complete',
+      progress_message:  'Redaction complete. ' + totalRedactions + ' item(s) redacted across ' + totalPagesAffected + ' page(s).',
       redacted_file_key: redactedKey,
       redacted_filename: redactedName,
       result: {
-        redaction_count:  totalRedactions,
-        redacted_pages:   totalPagesAffected,
-        download_url:     redactedKey,
+        redaction_count: totalRedactions,
+        redacted_pages:  totalPagesAffected,
+        download_url:    redactedKey,
       },
-      completed_at:     new Date().toISOString(),
-      updated_at:       new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+      updated_at:   new Date().toISOString(),
     });
 
     console.log('[REDACT] Complete — job:', job_id, 'pages affected:', totalPagesAffected, 'total boxes:', totalRedactions);
@@ -387,5 +332,47 @@ module.exports.redactDocumentWorker = async function(event) {
       progress_message: 'Redaction failed: ' + err.message,
       updated_at:       new Date().toISOString(),
     }).catch(function() {});
+  }
+};
+
+// ── CHUNK WORKER — scans startPage..endPage, returns piiByPage ───────────────
+
+module.exports.redactDocumentChunkWorker = async function(event) {
+  const { job_id, doc_id, fileKey, startPage, endPage, totalPages, knownPiiValues, chunkIndex } = event;
+
+  try {
+    console.log('[REDACT CHUNK ' + chunkIndex + '] pages ' + startPage + '-' + (endPage - 1) + ' of ' + totalPages);
+
+    await updateJob(job_id, {
+      progress_message: 'Scanning pages ' + (startPage + 1) + '-' + endPage + ' of ' + totalPages + '...',
+      updated_at: new Date().toISOString(),
+    });
+
+    const pdfBytes  = await getS3Bytes(fileKey);
+    const masterDoc = await PDFDocument.load(pdfBytes);
+    const piiByPage = {};
+
+    for (let pageIdx = startPage; pageIdx < endPage; pageIdx++) {
+      const singleDoc = await PDFDocument.create();
+      const [copiedPage] = await singleDoc.copyPages(masterDoc, [pageIdx]);
+      singleDoc.addPage(copiedPage);
+      const singlePageBytes = Buffer.from(await singleDoc.save());
+      const page = masterDoc.getPages()[pageIdx];
+      const { width, height } = page.getSize();
+
+      const boxes = await detectPiiOnPage(singlePageBytes, width, height, knownPiiValues);
+      console.log('[REDACT CHUNK ' + chunkIndex + '] page ' + pageIdx + ' (' + Math.round(width) + 'x' + Math.round(height) + ') boxes:', boxes.length, boxes.length ? JSON.stringify(boxes) : '');
+
+      if (boxes && boxes.length) {
+        piiByPage[String(pageIdx)] = boxes;
+      }
+    }
+
+    console.log('[REDACT CHUNK ' + chunkIndex + '] done — ' + Object.keys(piiByPage).length + ' pages with PII');
+    return { piiByPage, chunkIndex };
+
+  } catch (err) {
+    console.error('[REDACT CHUNK ' + chunkIndex + '] error:', err);
+    throw err;
   }
 };
