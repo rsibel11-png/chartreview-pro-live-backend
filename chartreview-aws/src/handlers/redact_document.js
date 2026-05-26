@@ -13,6 +13,7 @@ const BUCKET      = process.env.S3_BUCKET     || 'chartreview-documents-prod';
 const DOCS_TABLE  = process.env.DOCS_TABLE    || 'chartreview-documents-prod';
 const JOBS_TABLE  = process.env.JOBS_TABLE    || 'chartreview-jobs-prod';
 const MODEL_ID    = process.env.MODEL_ID      || 'us.anthropic.claude-sonnet-4-6';
+const WORKER_FN   = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
 const CHUNK_FN    = process.env.REDACT_CHUNK_FUNCTION || 'chartreview-pro-prod-redactDocumentChunkWorker';
 const PAGES_PER_CHUNK = 20;
 
@@ -209,7 +210,7 @@ async function _redactDocumentStart(event) {
 
     // Fire the coordinator worker asynchronously
     await lambda.send(new InvokeCommand({
-      FunctionName:   CHUNK_FN.replace('ChunkWorker', 'Worker'),
+      FunctionName:   WORKER_FN,
       InvocationType: 'Event',
       Payload:        Buffer.from(JSON.stringify({ job_id, doc_id: aws_document_id, doc })),
     }));
