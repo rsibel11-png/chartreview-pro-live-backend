@@ -440,6 +440,18 @@ functions:
 
 resources:
   Resources:
+  RasterizerLambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: chartreview-rasterizer-layer
+      Description: pdfjs-dist + canvas for PDF page rasterization
+      CompatibleRuntimes:
+        - nodejs20.x
+      Content:
+        S3Bucket: chartreview-documents-prod
+        S3Key: layers/rasterizer-layer.zip
+
+
     GatewayResponseDefault4XX:
       Type: 'AWS::ApiGateway::GatewayResponse'
       Properties:
@@ -489,3 +501,13 @@ resources:
       DOCUMENTS_TABLE: chartreview-documents-prod
       JOBS_TABLE: chartreview-jobs-prod
       MODEL_ID: us.anthropic.claude-sonnet-4-6
+      REDACT_RASTERIZER_FUNCTION_NAME: chartreview-pro-prod-redactRasterizer
+
+  redactRasterizer:
+    handler: src/handlers/redact_rasterizer.handler
+    timeout: 60
+    memorySize: 2048
+    layers:
+      - !Ref RasterizerLambdaLayer
+    environment:
+      NODE_PATH: /opt/nodejs/node_modules
