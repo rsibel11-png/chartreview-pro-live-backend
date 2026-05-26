@@ -34,6 +34,45 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Build rasterizer Lambda layer (pdfjs-dist + canvas)
+        run: |
+          mkdir -p rasterizer-layer/nodejs
+          cd rasterizer-layer/nodejs
+          npm init -y
+          npm install pdfjs-dist canvas --save
+          cd ../..
+          zip -r rasterizer-layer.zip rasterizer-layer/
+          echo "Rasterizer layer zip size: $(du -sh rasterizer-layer.zip | cut -f1)"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Upload rasterizer layer to S3
+        run: |
+          aws s3 cp rasterizer-layer.zip s3://chartreview-documents-prod/layers/rasterizer-layer.zip
+          echo "Layer uploaded to S3"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Publish rasterizer Lambda layer version
+        run: |
+          LAYER_ARN=$(aws lambda publish-layer-version \
+            --layer-name chartreview-rasterizer-layer \
+            --description "pdfjs-dist + canvas for PDF page rasterization" \
+            --compatible-runtimes nodejs20.x \
+            --content S3Bucket=chartreview-documents-prod,S3Key=layers/rasterizer-layer.zip \
+            --region us-east-1 \
+            --query 'LayerVersionArn' --output text)
+          echo "Layer ARN: $LAYER_ARN"
+          echo "RASTERIZER_LAYER_ARN=$LAYER_ARN" >> $GITHUB_ENV
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Create classifyJobWorker Lambda if missing
         run: |
           aws lambda get-function --function-name chartreview-pro-prod-classifyJobWorker --region us-east-1 2>/dev/null || \
@@ -182,7 +221,42 @@ jobs:
             --handler src/handlers/redact_document.redactDocumentWorker \
             --timeout 900 \
             --memory-size 1024 \
-            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,MODEL_ID=us.anthropic.claude-sonnet-4-6}" \
+            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,MODEL_ID=us.anthropic.claude-sonnet-4-6,REDACT_RASTERIZER_FUNCTION_NAME=chartreview-pro-prod-redactRasterizer}" \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create redactRasterizer Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-redactRasterizer --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-redactRasterizer \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/redact_rasterizer.handler \
+            --timeout 60 \
+            --memory-size 2048 \
+            --layers "$RASTERIZER_LAYER_ARN" \
+            --environment "Variables={NODE_PATH=/opt/nodejs/node_modules}" \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Update redactRasterizer with latest layer
+        run: |
+          aws lambda update-function-configuration \
+            --function-name chartreview-pro-prod-redactRasterizer \
+            --layers "$RASTERIZER_LAYER_ARN" \
+            --region us-east-1
+          aws lambda wait function-updated --function-name chartreview-pro-prod-redactRasterizer --region us-east-1
+          aws lambda update-function-code \
+            --function-name chartreview-pro-prod-redactRasterizer \
             --zip-file fileb://function.zip \
             --region us-east-1
         env:
