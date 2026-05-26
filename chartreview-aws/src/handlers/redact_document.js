@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-05-25 — Textract-coordinate-first redaction + Claude vision for handwritten only
+// Updated: 2026-05-26 — Per-page rasterizer Lambda + Claude image-type for pixel-accurate coordinates
 
 'use strict';
 
@@ -23,7 +23,8 @@ const BUCKET     = process.env.S3_BUCKET       || 'chartreview-documents-prod';
 const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
-const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
+const WORKER_FN       = process.env.REDACT_WORKER_FUNCTION_NAME   || 'chartreview-pro-prod-redactDocumentWorker';
+const RASTERIZER_FN   = process.env.REDACT_RASTERIZER_FUNCTION_NAME || 'chartreview-pro-prod-redactRasterizer';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -207,7 +208,28 @@ async function loadTextractBlocks(fileKey) {
 
 // ── STEP 2B: Claude vision pass — handwritten content only ───────────────────
 
+// ── STEP 2B helper: call rasterizer Lambda for a single-page PDF ─────────────
+async function rasterizePage(singlePagePdfBytes, pageIndex) {
+  const payload = {
+    pdfBase64: singlePagePdfBytes.toString('base64'),
+    pageIndex: 0, // single-page PDF, always page 0
+  };
+  const resp = await lambdaClient.send(new InvokeCommand({
+    FunctionName:   RASTERIZER_FN,
+    InvocationType: 'RequestResponse',
+    Payload:        Buffer.from(JSON.stringify(payload)),
+  }));
+  const result = JSON.parse(Buffer.from(resp.Payload).toString('utf-8'));
+  if (result.error) throw new Error('Rasterizer error on page ' + pageIndex + ': ' + result.error);
+  return result; // { imageBase64, width, height }
+}
+
+// ── STEP 2B: Claude vision pass using rasterized PNG image ───────────────────
+// pdfBytes here is a SINGLE-PAGE pdf — rasterizer renders it, Claude sees a PNG
 async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
+  // We'll receive imageBase64/width/height after rasterizing (called from worker)
+  // This function signature kept for compatibility but now expects pre-rasterized data
+  // via detectPiiInImage — see usage in worker below
   const pdfBase64 = pdfBytes.toString('base64');
 
   const confirmedSection = knownPiiValues && knownPiiValues.length > 0
@@ -304,6 +326,7 @@ async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
         { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
         { type: 'text', text: prompt },
       ],
+      // NOTE: this path is fallback — worker now calls detectPiiInImage directly with rasterized PNG
     }],
   });
 
@@ -311,6 +334,117 @@ async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
     modelId: MODEL_ID,
     contentType: 'application/json',
     accept: 'application/json',
+    body,
+  }));
+
+  const result  = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
+  const rawText = (result.content && result.content[0] && result.content[0].text) || '{}';
+  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  try { return JSON.parse(cleaned); } catch (e) { return {}; }
+}
+
+// ── STEP 2C: Claude vision using pre-rasterized PNG image ────────────────────
+// imageBase64: PNG base64, width/height in pixels
+// Returns piiByPage map keyed "0" (single page)
+async function detectPiiInImage(imageBase64, imgWidth, imgHeight, knownPiiValues) {
+  const confirmedSection = knownPiiValues && knownPiiValues.length > 0
+    ? '=== CONFIRMED PATIENT PII — MUST REDACT ALL ===\n\n' +
+      'These strings are confirmed patient PII. Find EVERY occurrence.\n\n' +
+      knownPiiValues.map(function(v) { return '  - "' + v + '"'; }).join('\n') + '\n'
+    : '';
+
+  const prompt = [
+    'You are a HIPAA redaction assistant for workers compensation medical records.',
+    'Your job is to find and return bounding boxes for PATIENT DEMOGRAPHIC information only.',
+    'Clinical content must be preserved — only identity/contact information is redacted.',
+    '',
+    '=== COORDINATE SYSTEM ===',
+    'The image is ' + imgWidth + ' x ' + imgHeight + ' pixels.',
+    'Return coordinates as fractions 0.0-1.0 of the IMAGE dimensions.',
+    'x=0.0 is the LEFT edge of the image. x=1.0 is the RIGHT edge.',
+    'y=0.0 is the TOP edge of the image. y=1.0 is the BOTTOM edge.',
+    'x, y is the TOP-LEFT corner of the redaction box.',
+    'width and height are the box dimensions as fractions of image width/height.',
+    '',
+    '=== WHAT TO REDACT (patient demographics only) ===',
+    '',
+    'PATIENT NAME — the patient name value, not provider names:',
+    '  e.g. "Patient: MORA-MALDONADO,VILMA N"  →  redact "MORA-MALDONADO,VILMA N"',
+    '  e.g. "PATIENT: Smith, John A"  →  redact "Smith, John A"',
+    '  e.g. handwritten name on C-4 form patient name field',
+    '',
+    'DATE OF BIRTH — redact the birth date value when labeled as DOB:',
+    '  e.g. line reads "DOB: 05/21/69  AGE: 56  SEX: F" → redact "05/21/69" AND "56"',
+    '  e.g. line reads "DOB: 05/21/1969" → redact the date value',
+    '  KEY RULE: The label that triggers DOB redaction MUST be one of:',
+    '  DOB:, DOB , Date of Birth:, DATE OF BIRTH:, Birth Date:',
+    '  SERVICE DATE RULE — these labels do NOT trigger redaction:',
+    '  DATE:, Date:, ADM DT:, REP SRV DT:, SERVICE DT:, Discharge date:',
+    '  EXCEPTION — "Date: 10/03/25" on compact continuation header (Patient:/Unit#:/Date:/Acct#:) → DO NOT redact',
+    '',
+    'UNIT NUMBER / MRN / ACCOUNT:',
+    '  e.g. "UNIT #: D003081753"  →  redact "D003081753"',
+    '  e.g. "ACCOUNT#: D00136377973"  →  redact "D00136377973"',
+    '  e.g. "MRN#: 403522"  →  redact "403522"',
+    '',
+    'INSURANCE / CLAIM NUMBERS:',
+    '  e.g. "Plan #: 354000611225"  →  redact the number',
+    '  e.g. "CLM#: 0583WC260300444"  →  redact the number',
+    '',
+    'ADDRESS — full street address of the patient:',
+    '  e.g. "1828 E State Highway 168 Box 578, Moapa, NV 89025"  →  redact',
+    '',
+    'PHONE NUMBER — patient phone numbers only:',
+    '  e.g. "(818) 497-1726"  →  redact',
+    '',
+    'SOCIAL SECURITY NUMBER',
+    '',
+    '=== DO NOT REDACT ===',
+    'Provider names: "Electronically Signed by Ching,Wilbert MD"  →  DO NOT redact',
+    'Dates of service: "SERVICE DT: 10/08/25", "ADM DT: 10/02/25"  →  DO NOT redact',
+    'AGE field standalone: "AGE: 56" without adjacent DOB  →  DO NOT redact',
+    'Diagnoses, ICD/CPT codes, medications, clinical narrative  →  DO NOT redact',
+    'Facility names, report numbers, employer names  →  DO NOT redact',
+    '',
+    confirmedSection,
+    '=== BOX PLACEMENT ===',
+    'Cover the VALUE only, not the label.',
+    'Start slightly LEFT of the value (subtract ~0.003 from x). Add ~0.005 to width.',
+    'For multi-line values, use one box per line.',
+    '',
+    '=== OUTPUT FORMAT ===',
+    'JSON object. Key must be "0" (this is always page 0 — a single page image).',
+    'Only include if there are demographics to redact. If nothing to redact, return {}.',
+    'Return ONLY valid JSON — no explanation, no markdown.',
+    '{',
+    '  "0": [{"label":"patient name","x":0.08,"y":0.05,"width":0.38,"height":0.018}]',
+    '}',
+  ].filter(Boolean).join('\n');
+
+  const body = JSON.stringify({
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 4096,
+    temperature: 0,
+    messages: [{
+      role: 'user',
+      content: [
+        {
+          type: 'image',
+          source: {
+            type:       'base64',
+            media_type: 'image/png',
+            data:       imageBase64,
+          },
+        },
+        { type: 'text', text: prompt },
+      ],
+    }],
+  });
+
+  const resp = await bedrock.send(new InvokeModelCommand({
+    modelId:     MODEL_ID,
+    contentType: 'application/json',
+    accept:      'application/json',
     body,
   }));
 
@@ -475,11 +609,21 @@ module.exports.redactDocumentWorker = async function(event) {
         singleDoc.addPage(copiedPage);
         const singleBytes = Buffer.from(await singleDoc.save());
 
-        // Claude always sees page "0" — map result back to global index
-        const pagePii = await detectHandwrittenPii(singleBytes, knownPiiValues);
-        const boxes   = pagePii['0'];
+        // Rasterize the single page to PNG via dedicated Lambda with pdfjs+canvas layer
+        const rasterResult = await rasterizePage(singleBytes, globalPageIdx);
+        console.log('[REDACT] page', globalPageIdx, 'rasterized:', rasterResult.width, 'x', rasterResult.height);
+
+        // Send PNG image to Claude — pixel-accurate coordinate frame
+        const pagePii = await detectPiiInImage(
+          rasterResult.imageBase64,
+          rasterResult.width,
+          rasterResult.height,
+          knownPiiValues
+        );
+        const boxes = pagePii['0'];
         if (boxes && boxes.length) {
           allPii[String(globalPageIdx)] = boxes;
+          console.log('[REDACT] page', globalPageIdx, 'found', boxes.length, 'box(es)');
         }
       }));
     }
