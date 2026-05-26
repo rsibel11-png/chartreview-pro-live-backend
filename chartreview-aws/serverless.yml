@@ -489,3 +489,14 @@ resources:
       DOCUMENTS_TABLE: chartreview-documents-prod
       JOBS_TABLE: chartreview-jobs-prod
       MODEL_ID: us.anthropic.claude-sonnet-4-6
+      REDACT_CHUNK_FUNCTION: chartreview-pro-prod-redactDocumentChunkWorker
+
+  redactDocumentChunkWorker:
+    handler: src/handlers/redact_document.redactDocumentChunkWorker
+    timeout: 900
+    memorySize: 1024
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      MODEL_ID: us.anthropic.claude-sonnet-4-6
