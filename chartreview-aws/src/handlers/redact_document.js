@@ -582,7 +582,7 @@ module.exports.redactDocumentWorker = async function(event) {
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
-    const PAGE_CONCURRENCY = 10;
+    const PAGE_CONCURRENCY = 3;
     const allPii     = {};
 
     await updateJob(job_id, {
@@ -601,6 +601,9 @@ module.exports.redactDocumentWorker = async function(event) {
         progress_message: 'Scanning pages ' + (batchStart + 1) + ' to ' + batchEnd + ' of ' + totalPages + '...',
         updated_at: new Date().toISOString(),
       });
+
+      // Small delay between batches to avoid Bedrock RPM throttling
+      if (batchStart > 0) await new Promise(function(r) { setTimeout(r, 1000); });
 
       await Promise.all(batchIndices.map(async function(globalPageIdx) {
         // Extract single page as its own PDF
