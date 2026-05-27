@@ -214,13 +214,17 @@ async function rasterizePage(singlePagePdfBytes, pageIndex) {
     pdfBase64: singlePagePdfBytes.toString('base64'),
     pageIndex: 0, // single-page PDF, always page 0
   };
-  const resp = await lambdaClient.send(new InvokeCommand({
+  const lambdaResp = await lambdaClient.send(new InvokeCommand({
     FunctionName:   RASTERIZER_FN,
     InvocationType: 'RequestResponse',
     Payload:        Buffer.from(JSON.stringify(payload)),
   }));
-  const result = JSON.parse(Buffer.from(resp.Payload).toString('utf-8'));
-  if (result.error) throw new Error('Rasterizer error on page ' + pageIndex + ': ' + result.error);
+  const rawPayload = Buffer.from(lambdaResp.Payload).toString('utf-8');
+  let result;
+  try { result = JSON.parse(rawPayload); } catch(e) { throw new Error('Rasterizer bad JSON on page ' + pageIndex + ': ' + rawPayload.slice(0,200)); }
+  if (result.errorMessage) throw new Error('Rasterizer Lambda crash on page ' + pageIndex + ': ' + result.errorMessage);
+  if (result.error)        throw new Error('Rasterizer error on page ' + pageIndex + ': ' + result.error);
+  if (!result.imageBase64) throw new Error('Rasterizer returned no imageBase64 on page ' + pageIndex + '. Raw: ' + rawPayload.slice(0,300));
   return result; // { imageBase64, width, height }
 }
 
