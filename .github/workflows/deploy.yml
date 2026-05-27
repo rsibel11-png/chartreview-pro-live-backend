@@ -34,45 +34,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Build rasterizer Lambda layer (pdfjs-dist + canvas)
-        run: |
-          mkdir -p rasterizer-layer/nodejs
-          cd rasterizer-layer/nodejs
-          npm init -y
-          npm install pdfjs-dist canvas --save
-          cd ../..
-          zip -r rasterizer-layer.zip rasterizer-layer/
-          echo "Rasterizer layer zip size: $(du -sh rasterizer-layer.zip | cut -f1)"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Upload rasterizer layer to S3
-        run: |
-          aws s3 cp rasterizer-layer.zip s3://chartreview-documents-prod/layers/rasterizer-layer.zip
-          echo "Layer uploaded to S3"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Publish rasterizer Lambda layer version
-        run: |
-          LAYER_ARN=$(aws lambda publish-layer-version \
-            --layer-name chartreview-rasterizer-layer \
-            --description "pdfjs-dist + canvas for PDF page rasterization" \
-            --compatible-runtimes nodejs20.x \
-            --content S3Bucket=chartreview-documents-prod,S3Key=layers/rasterizer-layer.zip \
-            --region us-east-1 \
-            --query 'LayerVersionArn' --output text)
-          echo "Layer ARN: $LAYER_ARN"
-          echo "RASTERIZER_LAYER_ARN=$LAYER_ARN" >> $GITHUB_ENV
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
       - name: Create classifyJobWorker Lambda if missing
         run: |
           aws lambda get-function --function-name chartreview-pro-prod-classifyJobWorker --region us-east-1 2>/dev/null || \
@@ -221,42 +182,7 @@ jobs:
             --handler src/handlers/redact_document.redactDocumentWorker \
             --timeout 900 \
             --memory-size 1024 \
-            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,MODEL_ID=us.anthropic.claude-sonnet-4-6,REDACT_RASTERIZER_FUNCTION_NAME=chartreview-pro-prod-redactRasterizer}" \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create redactRasterizer Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-redactRasterizer --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-redactRasterizer \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/redact_rasterizer.handler \
-            --timeout 60 \
-            --memory-size 2048 \
-            --layers "$RASTERIZER_LAYER_ARN" \
-            --environment "Variables={NODE_PATH=/opt/nodejs/node_modules}" \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Update redactRasterizer with latest layer
-        run: |
-          aws lambda update-function-configuration \
-            --function-name chartreview-pro-prod-redactRasterizer \
-            --layers "$RASTERIZER_LAYER_ARN" \
-            --region us-east-1
-          aws lambda wait function-updated --function-name chartreview-pro-prod-redactRasterizer --region us-east-1
-          aws lambda update-function-code \
-            --function-name chartreview-pro-prod-redactRasterizer \
+            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,MODEL_ID=us.anthropic.claude-sonnet-4-6}" \
             --zip-file fileb://function.zip \
             --region us-east-1
         env:
@@ -328,61 +254,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Build and upload zips to S3
-        working-directory: chartreview-aws
-        run: |
-          TS=$(date +%Y%m%d%H%M%S)
-
-          # Main zip: remove heavy redact-only packages to stay under 250MB unzipped
-          cp function.zip function_main.zip
-          zip -d function_main.zip "node_modules/sharp/*" "node_modules/pdfjs-dist/*" "node_modules/jsdom/*" "node_modules/canvas/*" 2>/dev/null || true
-          MAIN_KEY="lambda-deploys/function-main-${TS}.zip"
-          aws s3 cp function_main.zip s3://chartreview-documents-prod/$MAIN_KEY --region us-east-1
-          echo "MAIN_KEY=$MAIN_KEY" >> $GITHUB_ENV
-
-          # Redact zip: full zip including sharp/pdfjs-dist/jsdom
-          REDACT_KEY="lambda-deploys/function-redact-${TS}.zip"
-          aws s3 cp function.zip s3://chartreview-documents-prod/$REDACT_KEY --region us-east-1
-          echo "REDACT_KEY=$REDACT_KEY" >> $GITHUB_ENV
-          echo "Main zip: $MAIN_KEY | Redact zip: $REDACT_KEY"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Diagnostic — invoke redactRasterizer and check response
-        run: |
-          MINI_PDF="JVBERi0xLjQKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwKL1R5cGUgL1BhZ2VzCi9LaWRzIFszIDAgUl0KL0NvdW50IDEKPD4KZW5kb2JqCjMgMCBvYmoKPDwKL1R5cGUgL1BhZ2UKL1BhcmVudCAyIDAgUgovTWVkaWFCb3ggWzAgMCA2MTIgNzkyXQo+PgplbmRvYmoKeHJlZgowIDQKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAp0cmFpbGVyCjw8Ci9TaXplIDQKL1Jvb3QgMSAwIFIKPj4Kc3RhcnR4cmVmCjE5OAolJUVPRgo="
-          echo "=== Lambda config ==="
-          aws lambda get-function-configuration \
-            --function-name chartreview-pro-prod-redactRasterizer \
-            --region us-east-1 \
-            --query "{handler:Handler,memory:MemorySize,layers:Layers[*].Arn}" \
-            --output json
-          echo "=== Direct invoke ==="
-          aws lambda invoke \
-            --function-name chartreview-pro-prod-redactRasterizer \
-            --cli-binary-format raw-in-base64-out \
-            --payload "{\"pdfBase64\":\"${MINI_PDF}\",\"pageIndex\":0}" \
-            --region us-east-1 \
-            /tmp/out.json 2>&1
-          echo "=== Response ==="
-          python3 -c "
-import json
-with open('/tmp/out.json') as f: d = json.load(f)
-keys = list(d.keys()) if isinstance(d,dict) else str(type(d))
-print('Keys:', keys)
-if isinstance(d,dict):
-  for k in ['error','errorMessage','errorType']: 
-    if k in d: print(k+':',d[k])
-  if 'imageBase64' in d: print('imageBase64 len:', len(d['imageBase64']))
-  if 'width' in d: print('dims:', d['width'],'x',d['height'])
-" 2>&1 || cat /tmp/out.json | head -c 300
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
       - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
@@ -426,18 +297,7 @@ if isinstance(d,dict):
             echo "Updating $FUNC..."
             aws lambda update-function-code \
               --function-name "$FUNC" \
-              --s3-bucket chartreview-documents-prod \
-              --s3-key "$MAIN_KEY" \
-              --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
-          done
-
-          # Redact functions use the full zip (includes sharp/pdfjs-dist/jsdom)
-          for FUNC in "chartreview-pro-prod-redactDocumentStart" "chartreview-pro-prod-redactDocumentWorker"; do
-            echo "Updating redact function $FUNC with redact zip..."
-            aws lambda update-function-code \
-              --function-name "$FUNC" \
-              --s3-bucket chartreview-documents-prod \
-              --s3-key "$REDACT_KEY" \
+              --zip-file fileb://function.zip \
               --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
           done
           echo "All Lambda functions updated!"
