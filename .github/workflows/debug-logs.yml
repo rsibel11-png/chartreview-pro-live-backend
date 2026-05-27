@@ -1,5 +1,4 @@
 name: Debug Lambda Logs
-# refreshed
 
 on:
   workflow_dispatch:
@@ -14,34 +13,24 @@ jobs:
           aws s3 cp s3://chartreview-documents-prod/orgs/69ceb1ab037acdd4467b31c3/documents/22c3ca24-c101-4484-bb8f-32616eb52b38/textract_blocks.json /tmp/blocks.json 2>&1
 
           echo ""
-          echo "=== Page 26 tokens (sorted by y position) ==="
-          python3 -c "
+          echo "=== Page 26 tokens ==="
+          python3 - << 'EOF'
 import json
 with open('/tmp/blocks.json') as f:
     blocks = json.load(f)
 print(f'Total blocks: {len(blocks)}')
-p26 = [b for b in blocks if b.get(\'p\') == 26]
+p26 = [b for b in blocks if b.get('p') == 26]
 print(f'Page 26 blocks: {len(p26)}')
-sorted_p26 = sorted(p26, key=lambda b: b[\'tp\'])
+sorted_p26 = sorted(p26, key=lambda b: b['tp'])
 print()
-print(\'=== LAST 25 TOKENS (bottom of page) ===\')
+print('=== LAST 25 TOKENS (bottom of page) ===')
 for b in sorted_p26[-25:]:
-    print(f\'  y={b[\'tp\']:.4f} x={b[\'l\']:.4f} w={b[\'w\']:.4f} | {repr(b[\'t\'])}\')
-print()
-footer = [b for b in p26 if b.get(\'tp\', 0) > 0.85]
-print(f\'=== FOOTER TOKENS (tp > 0.85): {len(footer)} ===\')
-for b in sorted(footer, key=lambda b: (b[\'tp\'], b[\'l\'])):
-    print(f\'  y={b[\'tp\']:.4f} x={b[\'l\']:.4f} | {repr(b[\'t\'])}\')
-"
-
-          echo ""
-          echo "=== Recent redactDocumentWorker logs ==="
-          aws logs filter-log-events \
-            --log-group-name /aws/lambda/chartreview-pro-prod-redactDocumentWorker \
-            --start-time $(( $(date +%s) - 3600 ))000 \
-            --region us-east-1 \
-            --query "events[*].message" \
-            --output text 2>&1 | grep -E "(page 26|PATIENT NAME|MORA|moramaldonado|textract|blocks|pii)" | tail -30
+    print(f'  y={b["tp"]:.4f} x={b["l"]:.4f} | {repr(b["t"])}')
+footer = [b for b in p26 if b.get('tp', 0) > 0.85]
+print(f'\n=== FOOTER TOKENS (tp > 0.85): {len(footer)} ===')
+for b in sorted(footer, key=lambda b: (b['tp'], b['l'])):
+    print(f'  y={b["tp"]:.4f} x={b["l"]:.4f} | {repr(b["t"])}')
+EOF
 
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
