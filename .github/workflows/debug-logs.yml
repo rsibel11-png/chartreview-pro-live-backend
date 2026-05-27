@@ -7,36 +7,40 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Check API GW integration and invoke Lambda
+      - name: Invoke redactRasterizer directly with minimal PDF
         run: |
-          API_ID="1h4kpspbs6"
-          REGION="us-east-1"
+          # Minimal 1-page PDF (base64) — tiny valid PDF for testing
+          MINI_PDF="JVBERi0xLjQKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwKL1R5cGUgL1BhZ2VzCi9LaWRzIFszIDAgUl0KL0NvdW50IDEKPD4KZW5kb2JqCjMgMCBvYmoKPDwKL1R5cGUgL1BhZ2UKL1BhcmVudCAyIDAgUgovTWVkaWFCb3ggWzAgMCA2MTIgNzkyXQo+PgplbmRvYmoKeHJlZgowIDQKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAp0cmFpbGVyCjw8Ci9TaXplIDQKL1Jvb3QgMSAwIFIKPj4Kc3RhcnR4cmVmCjE5OAolJUVPRgo="
 
-          echo '=== API GW resources with /redact ==='
-          aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
-            --query 'items[?contains(path,`redact`)]' --output json
+          PAYLOAD=$(echo "{"pdfBase64":"${MINI_PDF}","pageIndex":0}")
 
-          echo '=== Get /redact resource ID ==='
-          REDACT_ID=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
-            --query "items[?contains(path,'redact')].id" --output text)
-          echo "Resource ID: $REDACT_ID"
+          echo "=== Invoking redactRasterizer ==="
+          aws lambda invoke             --function-name chartreview-pro-prod-redactRasterizer             --cli-binary-format raw-in-base64-out             --payload "$PAYLOAD"             --region us-east-1             /tmp/rasterizer_out.json 2>&1
+          echo "=== Rasterizer response (first 500 chars) ==="
+          cat /tmp/rasterizer_out.json | head -c 500
 
-          echo '=== POST integration ==='
-          aws apigateway get-integration \
-            --rest-api-id $API_ID \
-            --resource-id $REDACT_ID \
-            --http-method POST \
-            --region $REGION 2>&1 || echo 'No POST integration found'
+          echo ""
+          echo "=== Check imageBase64 field present ==="
+          python3 -c "
+import json, sys
+with open('/tmp/rasterizer_out.json') as f:
+    data = json.load(f)
+keys = list(data.keys()) if isinstance(data, dict) else 'not a dict'
+print('Keys:', keys)
+if 'error' in data: print('ERROR:', data['error'])
+if 'errorMessage' in data: print('LAMBDA CRASH:', data['errorMessage'])
+if 'imageBase64' in data: print('imageBase64 length:', len(data['imageBase64']))
+if 'width' in data: print('dimensions:', data['width'], 'x', data['height'])
+" 2>&1
 
-          echo '=== Direct Lambda invoke (simple) ==='
-          aws lambda invoke \
-            --function-name chartreview-pro-prod-redactDocumentStart \
-            --cli-binary-format raw-in-base64-out \
-            --payload '{"httpMethod":"POST","path":"/documents/test/redact","pathParameters":{"aws_document_id":"test-id"},"headers":{"x-api-key":"ChartReview#2026$ProdKey!Rx"},"body":null}' \
-            --region us-east-1 \
-            /tmp/out.json 2>&1
-          echo '=== Lambda response ==='
-          cat /tmp/out.json 2>/dev/null || echo 'no output'
+          echo ""
+          echo "=== CloudWatch logs — rasterizer (last 30 entries) ==="
+          aws logs filter-log-events             --log-group-name /aws/lambda/chartreview-pro-prod-redactRasterizer             --start-time $(( $(date +%s) - 600 ))000             --region us-east-1             --query "events[*].message"             --output text 2>&1 | tail -30
+
+          echo ""
+          echo "=== CloudWatch logs — worker (last 30 entries) ==="
+          aws logs filter-log-events             --log-group-name /aws/lambda/chartreview-pro-prod-redactDocumentWorker             --start-time $(( $(date +%s) - 600 ))000             --region us-east-1             --query "events[*].message"             --output text 2>&1 | tail -30
+
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
