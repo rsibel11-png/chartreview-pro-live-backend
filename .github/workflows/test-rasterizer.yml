@@ -1,0 +1,40 @@
+name: Test Rasterizer
+# one-shot test workflow
+on:
+  push:
+    branches: [rasterizer-test]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Invoke redactRasterizer and check output
+        run: |
+          MINI_PDF="JVBERi0xLjQKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwKL1R5cGUgL1BhZ2VzCi9LaWRzIFszIDAgUl0KL0NvdW50IDEKPD4KZW5kb2JqCjMgMCBvYmoKPDwKL1R5cGUgL1BhZ2UKL1BhcmVudCAyIDAgUgovTWVkaWFCb3ggWzAgMCA2MTIgNzkyXQo+PgplbmRvYmoKeHJlZgowIDQKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAp0cmFpbGVyCjw8Ci9TaXplIDQKL1Jvb3QgMSAwIFIKPj4Kc3RhcnR4cmVmCjE5OAolJUVPRgo="
+
+          echo "=== Lambda config ==="
+          aws lambda get-function-configuration             --function-name chartreview-pro-prod-redactRasterizer             --region us-east-1             --query "{handler:Handler,memory:MemorySize,layers:Layers[*].Arn}"             --output json
+
+          echo "=== Direct invoke ==="
+          aws lambda invoke             --function-name chartreview-pro-prod-redactRasterizer             --cli-binary-format raw-in-base64-out             --payload "{\"pdfBase64\":\"${MINI_PDF}\",\"pageIndex\":0}"             --log-type Tail             --region us-east-1             /tmp/out.json 2>&1
+
+          echo "=== Response (truncated) ==="
+          python3 -c "
+import json
+with open('/tmp/out.json') as f: d = json.load(f)
+keys = list(d.keys()) if isinstance(d,dict) else str(type(d))
+print('Keys:', keys)
+if isinstance(d,dict):
+  for k in ['error','errorMessage','errorType']:
+    if k in d: print(k+':', d[k])
+  if 'imageBase64' in d: print('imageBase64 len:', len(d['imageBase64']))
+  if 'width' in d: print('dims:', d['width'],'x',d['height'])
+" 2>&1
+
+          echo "=== CW logs rasterizer ==="
+          aws logs filter-log-events             --log-group-name /aws/lambda/chartreview-pro-prod-redactRasterizer             --start-time $(( $(date +%s) - 300 ))000             --region us-east-1             --query "events[*].message" --output text 2>&1 | tail -20
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
