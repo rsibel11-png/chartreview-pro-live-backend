@@ -212,6 +212,68 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     }
   }
 
+  // ── SIGNATURE LINE DETECTION ─────────────────────────────────────────────
+  // Detect label words that indicate a signature line is above them.
+  // Redact a box from the left edge of the label to ~0.6 page width,
+  // covering the area immediately above the label (where the signature sits).
+  var SIG_LABELS = [
+    'patientsignature', 'patientorguardiansignature', 'guardiansignature',
+    'signatureofpatient', 'patientguardiansignature', 'parentguardiansignature',
+    'printpatientname', 'patientname', 'signatureofguardian',
+    'employeesignature', 'witnessesignature', 'witnesssignature',
+    'authorizedsignature', 'signatureofauthorizedrepresentative',
+    'poasignature', 'powerofattorneysignature',
+    'caregiverrnoctorsignature', 'caregiverrnoctorsig',
+    'physiciansignature', 'providersignature',
+  ];
+
+  var pageNums2 = Object.keys(pageMap);
+  for (var sp = 0; sp < pageNums2.length; sp++) {
+    var pageNum2 = parseInt(pageNums2[sp], 10);
+    var pageWords2 = pageMap[pageNum2];
+    var pageIdx2 = pageNum2 - 1;
+
+    // Sliding window of 1-5 words to detect signature label phrases
+    for (var sw = 0; sw < pageWords2.length; sw++) {
+      for (var sl = 1; sl <= 5 && sw + sl <= pageWords2.length; sl++) {
+        var sigSlice = pageWords2.slice(sw, sw + sl);
+        var sigConcat = sigSlice.map(function(w) {
+          return w.t.toLowerCase().replace(/[\s\-,\.\(\)\/]/g, '');
+        }).join('');
+
+        var isSigLabel = false;
+        for (var si = 0; si < SIG_LABELS.length; si++) {
+          if (sigConcat === SIG_LABELS[si] || sigConcat.indexOf(SIG_LABELS[si]) === 0) {
+            isSigLabel = true;
+            break;
+          }
+        }
+
+        if (isSigLabel) {
+          // Get the vertical position of this label
+          var labelTop = Math.min.apply(null, sigSlice.map(function(w) { return w.tp; }));
+          var labelLeft = Math.min.apply(null, sigSlice.map(function(w) { return w.l; }));
+
+          // Redact the area above the label: from ~1.5x label height above it,
+          // spanning from near-left to ~0.65 page width
+          var labelH = Math.max.apply(null, sigSlice.map(function(w) { return w.h; }));
+          var boxHeight = labelH * 2.5;
+          var boxTop = Math.max(0, labelTop - boxHeight);
+
+          if (!result[String(pageIdx2)]) result[String(pageIdx2)] = [];
+          result[String(pageIdx2)].push({
+            label: 'sig:' + sigConcat.substring(0, 30),
+            x: Math.max(0, labelLeft - 0.01),
+            y: boxTop,
+            width: Math.min(1, 0.65 - labelLeft + 0.01),
+            height: labelTop - boxTop,
+          });
+          break; // don't double-match longer slices for same start word
+        }
+      }
+    }
+  }
+
   return result;
 }
 
