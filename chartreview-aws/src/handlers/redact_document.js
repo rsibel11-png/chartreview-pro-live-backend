@@ -117,7 +117,11 @@ function extractKnownPiiValues(extractedText) {
     /(?:Responsible\s*Party|Guarantor)\s*[:\|]\s*(.+)/gi,
 
     // PATIENT NAME footer pattern (operative reports): "PATIENT NAME: LAST,FIRST  #: ACCT"
-    /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+?)(?:\s*#\s*[:\|]?\s*([A-Z0-9\-]+))?$/mgi,
+    /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+?)(?:\s+#[:\|]?\s*([A-Z0-9\-]+))?\s*$/mgi,
+
+    // Inline parenthetical family/POA names in narrative text
+    // e.g. "her spouse (Luis Mora) is her medical POA"
+    /(?:spouse|husband|wife|son|daughter|child|parent|mother|father|brother|sister|sibling|next\s*of\s*kin|medical\s*poa|power\s*of\s*attorney)\s*\(([A-Za-z][A-Za-z\-,'\.\s]{2,40})\)/gi,
 
     // Email
     /(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
@@ -275,7 +279,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
           // Redact the area above the label: from ~1.5x label height above it,
           // spanning from near-left to ~0.65 page width
           var labelH = Math.max.apply(null, sigSlice.map(function(w) { return w.h; }));
-          var boxHeight = labelH * 4.0;
+          var boxHeight = labelH * 6.0;
           var boxTop = Math.max(0, labelTop - boxHeight);
 
           if (!result[String(pageIdx2)]) result[String(pageIdx2)] = [];
