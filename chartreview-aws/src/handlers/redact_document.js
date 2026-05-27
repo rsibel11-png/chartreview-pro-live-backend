@@ -183,7 +183,7 @@ function extractKnownPiiValues(extractedText) {
 // Returns piiByPage map using exact Textract bounding boxes — no LLM needed
 
 function normalizeForMatch(str) {
-  return (str || '').toLowerCase().replace(/[\s\-,\.\(\)]/g, '');
+  return (str || '').toLowerCase().replace(/[\s\-,\.\(\)\\\/]/g, '');
 }
 
 function findBoxesFromBlocks(wordBlocks, piiValues) {
