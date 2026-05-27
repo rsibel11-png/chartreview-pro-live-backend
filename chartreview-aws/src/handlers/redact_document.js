@@ -228,9 +228,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     'poasignature', 'powerofattorneysignature',
     'caregiverrnoctorsignature', 'caregiverrnoctorsig',
     'physiciansignature', 'providersignature',
-    'employeesorguardiansignature', 'signaturedate',
+    'employeesorguardiansignature',
     // C-4 / structured form field labels (value written in box above label)
-    'firstname', 'lastname', 'middleinitial', 'mi',
+    'firstname', 'lastname', 'middleinitial',
     'firstnamemi', 'firstnamemilastname',
     'birthdate', 'dateofbirth',
     'homeaddress', 'homeaddressnumberandstreet',
@@ -261,7 +261,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
 
         var isSigLabel = false;
         for (var si = 0; si < SIG_LABELS.length; si++) {
-          if (sigConcat === SIG_LABELS[si] || sigConcat.indexOf(SIG_LABELS[si]) === 0) {
+          if (sigConcat === SIG_LABELS[si]) {
             isSigLabel = true;
             break;
           }
