@@ -118,6 +118,8 @@ function extractKnownPiiValues(extractedText) {
 
     // PATIENT NAME footer pattern (operative reports): "PATIENT NAME: LAST,FIRST  #: ACCT"
     /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+?)(?:\s+#[:\|]?\s*([A-Z0-9\-]+))?\s*$/mgi,
+    // Also match PATIENT NAME anywhere on a line (not just end-anchored) for safety
+    /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]{3,})/mgi,
 
     // Inline parenthetical family/POA names in narrative text
     // e.g. "her spouse (Luis Mora) is her medical POA"
@@ -156,7 +158,25 @@ function extractKnownPiiValues(extractedText) {
       }
     }
   }
-  return Array.from(found);
+  // Expand hyphenated compound names: MORA-MALDONADO -> also add MORA and MALDONADO separately
+  var expanded = new Set(found);
+  found.forEach(function(val) {
+    if (val && val.indexOf('-') !== -1) {
+      var parts = val.split('-');
+      parts.forEach(function(p) {
+        var trimmed = p.trim().replace(/[,\.\s]/g, '');
+        if (trimmed.length >= 3) expanded.add(p.trim().split(',')[0].trim());
+      });
+    }
+    // Also split on comma (MORA-MALDONADO,VILMA -> VILMA separately)
+    if (val && val.indexOf(',') !== -1) {
+      val.split(',').forEach(function(p) {
+        var trimmed = p.trim();
+        if (trimmed.length >= 3) expanded.add(trimmed.split(' ')[0]);
+      });
+    }
+  });
+  return Array.from(expanded);
 }
 
 // ── STEP 2A: Textract-coordinate-based redaction ──────────────────────────────
@@ -279,7 +299,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
           // Redact the area above the label: from ~1.5x label height above it,
           // spanning from near-left to ~0.65 page width
           var labelH = Math.max.apply(null, sigSlice.map(function(w) { return w.h; }));
-          var boxHeight = labelH * 6.0;
+          // For address fields, use a fixed large height (0.15 page) to cover multi-line handwritten content
+          var isAddressField = (sigConcat === 'homeaddress' || sigConcat === 'homeaddressnumberandstreet');
+          var boxHeight = isAddressField ? 0.15 : labelH * 6.0;
           var boxTop = Math.max(0, labelTop - boxHeight);
 
           if (!result[String(pageIdx2)]) result[String(pageIdx2)] = [];
