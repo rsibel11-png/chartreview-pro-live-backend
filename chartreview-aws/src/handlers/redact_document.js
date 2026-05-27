@@ -66,17 +66,17 @@ async function updateJob(job_id, patch) {
 
 function extractKnownPiiValues(extractedText) {
   // Demographics-only: extract values that appear after explicit demographic labels.
-  // This prevents matching clinical narrative text.
+  // No minimum/maximum character limits — any value following a recognized label is PII.
   if (!extractedText || typeof extractedText !== 'string') return [];
   var found = new Set();
 
   var patterns = [
     // Patient name — explicit label on same line
-    /^(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]{4,50})$/mg,
-    /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})$/mgi,
-    /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})$/mgi,
-    /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{4,50})$/mgi,
-    /Patient[''\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]{4,50})/gi,
+    /^(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+)$/mg,
+    /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
+    /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
+    /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
+    /Patient['\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]+)/gi,
 
     // Date of birth — must follow label
     /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
@@ -86,25 +86,25 @@ function extractKnownPiiValues(extractedText) {
     /(?:SSN|S\.S\.N\.|SOCIAL\s*SECURITY)\s*[:\|]?\s*(\d{9})/gi,
 
     // MRN — must follow label
-    /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]{4,20})/gi,
+    /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
 
     // Account / unit / episode numbers — explicit label
-    /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct\s*#|ACCOUNT#)\s*[:\|]?\s*([A-Z0-9\-]{4,30})/gi,
-    /(?:UNIT\s*(?:NO\.?|NUMBER|#)|Unit\s*(?:No\.?|#)|Unit\s*#|UNIT#)\s*[:\|]?\s*([A-Z0-9\-]{4,30})/gi,
-    /(?:Episode\s*ID|FIN#?)\s*[:\|]\s*([A-Z0-9\-]{4,20})/gi,
+    /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct\s*#|ACCOUNT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
+    /(?:UNIT\s*(?:NO\.?|NUMBER|#)|Unit\s*(?:No\.?|#)|Unit\s*#|UNIT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
+    /(?:Episode\s*ID|FIN#?)\s*[:\|]\s*([A-Z0-9\-]+)/gi,
 
     // Insurance / member / claim IDs
-    /(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#|Member\s*ID#?)\s*[:\|]?\s*([A-Z0-9\-]{4,30})/gi,
+    /(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#|Member\s*ID#?)\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
 
     // Phone — labeled OR bare xxx-xxx-xxxx OR (xxx) xxx-xxxx
-    /(?:PHONE|CELL|MOBILE|TEL(?:EPHONE)?|Home\s*Phone|Work\s*Phone|Fax)\s*[:\|]\s*([\d\(\)\-\.\s]{10,18})/gi,
+    /(?:PHONE|CELL|MOBILE|TEL(?:EPHONE)?|Home\s*Phone|Work\s*Phone|Fax)\s*[:\|]\s*([\d\(\)\-\.\s]+)/gi,
     /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
     /\b(\d{3}-\d{3}-\d{4})\b/g,
 
     // Address — labeled (Street, City, Home Address)
-    /\b(?:HOME\s*)?ADDRESS\s*[:|]\s*(.{10,80})/gi,
-    /\bStreet\s*[:|]\s*(.{5,60})/gi,
-    /\bCity\s*[:|]\s*([A-Za-z][A-Za-z\s]{2,30})/gi,
+    /\b(?:HOME\s*)?ADDRESS\s*[:|]\s*(.+)/gi,
+    /\bStreet\s*[:|]\s*(.+)/gi,
+    /\bCity\s*[:|]\s*([A-Za-z][A-Za-z\s]+)/gi,
 
     // Email
     /(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
@@ -122,12 +122,12 @@ function extractKnownPiiValues(extractedText) {
       } else {
         val = (match[1] || '').trim();
       }
-      if (!val || val.length < 4) continue;
+      if (!val) continue;
       // Skip ICD/CPT codes
       if (/^[A-Z]\d{2}\.?\d{0,3}[A-Z]?$/.test(val)) continue;
-      // Skip pure clinical lowercase text
+      // Skip pure clinical lowercase text (long narrative fragments)
       if (/^[a-z\s,\.]{15,}$/.test(val)) continue;
-      // Skip single short numbers (age, vitals, etc.)
+      // Skip single short numbers (age, vitals, room numbers)
       if (/^\d{1,3}$/.test(val)) continue;
       // Skip bare 2-letter state abbreviations
       if (/^[A-Z]{2}$/.test(val)) continue;
