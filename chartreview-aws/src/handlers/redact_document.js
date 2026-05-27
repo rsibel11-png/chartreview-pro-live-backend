@@ -191,7 +191,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
         for (var len = 1; len <= 6 && start + len <= pageWords.length; len++) {
           var slice = pageWords.slice(start, start + len);
           var concat = normalizeForMatch(slice.map(function(w) { return w.t; }).join(''));
-          if (piiNorm.length >= 6 && concat === piiNorm) {
+          if (piiNorm.length >= 3 && concat === piiNorm) {
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
             var minT = Math.min.apply(null, slice.map(function(w) { return w.tp; }));
