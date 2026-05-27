@@ -119,7 +119,7 @@ function extractKnownPiiValues(extractedText) {
     // PATIENT NAME footer pattern (operative reports): "PATIENT NAME: LAST,FIRST  #: ACCT"
     /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+?)(?:\s+#[:\|]?\s*([A-Z0-9\-]+))?\s*$/mgi,
     // Also match PATIENT NAME anywhere on a line (not just end-anchored) for safety
-    /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]{3,})/mgi,
+    /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\.]+(?:\s[A-Z][A-Z\-,'\.]*){0,4})/mg,
 
     // Inline parenthetical family/POA names in narrative text
     // e.g. "her spouse (Luis Mora) is her medical POA"
@@ -175,6 +175,14 @@ function extractKnownPiiValues(extractedText) {
         if (trimmed.length >= 3) expanded.add(trimmed.split(' ')[0]);
       });
     }
+    // Also split multi-word values on spaces so each word is a separate PII entry
+    // This catches "Luis Mora" -> ["Luis", "Mora"] and "VILMA N" -> ["VILMA"]
+    if (val && val.indexOf(' ') !== -1) {
+      val.trim().split(/\s+/).forEach(function(w) {
+        var clean = w.replace(/[^A-Za-z]/g, '');
+        if (clean.length >= 4) expanded.add(clean);
+      });
+    }
   });
   return Array.from(expanded);
 }
@@ -183,7 +191,7 @@ function extractKnownPiiValues(extractedText) {
 // Returns piiByPage map using exact Textract bounding boxes — no LLM needed
 
 function normalizeForMatch(str) {
-  return (str || '').toLowerCase().replace(/[\s\-,\.]/g, '');
+  return (str || '').toLowerCase().replace(/[\s\-,\.\(\)]/g, '');
 }
 
 function findBoxesFromBlocks(wordBlocks, piiValues) {
