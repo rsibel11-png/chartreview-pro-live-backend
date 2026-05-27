@@ -216,15 +216,30 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   // Detect label words that indicate a signature line is above them.
   // Redact a box from the left edge of the label to ~0.6 page width,
   // covering the area immediately above the label (where the signature sits).
+  // Labels that appear BELOW a handwritten/filled field — redact the area above the label.
+  // Covers: signature lines, C-4 form fields, structured form fields.
   var SIG_LABELS = [
+    // Signature lines
     'patientsignature', 'patientorguardiansignature', 'guardiansignature',
     'signatureofpatient', 'patientguardiansignature', 'parentguardiansignature',
-    'printpatientname', 'patientname', 'signatureofguardian',
+    'printpatientname', 'signatureofguardian',
     'employeesignature', 'witnessesignature', 'witnesssignature',
     'authorizedsignature', 'signatureofauthorizedrepresentative',
     'poasignature', 'powerofattorneysignature',
     'caregiverrnoctorsignature', 'caregiverrnoctorsig',
     'physiciansignature', 'providersignature',
+    'employeesorguardiansignature', 'signaturedate',
+    // C-4 / structured form field labels (value written in box above label)
+    'firstname', 'lastname', 'middleinitial', 'mi',
+    'firstnamemi', 'firstnamemilastname',
+    'birthdate', 'dateofbirth',
+    'homeaddress', 'homeaddressnumberandstreet',
+    'employeesname', 'employeename',
+    'claimantsname', 'claimantname',
+    'socialsecuritynumber', 'socialsecurityno',
+    'dateofinjury', 'dateofaccident',
+    'employersname', 'employername',
+    'supervisorname', 'supervisortowhoinjuryreported',
   ];
 
   var pageNums2 = Object.keys(pageMap);
@@ -265,7 +280,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
             label: 'sig:' + sigConcat.substring(0, 30),
             x: Math.max(0, labelLeft - 0.01),
             y: boxTop,
-            width: Math.min(1, 0.65 - labelLeft + 0.01),
+            width: Math.min(1, 0.92 - labelLeft + 0.01),
             height: labelTop - boxTop,
           });
           break; // don't double-match longer slices for same start word
