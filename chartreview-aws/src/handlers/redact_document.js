@@ -158,25 +158,21 @@ function extractKnownPiiValues(extractedText) {
       }
     }
   }
-  // Expand hyphenated compound names and comma-separated name/firstname combos
+  // Expand hyphenated compound names: MORA-MALDONADO -> also add MORA and MALDONADO separately
   var expanded = new Set(found);
   found.forEach(function(val) {
-    if (!val) return;
-    // Split on comma first: "MORA-MALDONADO,VILMA N" -> ["MORA-MALDONADO", "VILMA N"]
-    var commaParts = val.split(',');
-    commaParts.forEach(function(cp) {
-      var trimmed = cp.trim().split(' ')[0].trim(); // first word of each comma part
-      if (trimmed.length >= 3) expanded.add(trimmed);
-      // Also add the full comma-part (e.g. "MORA-MALDONADO" as a unit)
-      var fullTrimmed = cp.trim();
-      if (fullTrimmed.length >= 3) expanded.add(fullTrimmed);
-    });
-    // Split hyphenated parts: "MORA-MALDONADO" -> ["MORA", "MALDONADO"]
-    if (val.indexOf('-') !== -1) {
+    if (val && val.indexOf('-') !== -1) {
       var parts = val.split('-');
       parts.forEach(function(p) {
-        var trimmed = p.trim().replace(/[,.\s]/g, '');
+        var trimmed = p.trim().replace(/[,\.\s]/g, '');
         if (trimmed.length >= 3) expanded.add(p.trim().split(',')[0].trim());
+      });
+    }
+    // Also split on comma (MORA-MALDONADO,VILMA -> VILMA separately)
+    if (val && val.indexOf(',') !== -1) {
+      val.split(',').forEach(function(p) {
+        var trimmed = p.trim();
+        if (trimmed.length >= 3) expanded.add(trimmed.split(' ')[0]);
       });
     }
   });
@@ -187,7 +183,7 @@ function extractKnownPiiValues(extractedText) {
 // Returns piiByPage map using exact Textract bounding boxes — no LLM needed
 
 function normalizeForMatch(str) {
-  return (str || '').toLowerCase().replace(/[\s\-,\.\(\)\\\/]/g, '');
+  return (str || '').toLowerCase().replace(/[\s\-,\.\(\)]/g, '');
 }
 
 function findBoxesFromBlocks(wordBlocks, piiValues) {
