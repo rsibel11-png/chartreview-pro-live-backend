@@ -15,6 +15,9 @@ function requireLayer(mod) {
 const pdfjsLib = requireLayer('pdfjs-dist/legacy/build/pdf.js');
 const { createCanvas } = requireLayer('canvas');
 
+// Disable pdfjs worker — not needed in Node/Lambda (avoids browser API errors)
+pdfjsLib.GlobalWorkerOptions.workerSrc = false;
+
 const RENDER_SCALE = 2.0; // 2x = ~150 DPI on standard letter page — clear for Claude
 
 module.exports.handler = async function(event) {
