@@ -177,7 +177,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   for (var pi = 0; pi < piiValues.length; pi++) {
     var pii = piiValues[pi];
     var piiNorm = normalizeForMatch(pii);
-    if (piiNorm.length < 2) continue;
+    if (piiNorm.length < 1) continue;
 
     // Try to match pii value against concatenated word sequences on each page
     var pageNums = Object.keys(pageMap);
@@ -191,7 +191,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
         for (var len = 1; len <= 6 && start + len <= pageWords.length; len++) {
           var slice = pageWords.slice(start, start + len);
           var concat = normalizeForMatch(slice.map(function(w) { return w.t; }).join(''));
-          if (piiNorm.length >= 3 && concat === piiNorm) {
+          if (piiNorm.length > 0 && concat === piiNorm) {
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
             var minT = Math.min.apply(null, slice.map(function(w) { return w.tp; }));
@@ -240,6 +240,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     'dateofinjury', 'dateofaccident',
     'employersname', 'employername',
     'supervisorname', 'supervisortowhoinjuryreported',
+    // Witness and occupational form fields
+    'witnesstoaccident', 'witnessname', 'nameofwitness',
+    'occupationaldisease', 'injureddescription',
   ];
 
   var pageNums2 = Object.keys(pageMap);
@@ -272,7 +275,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
           // Redact the area above the label: from ~1.5x label height above it,
           // spanning from near-left to ~0.65 page width
           var labelH = Math.max.apply(null, sigSlice.map(function(w) { return w.h; }));
-          var boxHeight = labelH * 2.5;
+          var boxHeight = labelH * 4.0;
           var boxTop = Math.max(0, labelTop - boxHeight);
 
           if (!result[String(pageIdx2)]) result[String(pageIdx2)] = [];
