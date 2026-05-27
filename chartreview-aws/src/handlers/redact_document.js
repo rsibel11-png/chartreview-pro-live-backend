@@ -299,19 +299,33 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
           // Redact the area above the label: from ~1.5x label height above it,
           // spanning from near-left to ~0.65 page width
           var labelH = Math.max.apply(null, sigSlice.map(function(w) { return w.h; }));
-          // For address fields, use a fixed large height (0.15 page) to cover multi-line handwritten content
+          // Address field labels sit ABOVE the handwritten content — redact below the label.
+          // Signature/name field labels sit BELOW the content — redact above the label.
           var isAddressField = (sigConcat === 'homeaddress' || sigConcat === 'homeaddressnumberandstreet');
-          var boxHeight = isAddressField ? 0.15 : labelH * 6.0;
-          var boxTop = Math.max(0, labelTop - boxHeight);
+          var labelBottom = Math.max.apply(null, sigSlice.map(function(w) { return w.tp + w.h; }));
 
           if (!result[String(pageIdx2)]) result[String(pageIdx2)] = [];
-          result[String(pageIdx2)].push({
-            label: 'sig:' + sigConcat.substring(0, 30),
-            x: Math.max(0, labelLeft - 0.01),
-            y: boxTop,
-            width: Math.min(1, 0.92 - labelLeft + 0.01),
-            height: labelTop - boxTop,
-          });
+          if (isAddressField) {
+            // Box goes BELOW the label: from bottom of label down 0.15 page
+            result[String(pageIdx2)].push({
+              label: 'sig:' + sigConcat.substring(0, 30),
+              x: Math.max(0, labelLeft - 0.01),
+              y: labelBottom,
+              width: Math.min(1, 0.92 - labelLeft + 0.01),
+              height: 0.15,
+            });
+          } else {
+            // Box goes ABOVE the label: from N*labelH above the label up to the label
+            var boxHeight = labelH * 6.0;
+            var boxTop = Math.max(0, labelTop - boxHeight);
+            result[String(pageIdx2)].push({
+              label: 'sig:' + sigConcat.substring(0, 30),
+              x: Math.max(0, labelLeft - 0.01),
+              y: boxTop,
+              width: Math.min(1, 0.92 - labelLeft + 0.01),
+              height: labelTop - boxTop,
+            });
+          }
           break; // don't double-match longer slices for same start word
         }
       }
