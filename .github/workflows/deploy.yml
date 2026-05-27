@@ -350,6 +350,39 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Diagnostic — invoke redactRasterizer and check response
+        run: |
+          MINI_PDF="JVBERi0xLjQKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwKL1R5cGUgL1BhZ2VzCi9LaWRzIFszIDAgUl0KL0NvdW50IDEKPD4KZW5kb2JqCjMgMCBvYmoKPDwKL1R5cGUgL1BhZ2UKL1BhcmVudCAyIDAgUgovTWVkaWFCb3ggWzAgMCA2MTIgNzkyXQo+PgplbmRvYmoKeHJlZgowIDQKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAp0cmFpbGVyCjw8Ci9TaXplIDQKL1Jvb3QgMSAwIFIKPj4Kc3RhcnR4cmVmCjE5OAolJUVPRgo="
+          echo "=== Lambda config ==="
+          aws lambda get-function-configuration \
+            --function-name chartreview-pro-prod-redactRasterizer \
+            --region us-east-1 \
+            --query "{handler:Handler,memory:MemorySize,layers:Layers[*].Arn}" \
+            --output json
+          echo "=== Direct invoke ==="
+          aws lambda invoke \
+            --function-name chartreview-pro-prod-redactRasterizer \
+            --cli-binary-format raw-in-base64-out \
+            --payload "{\"pdfBase64\":\"${MINI_PDF}\",\"pageIndex\":0}" \
+            --region us-east-1 \
+            /tmp/out.json 2>&1
+          echo "=== Response ==="
+          python3 -c "
+import json
+with open('/tmp/out.json') as f: d = json.load(f)
+keys = list(d.keys()) if isinstance(d,dict) else str(type(d))
+print('Keys:', keys)
+if isinstance(d,dict):
+  for k in ['error','errorMessage','errorType']: 
+    if k in d: print(k+':',d[k])
+  if 'imageBase64' in d: print('imageBase64 len:', len(d['imageBase64']))
+  if 'width' in d: print('dims:', d['width'],'x',d['height'])
+" 2>&1 || cat /tmp/out.json | head -c 300
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
