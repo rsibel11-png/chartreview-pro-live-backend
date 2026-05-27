@@ -65,8 +65,8 @@ async function updateJob(job_id, patch) {
 // ── STEP 1: Regex scan — extract all known PII values from stored text ────────
 
 function extractKnownPiiValues(extractedText) {
-  // Demographics-only: extract values that appear after explicit demographic labels.
-  // No minimum/maximum character limits — any value following a recognized label is PII.
+  // Extract all values following explicit demographic labels.
+  // No minimum/maximum character limits — any labeled value is treated as PII.
   if (!extractedText || typeof extractedText !== 'string') return [];
   var found = new Set();
 
@@ -79,16 +79,16 @@ function extractKnownPiiValues(extractedText) {
     /Patient['\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]+)/gi,
 
     // Date of birth — must follow label
-    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
+    /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date|Date\s*of\s*Birth)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
 
-    // SSN — dashed format xxx-xx-xxxx OR bare 9-digit number after SSN label
+    // SSN — dashed xxx-xx-xxxx OR bare 9-digit after label
     /(\d{3}-\d{2}-\d{4})/g,
     /(?:SSN|S\.S\.N\.|SOCIAL\s*SECURITY)\s*[:\|]?\s*(\d{9})/gi,
 
     // MRN — must follow label
     /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
 
-    // Account / unit / episode numbers — explicit label
+    // Account / unit / episode numbers
     /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct\s*#|ACCOUNT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
     /(?:UNIT\s*(?:NO\.?|NUMBER|#)|Unit\s*(?:No\.?|#)|Unit\s*#|UNIT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
     /(?:Episode\s*ID|FIN#?)\s*[:\|]\s*([A-Z0-9\-]+)/gi,
@@ -97,14 +97,27 @@ function extractKnownPiiValues(extractedText) {
     /(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#|Member\s*ID#?)\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
 
     // Phone — labeled OR bare xxx-xxx-xxxx OR (xxx) xxx-xxxx
-    /(?:PHONE|CELL|MOBILE|TEL(?:EPHONE)?|Home\s*Phone|Work\s*Phone|Fax)\s*[:\|]\s*([\d\(\)\-\.\s]+)/gi,
+    /(?:PHONE|CELL|MOBILE|TEL(?:EPHONE)?|Home\s*Phone|Work\s*Phone|Phone\s*Number|Phone\s*#|Fax)\s*[:\|]\s*([\d\(\)\-\.\s]+)/gi,
     /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
     /\b(\d{3}-\d{3}-\d{4})\b/g,
 
-    // Address — labeled (Street, City, Home Address)
+    // Address fields
     /\b(?:HOME\s*)?ADDRESS\s*[:|]\s*(.+)/gi,
     /\bStreet\s*[:|]\s*(.+)/gi,
     /\bCity\s*[:|]\s*([A-Za-z][A-Za-z\s]+)/gi,
+    /\bState\s*[\/\\]?\s*Zip\s*[:|]\s*(.+)/gi,
+
+    // Spouse / next of kin / emergency contact / POA / guardian
+    /(?:Spouse|SPOUSE)\s*[:\|]\s*(.+)/gi,
+    /(?:Next\s*of\s*Kin|NOK)\s*[:\|]\s*(.+)/gi,
+    /(?:First\s*Name(?:\s*\/?\s*MI)?|Last\s*Name)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)/gi,
+    /(?:Guardian\s*Name|GUARDIAN)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]+)/gi,
+    /(?:Emergency\s*Contact|EMERGENCY\s*CONTACT)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]+)/gi,
+    /(?:POA|Power\s*of\s*Attorney)\s*[:\|]\s*(.+)/gi,
+    /(?:Responsible\s*Party|Guarantor)\s*[:\|]\s*(.+)/gi,
+
+    // PATIENT NAME footer pattern (operative reports): "PATIENT NAME: LAST,FIRST  #: ACCT"
+    /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+?)(?:\s*#\s*[:\|]?\s*([A-Z0-9\-]+))?$/mgi,
 
     // Email
     /(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi,
@@ -115,23 +128,28 @@ function extractKnownPiiValues(extractedText) {
     var match;
     pattern.lastIndex = 0;
     while ((match = pattern.exec(extractedText)) !== null) {
-      var val;
-      // Phone (xxx) xxx-xxxx uses two capture groups
-      if (match[2] && /^\d{3}$/.test(match[1])) {
-        val = ('(' + match[1] + ') ' + match[2]).trim();
-      } else {
-        val = (match[1] || '').trim();
+      // Collect all non-empty capture groups as separate PII values
+      var groups = [];
+      for (var g = 1; g < match.length; g++) {
+        if (match[g]) groups.push(match[g].trim());
       }
-      if (!val) continue;
-      // Skip ICD/CPT codes
-      if (/^[A-Z]\d{2}\.?\d{0,3}[A-Z]?$/.test(val)) continue;
-      // Skip pure clinical lowercase text (long narrative fragments)
-      if (/^[a-z\s,\.]{15,}$/.test(val)) continue;
-      // Skip single short numbers (age, vitals, room numbers)
-      if (/^\d{1,3}$/.test(val)) continue;
-      // Skip bare 2-letter state abbreviations
-      if (/^[A-Z]{2}$/.test(val)) continue;
-      found.add(val);
+      // Special case: (xxx) xxx-xxxx phone uses two groups that form one value
+      if (groups.length === 2 && /^\d{3}$/.test(groups[0]) && /^\d{3}[-\s]\d{4}$/.test(groups[1])) {
+        groups = ['(' + groups[0] + ') ' + groups[1]];
+      }
+      for (var gi = 0; gi < groups.length; gi++) {
+        var val = groups[gi];
+        if (!val) continue;
+        // Skip ICD/CPT codes
+        if (/^[A-Z]\d{2}\.?\d{0,3}[A-Z]?$/.test(val)) continue;
+        // Skip pure clinical lowercase text (long narrative fragments)
+        if (/^[a-z\s,\.]{15,}$/.test(val)) continue;
+        // Skip single short numbers (age, vitals, room numbers)
+        if (/^\d{1,3}$/.test(val)) continue;
+        // Skip bare 2-letter state abbreviations
+        if (/^[A-Z]{2}$/.test(val)) continue;
+        found.add(val);
+      }
     }
   }
   return Array.from(found);
