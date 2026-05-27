@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-05-25 — Textract-coordinate-first redaction + Claude vision for handwritten only
+// Updated: 2026-05-26 — Wire Textract geometry as primary path; Claude vision fallback only
 
 'use strict';
 
@@ -448,30 +448,51 @@ module.exports.redactDocumentWorker = async function(event) {
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
-    const CHUNK_SIZE = 20;
-    const allPii     = {};
+    var allPii       = {};
 
-    for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
-      const end     = Math.min(start + CHUNK_SIZE, totalPages);
-      const indices = [];
-      for (let i = start; i < end; i++) indices.push(i);
+    // ── PRIMARY PATH: Textract geometry ──────────────────────────────────────
+    // Load word blocks saved at upload time (orgs/.../textract_blocks.json).
+    // Match known PII values against block text — coordinates are already in
+    // PDF space (0-1 normalized), no vision model needed.
+    const wordBlocks = await loadTextractBlocks(fileKey);
 
+    if (wordBlocks && wordBlocks.length > 0) {
+      console.log('[REDACT] Using Textract geometry path — ' + wordBlocks.length + ' word blocks');
       await updateJob(job_id, {
-        progress_message: 'Scanning pages ' + (start + 1) + ' to ' + end + ' of ' + totalPages + '...',
+        progress_message: 'Scanning ' + totalPages + ' pages via Textract geometry...',
         updated_at: new Date().toISOString(),
       });
+      allPii = findBoxesFromBlocks(wordBlocks, knownPiiValues);
+      var textractCount = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
+      console.log('[REDACT] Textract path found ' + textractCount + ' box(es) across ' + Object.keys(allPii).length + ' page(s)');
 
-      const subDoc = await PDFDocument.create();
-      const copied = await subDoc.copyPages(masterDoc, indices);
-      copied.forEach(function(p) { subDoc.addPage(p); });
-      const subBytes = Buffer.from(await subDoc.save());
+    } else {
+      // ── FALLBACK: Claude vision (no Textract blocks available) ─────────────
+      console.log('[REDACT] No Textract blocks found — falling back to Claude vision');
+      const CHUNK_SIZE = 20;
 
-      const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
+      for (let start = 0; start < totalPages; start += CHUNK_SIZE) {
+        const end     = Math.min(start + CHUNK_SIZE, totalPages);
+        const indices = [];
+        for (let i = start; i < end; i++) indices.push(i);
 
-      for (const chunkPageStr of Object.keys(chunkPii)) {
-        const globalPage = start + parseInt(chunkPageStr, 10);
-        const boxes      = chunkPii[chunkPageStr];
-        if (boxes && boxes.length) allPii[String(globalPage)] = boxes;
+        await updateJob(job_id, {
+          progress_message: 'Scanning pages ' + (start + 1) + ' to ' + end + ' of ' + totalPages + ' (vision fallback)...',
+          updated_at: new Date().toISOString(),
+        });
+
+        const subDoc = await PDFDocument.create();
+        const copied = await subDoc.copyPages(masterDoc, indices);
+        copied.forEach(function(p) { subDoc.addPage(p); });
+        const subBytes = Buffer.from(await subDoc.save());
+
+        const chunkPii = await detectHandwrittenPii(subBytes, knownPiiValues);
+
+        for (const chunkPageStr of Object.keys(chunkPii)) {
+          const globalPage = start + parseInt(chunkPageStr, 10);
+          const boxes      = chunkPii[chunkPageStr];
+          if (boxes && boxes.length) allPii[String(globalPage)] = boxes;
+        }
       }
     }
 
