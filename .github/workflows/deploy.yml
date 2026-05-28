@@ -164,7 +164,7 @@ jobs:
             --handler src/handlers/redact_document.redactDocumentStart \
             --timeout 29 \
             --memory-size 512 \
-            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,REDACT_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactDocumentWorker,MODEL_ID=us.anthropic.claude-sonnet-4-6}" \
+            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,REDACT_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactDocumentWorker,REDACT_CASE_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactCaseWorker,MODEL_ID=us.anthropic.claude-sonnet-4-6}" \
             --zip-file fileb://function.zip \
             --region us-east-1
         env:
@@ -292,6 +292,7 @@ jobs:
             "chartreview-pro-prod-verifySummaryWorker"
             "chartreview-pro-prod-redactDocumentStart"
             "chartreview-pro-prod-redactDocumentWorker"
+            "chartreview-pro-prod-redactCaseWorker"
           )
           for FUNC in "${FUNCTIONS[@]}"; do
             echo "Updating $FUNC..."
@@ -301,6 +302,14 @@ jobs:
               --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
           done
           echo "All Lambda functions updated!"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Update redactDocumentStart env vars
+        run: |
+          aws lambda update-function-configuration             --function-name chartreview-pro-prod-redactDocumentStart             --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,REDACT_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactDocumentWorker,REDACT_CASE_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactCaseWorker,MODEL_ID=us.anthropic.claude-sonnet-4-6}"             --region us-east-1
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
