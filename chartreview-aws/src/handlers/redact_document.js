@@ -717,6 +717,56 @@ const _redactDocumentStart = async function(event) {
   const doc_id = event.pathParameters && event.pathParameters.aws_document_id;
   if (!doc_id) return respond(400, { error: 'Missing document ID' });
 
+  // ── Case redaction: POST /documents/redact-case/redact ────────────────────
+  // Reuses the existing route pattern to avoid needing a new API GW resource.
+  // Triggered when doc_id === 'redact-case' and body contains doc_ids array.
+  if (doc_id === 'redact-case') {
+    var caseBody = {};
+    try { caseBody = JSON.parse(event.body || '{}'); } catch(e) {}
+    var caseDocIds = caseBody.doc_ids;
+    var caseOrigId = caseBody.original_document_id;
+    if (!caseDocIds || !Array.isArray(caseDocIds) || caseDocIds.length === 0) {
+      return respond(400, { error: 'Missing doc_ids array' });
+    }
+    var caseDocRecords = [];
+    for (var _cdi = 0; _cdi < caseDocIds.length; _cdi++) {
+      var caseDocRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: caseDocIds[_cdi] } }));
+      if (!caseDocRes.Item) return respond(404, { error: 'Document not found: ' + caseDocIds[_cdi] });
+      caseDocRecords.push(caseDocRes.Item);
+    }
+    caseDocRecords.sort(function(a, b) {
+      var aM = (a.original_filename || '').match(/[Pp]art(\d+)/);
+      var bM = (b.original_filename || '').match(/[Pp]art(\d+)/);
+      return (aM ? parseInt(aM[1], 10) : 0) - (bM ? parseInt(bM[1], 10) : 0);
+    });
+    var caseJobId = randomUUID();
+    var caseNow   = new Date().toISOString();
+    var caseOrgId = caseDocRecords[0].org_id || null;
+    await dynamo.send(new PutCommand({
+      TableName: JOBS_TABLE,
+      Item: {
+        job_id: caseJobId, type: 'redact_case', status: 'processing',
+        original_document_id: caseOrigId || null,
+        org_id: caseOrgId, created_at: caseNow, updated_at: caseNow,
+        progress_message: 'Starting case redaction for ' + caseDocRecords.length + ' part(s)...',
+      },
+    }));
+    await lambda.send(new InvokeCommand({
+      FunctionName:   process.env.REDACT_CASE_WORKER_FUNCTION_NAME,
+      InvocationType: 'Event',
+      Payload: Buffer.from(JSON.stringify({
+        job_id:               caseJobId,
+        doc_records:          caseDocRecords,
+        original_document_id: caseOrigId || null,
+        org_id:               caseOrgId,
+        folder_name:          caseDocRecords[0].folder_name || null,
+        patient_id:           caseDocRecords[0].patient_id  || null,
+      })),
+    }));
+    return respond(200, { job_id: caseJobId });
+  }
+  // ── END case redaction branch ─────────────────────────────────────────────
+
   const docRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
   const doc    = docRes.Item;
   if (!doc) return respond(404, { error: 'Document not found' });
