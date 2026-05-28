@@ -603,25 +603,73 @@ async function applyRedactions(pdfBytes, piiByPage) {
     const boxes     = piiByPage[pageIndexStr];
     if (pageIndex >= pages.length || !boxes || !boxes.length) continue;
 
-    const page = pages[pageIndex];
-    const sz   = page.getSize();
-    const w    = sz.width;
-    const h    = sz.height;
+    const page     = pages[pageIndex];
+    const sz       = page.getSize();
+    const rawW     = sz.width;
+    const rawH     = sz.height;
+
+    // Read PDF page rotation (0 / 90 / 180 / 270).
+    // Textract renders the page visually (post-rotation) before OCR, so its
+    // bounding boxes are in the *visually-correct* coordinate space.
+    // pdf-lib draws in the *raw* (pre-rotation) coordinate space.
+    // We must transform Textract's normalized [0-1] coords into raw space.
+    var rotation = 0;
+    try {
+      var rotNode = page.node.get(page.node.doc.context.obj('Rotate'));
+      if (rotNode) rotation = Number(rotNode.value || rotNode.numberValue || 0);
+    } catch(_e) {
+      try { rotation = page.getRotation ? page.getRotation().angle : 0; } catch(_e2) { rotation = 0; }
+    }
+    rotation = ((rotation % 360) + 360) % 360; // normalise to 0/90/180/270
 
     for (const box of boxes) {
-      // Claude returns normalized coords with top-left origin (y=0 at top).
-      // pdf-lib uses bottom-left origin, so we flip Y.
-      // No artificial shifts — trust Claude's box placement exactly.
-      const px = box.x * w;
-      const py = h - (box.y + box.height) * h;
-      const pw = box.width  * w;
-      const ph = box.height * h;
+      // box.x, box.y, box.width, box.height are Textract-normalized [0-1],
+      // with origin at TOP-LEFT of the *visually rendered* page.
+      var bx = box.x;
+      var by = box.y;
+      var bw = box.width;
+      var bh = box.height;
+
+      var px, py, pw, ph;
+
+      if (rotation === 0) {
+        // Standard: visual space == raw space, just flip Y for pdf-lib
+        px = bx * rawW;
+        py = rawH - (by + bh) * rawH;
+        pw = bw * rawW;
+        ph = bh * rawH;
+
+      } else if (rotation === 90) {
+        // Visual page is rawH wide × rawW tall (axes swapped).
+        // Textract bx/by are in that visual space.
+        // Map back to raw space where x-axis = raw width, y-axis = raw height.
+        // In raw space: x_raw = by * rawW,  y_raw = (1 - bx - bw) * rawH
+        px = by * rawW;
+        py = (1 - bx - bw) * rawH;
+        pw = bh * rawW;
+        ph = bw * rawH;
+
+      } else if (rotation === 270) {
+        // Opposite of 90
+        px = (1 - by - bh) * rawW;
+        py = bx * rawH;
+        pw = bh * rawW;
+        ph = bw * rawH;
+
+      } else {
+        // 180: flip both axes
+        px = (1 - bx - bw) * rawW;
+        py = (by) * rawH;
+        pw = bw * rawW;
+        ph = bh * rawH;
+      }
+
       page.drawRectangle({
         x:      Math.max(0, px),
         y:      Math.max(0, py),
-        width:  Math.min(w - Math.max(0, px), pw),
-        height: Math.min(h, ph),
-        color:   rgb(0, 0, 0),
+        width:  Math.min(rawW - Math.max(0, px), Math.abs(pw)),
+        height: Math.min(rawH - Math.max(0, py), Math.abs(ph)),
+        color:  rgb(0, 0, 0),
         opacity: 1,
       });
     }
