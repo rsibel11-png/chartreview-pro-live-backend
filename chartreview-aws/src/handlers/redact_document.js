@@ -358,10 +358,14 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     var _pageNum = parseInt(allPageNums2[_pgi], 10);
     var _pageIdx = _pageNum - 1;
     var _words   = pageMap[_pageNum].slice().sort(function(a, b) { return a.l - b.l; });
-    // DEBUG: log footer tokens (tp > 0.88) to diagnose page 26
-    var _footerToks = _words.filter(function(w) { return w.tp > 0.88; });
+    // DEBUG: log footer/lower tokens to diagnose page 26
+    var _footerToks = _words.filter(function(w) { return w.tp > 0.75; });
     if (_footerToks.length > 0) {
-      console.log('[GAP-PASS DEBUG] page=' + _pageNum + ' footer tokens: ' + JSON.stringify(_footerToks.map(function(w){ return {t:w.t, l:Math.round(w.l*1000)/1000, tp:Math.round(w.tp*1000)/1000, w:Math.round(w.w*1000)/1000}; })));
+      console.log('[GAP-PASS DEBUG] page=' + _pageNum + ' lower-half tokens: ' + JSON.stringify(_footerToks.map(function(w){ return {t:w.t, l:Math.round(w.l*1000)/1000, tp:Math.round(w.tp*1000)/1000, w:Math.round(w.w*1000)/1000}; })));
+    }
+    // Log ALL words on page 26 specifically
+    if (_pageNum === 26) {
+      console.log('[PAGE26 ALL WORDS] count=' + _words.length + ' words: ' + JSON.stringify(_words.map(function(w){ return {t:w.t, l:Math.round(w.l*1000)/1000, tp:Math.round(w.tp*1000)/1000}; })));
     }
 
     for (var _wi = 0; _wi < _words.length; _wi++) {
