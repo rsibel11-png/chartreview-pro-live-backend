@@ -721,49 +721,57 @@ const _redactDocumentStart = async function(event) {
   // Reuses the existing route pattern to avoid needing a new API GW resource.
   // Triggered when doc_id === 'redact-case' and body contains doc_ids array.
   if (doc_id === 'redact-case') {
-    var caseBody = {};
-    try { caseBody = JSON.parse(event.body || '{}'); } catch(e) {}
-    var caseDocIds = caseBody.doc_ids;
-    var caseOrigId = caseBody.original_document_id;
-    if (!caseDocIds || !Array.isArray(caseDocIds) || caseDocIds.length === 0) {
-      return respond(400, { error: 'Missing doc_ids array' });
+    try {
+      var caseBody = {};
+      try { caseBody = JSON.parse(event.body || '{}'); } catch(e) {}
+      var caseDocIds = caseBody.doc_ids;
+      var caseOrigId = caseBody.original_document_id;
+      console.log('[redact-case] doc_ids:', JSON.stringify(caseDocIds), 'orig:', caseOrigId);
+      if (!caseDocIds || !Array.isArray(caseDocIds) || caseDocIds.length === 0) {
+        return respond(400, { error: 'Missing doc_ids array' });
+      }
+      var caseDocRecords = [];
+      for (var _cdi = 0; _cdi < caseDocIds.length; _cdi++) {
+        var caseDocRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: caseDocIds[_cdi] } }));
+        if (!caseDocRes.Item) return respond(404, { error: 'Document not found: ' + caseDocIds[_cdi] });
+        caseDocRecords.push(caseDocRes.Item);
+      }
+      caseDocRecords.sort(function(a, b) {
+        var aM = (a.original_filename || '').match(/[Pp]art(\d+)/);
+        var bM = (b.original_filename || '').match(/[Pp]art(\d+)/);
+        return (aM ? parseInt(aM[1], 10) : 0) - (bM ? parseInt(bM[1], 10) : 0);
+      });
+      var caseJobId = randomUUID();
+      var caseNow   = new Date().toISOString();
+      var caseOrgId = caseDocRecords[0].org_id || null;
+      console.log('[redact-case] creating job', caseJobId, 'for', caseDocRecords.length, 'docs, worker:', process.env.REDACT_CASE_WORKER_FUNCTION_NAME);
+      await dynamo.send(new PutCommand({
+        TableName: JOBS_TABLE,
+        Item: {
+          job_id: caseJobId, type: 'redact_case', status: 'processing',
+          original_document_id: caseOrigId || null,
+          org_id: caseOrgId, created_at: caseNow, updated_at: caseNow,
+          progress_message: 'Starting case redaction for ' + caseDocRecords.length + ' part(s)...',
+        },
+      }));
+      await lambdaClient.send(new InvokeCommand({
+        FunctionName:   process.env.REDACT_CASE_WORKER_FUNCTION_NAME,
+        InvocationType: 'Event',
+        Payload: Buffer.from(JSON.stringify({
+          job_id:               caseJobId,
+          doc_records:          caseDocRecords,
+          original_document_id: caseOrigId || null,
+          org_id:               caseOrgId,
+          folder_name:          caseDocRecords[0].folder_name || null,
+          patient_id:           caseDocRecords[0].patient_id  || null,
+        })),
+      }));
+      console.log('[redact-case] worker invoked, returning job_id', caseJobId);
+      return respond(200, { job_id: caseJobId });
+    } catch (caseErr) {
+      console.error('[redact-case] ERROR:', caseErr.message, caseErr.stack);
+      return respond(500, { error: 'Case redaction start failed: ' + caseErr.message });
     }
-    var caseDocRecords = [];
-    for (var _cdi = 0; _cdi < caseDocIds.length; _cdi++) {
-      var caseDocRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: caseDocIds[_cdi] } }));
-      if (!caseDocRes.Item) return respond(404, { error: 'Document not found: ' + caseDocIds[_cdi] });
-      caseDocRecords.push(caseDocRes.Item);
-    }
-    caseDocRecords.sort(function(a, b) {
-      var aM = (a.original_filename || '').match(/[Pp]art(\d+)/);
-      var bM = (b.original_filename || '').match(/[Pp]art(\d+)/);
-      return (aM ? parseInt(aM[1], 10) : 0) - (bM ? parseInt(bM[1], 10) : 0);
-    });
-    var caseJobId = randomUUID();
-    var caseNow   = new Date().toISOString();
-    var caseOrgId = caseDocRecords[0].org_id || null;
-    await dynamo.send(new PutCommand({
-      TableName: JOBS_TABLE,
-      Item: {
-        job_id: caseJobId, type: 'redact_case', status: 'processing',
-        original_document_id: caseOrigId || null,
-        org_id: caseOrgId, created_at: caseNow, updated_at: caseNow,
-        progress_message: 'Starting case redaction for ' + caseDocRecords.length + ' part(s)...',
-      },
-    }));
-    await lambdaClient.send(new InvokeCommand({
-      FunctionName:   process.env.REDACT_CASE_WORKER_FUNCTION_NAME,
-      InvocationType: 'Event',
-      Payload: Buffer.from(JSON.stringify({
-        job_id:               caseJobId,
-        doc_records:          caseDocRecords,
-        original_document_id: caseOrigId || null,
-        org_id:               caseOrgId,
-        folder_name:          caseDocRecords[0].folder_name || null,
-        patient_id:           caseDocRecords[0].patient_id  || null,
-      })),
-    }));
-    return respond(200, { job_id: caseJobId });
   }
   // ── END case redaction branch ─────────────────────────────────────────────
 
