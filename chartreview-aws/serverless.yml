@@ -469,6 +469,7 @@ resources:
       DOCUMENTS_TABLE: chartreview-documents-prod
       JOBS_TABLE: chartreview-jobs-prod
       REDACT_WORKER_FUNCTION_NAME: chartreview-pro-prod-redactDocumentWorker
+      REDACT_CASE_WORKER_FUNCTION_NAME: chartreview-pro-prod-redactCaseWorker
       MODEL_ID: us.anthropic.claude-sonnet-4-6
     events:
       - http:
@@ -489,47 +490,6 @@ resources:
       DOCUMENTS_TABLE: chartreview-documents-prod
       JOBS_TABLE: chartreview-jobs-prod
       MODEL_ID: us.anthropic.claude-sonnet-4-6
-  redactCaseStart:
-    handler: src/handlers/redact_document.redactCaseStart
-    timeout: 29
-    environment:
-      S3_BUCKET: chartreview-documents-prod
-      DOCUMENTS_TABLE: chartreview-documents-prod
-      JOBS_TABLE: chartreview-jobs-prod
-      REDACT_CASE_WORKER_FUNCTION_NAME: chartreview-pro-prod-redactCaseWorker
-      MODEL_ID: us.anthropic.claude-sonnet-4-6
-    events:
-      - http:
-          path: /redact-case
-          method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Version
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
-      - http:
-          path: /redact-case
-          method: options
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Version
-              - x-api-key
-              - X-Api-Key
-              - x-org-id
-              - X-Org-Id
-            allowCredentials: false
-
   redactCaseWorker:
     handler: src/handlers/redact_document.redactCaseWorker
     timeout: 900
