@@ -332,6 +332,94 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     }
   }
 
+  // ── Patient-Name label gap pass ──────────────────────────────────────────────
+  // Find lines containing a "PATIENT NAME" label and redact everything after it
+  // until a gap > 2% of page width appears (stops before ACCOUNT # etc.)
+  // Geometry-only: immune to OCR artifacts in the name itself.
+  var PATIENT_LABEL_NORM = ['patientname', 'patientname:', 'patient:', 'patientnames:', 'ptname', 'ptname:'];
+  var GAP_THRESHOLD   = 0.02;  // >2% page width = field boundary
+  var LINE_TOLERANCE  = 0.012; // words within 1.2% vertical = same line
+
+  function isPatientLabel(txt) {
+    var n = normalizeForMatch(txt);
+    for (var _pi = 0; _pi < PATIENT_LABEL_NORM.length; _pi++) {
+      if (n === PATIENT_LABEL_NORM[_pi]) return true;
+    }
+    // also catch "PATIENT" alone at start of a label sequence
+    if (n === 'patient') return true;
+    return false;
+  }
+
+  var allPageNums2 = Object.keys(pageMap);
+  for (var _pgi = 0; _pgi < allPageNums2.length; _pgi++) {
+    var _pageNum = parseInt(allPageNums2[_pgi], 10);
+    var _pageIdx = _pageNum - 1;
+    var _words   = pageMap[_pageNum].slice().sort(function(a, b) { return a.l - b.l; });
+
+    for (var _wi = 0; _wi < _words.length; _wi++) {
+      var _w = _words[_wi];
+
+      // Detect label: single word "PATIENT:" or two-word "PATIENT NAME[:]"
+      var _labelRight = _w.l + _w.w;
+      var _labelTop   = _w.tp;
+      var _afterIdx   = _wi;
+      var _isLabel    = false;
+
+      if (isPatientLabel(_w.t)) {
+        _isLabel = true;
+      } else if (_wi + 1 < _words.length) {
+        var _w2 = _words[_wi + 1];
+        if (Math.abs(_w2.tp - _w.tp) < LINE_TOLERANCE) {
+          var _combo = normalizeForMatch(_w.t + _w2.t);
+          if (_combo.indexOf('patientname') === 0 || _combo === 'patientnames') {
+            _isLabel    = true;
+            _labelRight = _w2.l + _w2.w;
+            _afterIdx   = _wi + 1;
+          }
+        }
+      }
+
+      if (!_isLabel) continue;
+
+      // Scan rightward — redact until gap > threshold
+      var _redactStart  = null;
+      var _redactEnd    = _labelRight;
+      var _prevRight    = _labelRight;
+
+      for (var _ci = _afterIdx + 1; _ci < _words.length; _ci++) {
+        var _cw = _words[_ci];
+        if (Math.abs(_cw.tp - _labelTop) > LINE_TOLERANCE) continue;
+        if (_cw.l < _labelRight) continue;
+
+        var _gap = _cw.l - _prevRight;
+
+        if (_redactStart === null) {
+          // Initial gap after label colon/space — skip if huge (no content)
+          if (_gap > GAP_THRESHOLD * 4) break;
+          _redactStart = _cw.l;
+        } else {
+          if (_gap > GAP_THRESHOLD) break; // field boundary — stop
+        }
+
+        _redactEnd  = _cw.l + _cw.w;
+        _prevRight  = _cw.l + _cw.w;
+      }
+
+      if (_redactStart !== null && _redactEnd > _redactStart) {
+        var _pk = String(_pageIdx);
+        if (!result[_pk]) result[_pk] = [];
+        result[_pk].push({
+          label:  'patient_name_label_gap',
+          x:      Math.max(0, _redactStart - 0.003),
+          y:      _labelTop,
+          width:  (_redactEnd - _redactStart) + 0.006,
+          height: (_w.h || 0.012) * 1.4,
+        });
+      }
+    }
+  }
+  // ── End patient-name label gap pass ──────────────────────────────────────────
+
   return result;
 }
 
