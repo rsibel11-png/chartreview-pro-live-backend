@@ -489,3 +489,32 @@ resources:
       DOCUMENTS_TABLE: chartreview-documents-prod
       JOBS_TABLE: chartreview-jobs-prod
       MODEL_ID: us.anthropic.claude-sonnet-4-6
+  redactCaseStart:
+    handler: src/handlers/redact_document.redactCaseStart
+    timeout: 29
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      REDACT_CASE_WORKER_FUNCTION_NAME: chartreview-pro-prod-redactCaseWorker
+      MODEL_ID: us.anthropic.claude-sonnet-4-6
+    events:
+      - http:
+          path: /documents/redact-case
+          method: post
+          cors: true
+      - http:
+          path: /documents/redact-case
+          method: options
+          cors: true
+
+  redactCaseWorker:
+    handler: src/handlers/redact_document.redactCaseWorker
+    timeout: 900
+    memorySize: 3008
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
+      JOBS_TABLE: chartreview-jobs-prod
+      MODEL_ID: us.anthropic.claude-sonnet-4-6
+
