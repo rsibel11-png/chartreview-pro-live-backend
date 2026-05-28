@@ -336,7 +336,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   // Find lines containing a "PATIENT NAME" label and redact everything after it
   // until a gap > 2% of page width appears (stops before ACCOUNT # etc.)
   // Geometry-only: immune to OCR artifacts in the name itself.
-  var PATIENT_LABEL_NORM = ['patientname', 'patientname:', 'patient:', 'patientnames:', 'ptname', 'ptname:'];
+  var PATIENT_LABEL_NORM = ['patientname', 'patientname:', 'patient:', 'patientnames:', 'ptname', 'ptname:', 'name:'];
   // Labels that signal end of patient name field on same line
   var FIELD_STOP_LABELS = ['account', 'account#', 'acct', 'acct#', 'unit', 'unit#', 'unitno', 'room', 'dob', 'mrn', 'ssn', 'phone'];
   var GAP_THRESHOLD   = 0.05;  // >5% page width = field boundary (covers OCR-split tokens within a name)
@@ -358,6 +358,18 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     var _pageNum = parseInt(allPageNums2[_pgi], 10);
     var _pageIdx = _pageNum - 1;
     var _words   = pageMap[_pageNum].slice().sort(function(a, b) { return a.l - b.l; });
+    // Pre-merge: mark two-token "PATIENT NAME:" sequences as a single label trigger
+    // so isPatientLabel fires even when Textract splits them into separate tokens
+    for (var _mi = 0; _mi < _words.length - 1; _mi++) {
+      var _wA = _words[_mi], _wB = _words[_mi + 1];
+      var _nA = normalizeForMatch(_wA.t), _nB = normalizeForMatch(_wB.t);
+      if (_nA === 'patient' && _nB === 'name:') {
+        // Merge: widen wA to cover both, mark as combined label, remove wB
+        _wA.t = 'PATIENT NAME:';
+        _wA.w = (_wB.l + _wB.w) - _wA.l;
+        _words.splice(_mi + 1, 1);
+      }
+    }
     // DEBUG: log footer/lower tokens to diagnose page 26
     var _footerToks = _words.filter(function(w) { return w.tp > 0.75; });
     if (_footerToks.length > 0) {
