@@ -500,11 +500,11 @@ resources:
       MODEL_ID: us.anthropic.claude-sonnet-4-6
     events:
       - http:
-          path: /documents/redact-case
+          path: /redact-case
           method: post
           cors: true
       - http:
-          path: /documents/redact-case
+          path: /redact-case
           method: options
           cors: true
 
