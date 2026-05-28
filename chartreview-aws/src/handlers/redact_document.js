@@ -734,8 +734,38 @@ module.exports.redactDocumentWorker = async function(event) {
         progress_message: 'Scanning ' + totalPages + ' pages via Textract geometry...',
         updated_at: new Date().toISOString(),
       });
-      // Pre-filter piiValues: remove standalone 4-digit military times and pure short numbers
-    // that are likely timestamps (e.g. 1825, 0656) not patient identifiers
+      // Pre-filter piiValues: remove standalone 4-digit military times, pure short numbers,
+    // and street numbers extracted from facility/hospital addresses in the document itself.
+    // Strategy: scan extractedText for lines that look like facility address lines
+    // (follow a known facility name pattern) and collect their leading street numbers.
+    // These numbers are facility identifiers, not patient PII.
+    var facilityStreetNums = (function() {
+      var nums = new Set();
+      if (extractedText) {
+        // Match lines that are a street address following a hospital/medical/facility name
+        // e.g. "SUNRISE HOSPITAL AND MEDICAL CENTER\n3186 S MARYLAND PKWY"
+        // or "Sunrise Hospital/Med Ctr.\n3186 S MARYLAND PKWY"
+        var lines = extractedText.split(/\r?\n/);
+        for (var _li = 0; _li < lines.length; _li++) {
+          var line = lines[_li].trim();
+          // If line looks like a street address (starts with number + street name)
+          var addrMatch = line.match(/^(\d{3,6})\s+[A-Z]/i);
+          if (addrMatch) {
+            // Check if previous non-empty line contains a facility keyword
+            var prevLine = '';
+            for (var _pi2 = _li - 1; _pi2 >= 0 && !prevLine; _pi2--) {
+              prevLine = lines[_pi2].trim();
+            }
+            var isFacilityLine = /hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent/i.test(prevLine);
+            if (isFacilityLine) {
+              nums.add(addrMatch[1]); // add the street number (e.g. "3186")
+            }
+          }
+        }
+      }
+      return nums;
+    })();
+
     var filteredPiiValues = knownPiiValues.filter(function(v) {
       var trimmed = (v || '').trim();
       // Pure 4-digit value that looks like a military time (0000-2359) — skip
@@ -745,12 +775,8 @@ module.exports.redactDocumentWorker = async function(event) {
       }
       // Pure 1-3 digit number — too generic
       if (/^\d{1,3}$/.test(trimmed)) return false;
-      // Known hospital/facility address fragments — skip street numbers that match facility addresses
-      // This prevents redacting the hospital's own building number from headers
-      var FACILITY_ADDRESS_FRAGMENTS = ['3186', '3186 S MARYLAND', '3186 S MARYLAND PKWY'];
-      for (var _fi = 0; _fi < FACILITY_ADDRESS_FRAGMENTS.length; _fi++) {
-        if (trimmed === FACILITY_ADDRESS_FRAGMENTS[_fi]) return false;
-      }
+      // Facility street numbers extracted dynamically from document headers — skip
+      if (facilityStreetNums.has(trimmed)) return false;
       return true;
     });
     allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues);
