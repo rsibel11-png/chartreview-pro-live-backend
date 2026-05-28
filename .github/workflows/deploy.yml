@@ -190,6 +190,24 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Create redactCaseWorker Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-redactCaseWorker --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-redactCaseWorker \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/redact_document.redactCaseWorker \
+            --timeout 900 \
+            --memory-size 1024 \
+            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,MODEL_ID=us.anthropic.claude-sonnet-4-6}" \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Wire /documents/{id}/redact route in API Gateway
         run: |
           API_ID="1h4kpspbs6"
