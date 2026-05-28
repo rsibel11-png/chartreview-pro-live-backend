@@ -734,7 +734,26 @@ module.exports.redactDocumentWorker = async function(event) {
         progress_message: 'Scanning ' + totalPages + ' pages via Textract geometry...',
         updated_at: new Date().toISOString(),
       });
-      allPii = findBoxesFromBlocks(wordBlocks, knownPiiValues);
+      // Pre-filter piiValues: remove standalone 4-digit military times and pure short numbers
+    // that are likely timestamps (e.g. 1825, 0656) not patient identifiers
+    var filteredPiiValues = knownPiiValues.filter(function(v) {
+      var trimmed = (v || '').trim();
+      // Pure 4-digit value that looks like a military time (0000-2359) — skip
+      if (/^\d{4}$/.test(trimmed)) {
+        var n = parseInt(trimmed, 10);
+        if (n >= 0 && n <= 2359 && (n % 100) < 60) return false;
+      }
+      // Pure 1-3 digit number — too generic
+      if (/^\d{1,3}$/.test(trimmed)) return false;
+      // Known hospital/facility address fragments — skip street numbers that match facility addresses
+      // This prevents redacting the hospital's own building number from headers
+      var FACILITY_ADDRESS_FRAGMENTS = ['3186', '3186 S MARYLAND', '3186 S MARYLAND PKWY'];
+      for (var _fi = 0; _fi < FACILITY_ADDRESS_FRAGMENTS.length; _fi++) {
+        if (trimmed === FACILITY_ADDRESS_FRAGMENTS[_fi]) return false;
+      }
+      return true;
+    });
+    allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues);
       var textractCount = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
       console.log('[REDACT] Textract path found ' + textractCount + ' box(es) across ' + Object.keys(allPii).length + ' page(s)');
 
