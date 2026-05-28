@@ -888,3 +888,191 @@ module.exports.redactDocumentWorker = async function(event) {
     });
   }
 };
+
+// ── CASE REDACTION START handler ─────────────────────────────────────────────
+const _redactCaseStart = async function(event) {
+  var body = {};
+  try { body = JSON.parse(event.body || '{}'); } catch(e) {}
+  var doc_ids = body.doc_ids;
+  var original_document_id = body.original_document_id;
+  if (!doc_ids || !Array.isArray(doc_ids) || doc_ids.length === 0) {
+    return respond(400, { error: 'Missing doc_ids array' });
+  }
+  var docRecords = [];
+  for (var _di = 0; _di < doc_ids.length; _di++) {
+    var docRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_ids[_di] } }));
+    if (!docRes.Item) return respond(404, { error: 'Document not found: ' + doc_ids[_di] });
+    docRecords.push(docRes.Item);
+  }
+  var org_id = docRecords[0].org_id || body.org_id || null;
+  var folder_name = docRecords[0].folder_name || null;
+  var patient_id = docRecords[0].patient_id || null;
+  docRecords.sort(function(a, b) {
+    var aName = (a.original_filename || a.file_name || '').toLowerCase();
+    var bName = (b.original_filename || b.file_name || '').toLowerCase();
+    var aMatch = aName.match(/part(\d+)/i);
+    var bMatch = bName.match(/part(\d+)/i);
+    var aNum = aMatch ? parseInt(aMatch[1], 10) : 0;
+    var bNum = bMatch ? parseInt(bMatch[1], 10) : 0;
+    return aNum - bNum;
+  });
+  var job_id = randomUUID();
+  var now = new Date().toISOString();
+  await dynamo.send(new PutCommand({
+    TableName: JOBS_TABLE,
+    Item: {
+      job_id, type: 'redact_case', status: 'processing',
+      original_document_id: original_document_id || null,
+      org_id, created_at: now, updated_at: now,
+      progress_message: 'Starting case redaction for ' + docRecords.length + ' part(s)...',
+    },
+  }));
+  await lambda.send(new InvokeCommand({
+    FunctionName:   process.env.REDACT_CASE_WORKER_FUNCTION_NAME,
+    InvocationType: 'Event',
+    Payload:        Buffer.from(JSON.stringify({
+      job_id, doc_records: docRecords,
+      original_document_id: original_document_id || null,
+      org_id, folder_name, patient_id,
+    })),
+  }));
+  return respond(200, { job_id });
+};
+
+module.exports.redactCaseStart = validateApiKey(_redactCaseStart);
+
+// ── CASE REDACTION WORKER ─────────────────────────────────────────────────────
+module.exports.redactCaseWorker = async function(event) {
+  var job_id               = event.job_id;
+  var doc_records          = event.doc_records;
+  var original_document_id = event.original_document_id;
+  var org_id               = event.org_id;
+  var folder_name          = event.folder_name;
+  var patient_id           = event.patient_id;
+
+  try {
+    await updateJob(job_id, { progress_message: 'Redacting ' + doc_records.length + ' part(s) in parallel...', updated_at: new Date().toISOString() });
+
+    var partResults = await Promise.all(doc_records.map(async function(doc) {
+      var doc_id   = doc.aws_document_id;
+      var fileKey  = doc.file_key || doc.s3_key;
+      var pdfBytes = await getS3Bytes(fileKey);
+      var extractedText  = await fetchExtractedText(doc_id);
+      var knownPiiValues = extractKnownPiiValues(extractedText);
+      var wordBlocks     = await loadTextractBlocks(fileKey);
+      var allPii         = {};
+
+      var facilityStreetNums = (function() {
+        var nums = new Set();
+        if (extractedText) {
+          var lines = extractedText.split(/\r?\n/);
+          for (var _li = 0; _li < lines.length; _li++) {
+            var line = lines[_li].trim();
+            var addrMatch = line.match(/^(\d{3,6})\s+[A-Z]/i);
+            if (addrMatch) {
+              var prevLine = '';
+              for (var _pi2 = _li - 1; _pi2 >= 0 && !prevLine; _pi2--) { prevLine = lines[_pi2].trim(); }
+              if (/hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent/i.test(prevLine)) {
+                nums.add(addrMatch[1]);
+              }
+            }
+          }
+        }
+        return nums;
+      })();
+
+      var filteredPiiValues = knownPiiValues.filter(function(v) {
+        var trimmed = (v || '').trim();
+        if (/^\d{4}$/.test(trimmed)) { var n = parseInt(trimmed, 10); if (n >= 0 && n <= 2359 && (n % 100) < 60) return false; }
+        if (/^\d{1,3}$/.test(trimmed)) return false;
+        if (facilityStreetNums.has(trimmed)) return false;
+        return true;
+      });
+
+      if (wordBlocks && wordBlocks.length > 0) {
+        allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues);
+      } else {
+        var masterDocV = await PDFDocument.load(pdfBytes);
+        var totalPagesV = masterDocV.getPageCount();
+        var CHUNK_SIZE = 20;
+        for (var startV = 0; startV < totalPagesV; startV += CHUNK_SIZE) {
+          var endV = Math.min(startV + CHUNK_SIZE, totalPagesV);
+          var indicesV = [];
+          for (var iv = startV; iv < endV; iv++) indicesV.push(iv);
+          var subDocV = await PDFDocument.create();
+          var copiedV = await subDocV.copyPages(masterDocV, indicesV);
+          copiedV.forEach(function(p) { subDocV.addPage(p); });
+          var subBytesV = Buffer.from(await subDocV.save());
+          var chunkPii = await detectHandwrittenPii(subBytesV, knownPiiValues);
+          for (var cpStr of Object.keys(chunkPii)) {
+            var gp = startV + parseInt(cpStr, 10);
+            if (chunkPii[cpStr] && chunkPii[cpStr].length) allPii[String(gp)] = chunkPii[cpStr];
+          }
+        }
+      }
+
+      var redactedBytes = await applyRedactions(pdfBytes, allPii);
+      var redactCount   = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
+      return { redactedBytes, redactCount };
+    }));
+
+    await updateJob(job_id, { progress_message: 'Merging ' + partResults.length + ' redacted part(s)...', updated_at: new Date().toISOString() });
+
+    var mergedDoc = await PDFDocument.create();
+    var totalRedactions = 0;
+    for (var _ri = 0; _ri < partResults.length; _ri++) {
+      var partDoc    = await PDFDocument.load(partResults[_ri].redactedBytes);
+      var pgCount    = partDoc.getPageCount();
+      var pgIndices  = [];
+      for (var _pii = 0; _pii < pgCount; _pii++) pgIndices.push(_pii);
+      var copiedPgs  = await mergedDoc.copyPages(partDoc, pgIndices);
+      copiedPgs.forEach(function(p) { mergedDoc.addPage(p); });
+      totalRedactions += partResults[_ri].redactCount;
+    }
+    var mergedBytes = Buffer.from(await mergedDoc.save());
+    var totalPages  = mergedDoc.getPageCount();
+
+    var baseName   = (doc_records[0].original_filename || 'document').replace(/_Part\d+\.pdf$/i, '').replace(/\.pdf$/i, '');
+    var newUUID    = randomUUID();
+    var mergedKey  = 'orgs/' + org_id + '/documents/' + newUUID + '/' + baseName + '_REDACTED.pdf';
+    var mergedName = baseName + '_REDACTED.pdf';
+
+    await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: mergedKey, Body: mergedBytes, ContentType: 'application/pdf' }));
+
+    var newDocId = randomUUID();
+    await dynamo.send(new PutCommand({
+      TableName: DOCS_TABLE,
+      Item: {
+        aws_document_id:   newDocId,
+        org_id:            org_id || null,
+        patient_id:        patient_id || null,
+        folder_name:       folder_name || null,
+        provider_name:     doc_records[0].provider_name || null,
+        original_filename: mergedName,
+        file_key:          mergedKey,
+        s3_key:            mergedKey,
+        is_redacted:       true,
+        redacted_from:     original_document_id || doc_records.map(function(d) { return d.aws_document_id; }).join(','),
+        redaction_count:   totalRedactions,
+        redacted_pages:    totalPages,
+        status:            'processed',
+        is_clinical:       false,
+        created_at:        new Date().toISOString(),
+        updated_at:        new Date().toISOString(),
+      },
+    }));
+
+    var downloadUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: mergedKey }), { expiresIn: 3600 });
+
+    await updateJob(job_id, {
+      status: 'complete',
+      progress_message: 'Case redaction complete - ' + totalRedactions + ' item(s) redacted across ' + totalPages + ' page(s).',
+      result: { new_doc_id: newDocId, download_url: downloadUrl, redaction_count: totalRedactions, redacted_pages: totalPages },
+      updated_at: new Date().toISOString(),
+    });
+
+  } catch (err) {
+    console.error('Case redaction worker error:', err);
+    await updateJob(job_id, { status: 'error', progress_message: 'Case redaction failed: ' + err.message, updated_at: new Date().toISOString() });
+  }
+};
