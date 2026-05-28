@@ -341,12 +341,13 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   var LINE_TOLERANCE  = 0.012; // words within 1.2% vertical = same line
 
   function isPatientLabel(txt) {
-    var n = normalizeForMatch(txt);
+    // Must end with ':' to be a form field label (not a narrative word)
+    var trimmed = (txt || '').trim();
+    if (trimmed.charAt(trimmed.length - 1) !== ':') return false;
+    var n = normalizeForMatch(trimmed);
     for (var _pi = 0; _pi < PATIENT_LABEL_NORM.length; _pi++) {
       if (n === PATIENT_LABEL_NORM[_pi]) return true;
     }
-    // also catch "PATIENT" alone at start of a label sequence
-    if (n === 'patient') return true;
     return false;
   }
 
@@ -370,8 +371,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
       } else if (_wi + 1 < _words.length) {
         var _w2 = _words[_wi + 1];
         if (Math.abs(_w2.tp - _w.tp) < LINE_TOLERANCE) {
-          var _combo = normalizeForMatch(_w.t + _w2.t);
-          if (_combo.indexOf('patientname') === 0 || _combo === 'patientnames') {
+          var _rawCombo = _w.t + _w2.t;
+          var _combo = normalizeForMatch(_rawCombo);
+          if ((_rawCombo.trim().charAt(_rawCombo.trim().length-1) === ':') && (_combo.indexOf('patientname') === 0 || _combo === 'patientnames')) {
             _isLabel    = true;
             _labelRight = _w2.l + _w2.w;
             _afterIdx   = _wi + 1;
