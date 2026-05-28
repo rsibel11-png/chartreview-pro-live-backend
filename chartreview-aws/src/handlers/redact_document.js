@@ -201,7 +201,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   for (var pi = 0; pi < piiValues.length; pi++) {
     var pii = piiValues[pi];
     var piiNorm = normalizeForMatch(pii);
-    if (piiNorm.length < 1) continue;
+    if (piiNorm.length < 4) continue; // skip short/junk values (e.g. 'Med', 's') to prevent over-redaction
 
     // Try to match pii value against concatenated word sequences on each page
     var pageNums = Object.keys(pageMap);
