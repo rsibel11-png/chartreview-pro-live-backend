@@ -502,11 +502,33 @@ resources:
       - http:
           path: /redact-case
           method: post
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
       - http:
           path: /redact-case
           method: options
-          cors: true
+          cors:
+            origin: '*'
+            headers:
+              - Content-Type
+              - X-Amz-Date
+              - Authorization
+              - X-Api-Version
+              - x-api-key
+              - X-Api-Key
+              - x-org-id
+              - X-Org-Id
+            allowCredentials: false
 
   redactCaseWorker:
     handler: src/handlers/redact_document.redactCaseWorker
