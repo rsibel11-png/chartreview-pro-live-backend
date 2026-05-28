@@ -373,10 +373,18 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
         if (Math.abs(_w2.tp - _w.tp) < LINE_TOLERANCE) {
           var _rawCombo = _w.t + _w2.t;
           var _combo = normalizeForMatch(_rawCombo);
-          if ((_rawCombo.trim().charAt(_rawCombo.trim().length-1) === ':') && (_combo.indexOf('patientname') === 0 || _combo === 'patientnames')) {
+          if (_combo.indexOf('patientname') === 0 || _combo === 'patientnames') {
             _isLabel    = true;
             _labelRight = _w2.l + _w2.w;
             _afterIdx   = _wi + 1;
+            // Also consume a trailing ':' token if present
+            if (_wi + 2 < _words.length) {
+              var _w3 = _words[_wi + 2];
+              if (_w3.t.trim() === ':' && Math.abs(_w3.tp - _w.tp) < LINE_TOLERANCE) {
+                _labelRight = _w3.l + _w3.w;
+                _afterIdx   = _wi + 2;
+              }
+            }
           }
         }
       }
