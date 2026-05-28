@@ -214,7 +214,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
       for (var start = 0; start < pageWords.length; start++) {
         for (var len = 1; len <= 6 && start + len <= pageWords.length; len++) {
           var slice = pageWords.slice(start, start + len);
-          var rawConcat = slice.map(function(w) { return w.t; }).join('').split('\\/').join('V').split('\\').join(''); var concat = normalizeForMatch(rawConcat);
+          var rawConcat = slice.map(function(w) { return w.t; }).join(''); var concat = normalizeForMatch(rawConcat);
           if (piiNorm.length > 0 && concat === piiNorm) {
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
@@ -337,7 +337,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   // until a gap > 2% of page width appears (stops before ACCOUNT # etc.)
   // Geometry-only: immune to OCR artifacts in the name itself.
   var PATIENT_LABEL_NORM = ['patientname', 'patientname:', 'patient:', 'patientnames:', 'ptname', 'ptname:'];
-  var GAP_THRESHOLD   = 0.02;  // >2% page width = field boundary
+  // Labels that signal end of patient name field on same line
+  var FIELD_STOP_LABELS = ['account', 'account#', 'acct', 'acct#', 'unit', 'unit#', 'unitno', 'room', 'dob', 'mrn', 'ssn', 'phone'];
+  var GAP_THRESHOLD   = 0.05;  // >5% page width = field boundary (covers OCR-split tokens within a name)
   var LINE_TOLERANCE  = 0.012; // words within 1.2% vertical = same line
 
   function isPatientLabel(txt) {
@@ -408,7 +410,15 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
           if (_gap > GAP_THRESHOLD * 4) break;
           _redactStart = _cw.l;
         } else {
-          if (_gap > GAP_THRESHOLD) break; // field boundary — stop
+          // Stop at large gap OR when we hit a known non-PII field label
+          var _cwNorm = normalizeForMatch(_cw.t);
+          var _isStopLabel = false;
+          for (var _si = 0; _si < FIELD_STOP_LABELS.length; _si++) {
+            if (_cwNorm === FIELD_STOP_LABELS[_si] || _cwNorm.indexOf(FIELD_STOP_LABELS[_si]) === 0) {
+              _isStopLabel = true; break;
+            }
+          }
+          if (_gap > GAP_THRESHOLD || _isStopLabel) break; // field boundary — stop
         }
 
         _redactEnd  = _cw.l + _cw.w;
