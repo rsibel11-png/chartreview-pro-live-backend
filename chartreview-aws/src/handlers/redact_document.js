@@ -214,7 +214,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
       for (var start = 0; start < pageWords.length; start++) {
         for (var len = 1; len <= 6 && start + len <= pageWords.length; len++) {
           var slice = pageWords.slice(start, start + len);
-          var concat = normalizeForMatch(slice.map(function(w) { return w.t; }).join(''));
+          var concat = normalizeForMatch(slice.map(function(w) { return w.t; }).join('').replace(/\\\//g, 'V').replace(/\\\/(\w)/g, function(m,c){return 'V'+c;}));
           if (piiNorm.length > 0 && concat === piiNorm) {
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
