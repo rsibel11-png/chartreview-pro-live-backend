@@ -751,7 +751,7 @@ const _redactDocumentStart = async function(event) {
         progress_message: 'Starting case redaction for ' + caseDocRecords.length + ' part(s)...',
       },
     }));
-    await lambda.send(new InvokeCommand({
+    await lambdaClient.send(new InvokeCommand({
       FunctionName:   process.env.REDACT_CASE_WORKER_FUNCTION_NAME,
       InvocationType: 'Event',
       Payload: Buffer.from(JSON.stringify({
@@ -1025,7 +1025,7 @@ const _redactCaseStart = async function(event) {
       progress_message: 'Starting case redaction for ' + docRecords.length + ' part(s)...',
     },
   }));
-  await lambda.send(new InvokeCommand({
+  await lambdaClient.send(new InvokeCommand({
     FunctionName:   process.env.REDACT_CASE_WORKER_FUNCTION_NAME,
     InvocationType: 'Event',
     Payload:        Buffer.from(JSON.stringify({
