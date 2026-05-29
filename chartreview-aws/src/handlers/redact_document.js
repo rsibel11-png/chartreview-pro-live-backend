@@ -1029,6 +1029,7 @@ const _redactDocumentStart = async function(event) {
           progress_message: 'Starting case redaction for ' + caseDocRecords.length + ' part(s)...',
         },
       }));
+      var caseUserPii = Array.isArray(caseBody.user_supplied_pii) ? caseBody.user_supplied_pii : [];
       await lambdaClient.send(new InvokeCommand({
         FunctionName:   process.env.REDACT_CASE_WORKER_FUNCTION_NAME,
         InvocationType: 'Event',
@@ -1039,6 +1040,7 @@ const _redactDocumentStart = async function(event) {
           org_id:               caseOrgId,
           folder_name:          caseDocRecords[0].folder_name || null,
           patient_id:           caseDocRecords[0].patient_id  || null,
+          user_supplied_pii:    caseUserPii,
         })),
       }));
       console.log('[redact-case] worker invoked, returning job_id', caseJobId);
@@ -1070,10 +1072,15 @@ const _redactDocumentStart = async function(event) {
     },
   }));
 
+  // Accept optional user-supplied PII values from request body
+  var singleBody = {};
+  try { singleBody = JSON.parse(event.body || '{}'); } catch(e) {}
+  var userSuppliedPii = Array.isArray(singleBody.user_supplied_pii) ? singleBody.user_supplied_pii : [];
+
   await lambdaClient.send(new InvokeCommand({
     FunctionName:   WORKER_FN,
     InvocationType: 'Event',
-    Payload:        Buffer.from(JSON.stringify({ job_id, doc_id, doc })),
+    Payload:        Buffer.from(JSON.stringify({ job_id, doc_id, doc, user_supplied_pii: userSuppliedPii })),
   }));
 
   return respond(200, { job_id, status: 'processing' });
@@ -1098,10 +1105,11 @@ module.exports.redactDocumentWorker = async function(event) {
     const extractedText  = await fetchExtractedText(doc_id);
     const knownPiiValuesBase = extractKnownPiiValues(extractedText);
     const discoveredAddrTokens = discoverPatientAddress(extractedText);
-    const knownPiiValues = knownPiiValuesBase.concat(
-      discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; })
-    );
-    console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr tokens added]:', JSON.stringify(knownPiiValues.slice(0, 20)));
+    const userSuppliedPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
+    const knownPiiValues = knownPiiValuesBase
+      .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
+      .concat(userSuppliedPii.filter(function(v) { return v && v.trim().length >= 2; }));
+    console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
@@ -1345,10 +1353,11 @@ module.exports.redactCaseWorker = async function(event) {
       var extractedText  = await fetchExtractedText(doc_id);
       var knownPiiValuesBase = extractKnownPiiValues(extractedText);
       var discoveredAddrTokens = discoverPatientAddress(extractedText);
-      var knownPiiValues = knownPiiValuesBase.concat(
-        discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; })
-      );
-      console.log('[ADDR] Added ' + discoveredAddrTokens.length + ' address tokens to PII set');
+      var caseDocUserPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
+      var knownPiiValues = knownPiiValuesBase
+        .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
+        .concat(caseDocUserPii.filter(function(v) { return v && v.trim().length >= 2; }));
+      console.log('[ADDR] Added ' + discoveredAddrTokens.length + ' addr + ' + caseDocUserPii.length + ' user-supplied tokens to PII set');
       var wordBlocks     = await loadTextractBlocks(fileKey);
       var allPii         = {};
 
