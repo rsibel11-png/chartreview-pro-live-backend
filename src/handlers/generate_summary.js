@@ -327,11 +327,20 @@ const toTitleCase = (str) => {
 const normalizeProviderForDedup = (name) => {
   let n = (name || '')
     .toLowerCase()
+    // Strip parenthetical qualifiers like (cosigned ...) (cosigner/attending)
     .replace(/\s*[\(\[].*?[\)\]]\s*/g, ' ')
+    // Strip location suffixes after dash
     .replace(/\s*[-\u2013]\s*(henderson|las vegas|northwest|nw|summerlin|north|south|east|west|lake mead|blue diamond|rainbow|sahara|flamingo|tropicana|boulder|aliante|centennial|sunrise|green valley|anthem)\b.*/i, '');
-  n = n.replace(/\b(md|do|pa|np|aprn|rn|pt|dpt|ot|otd|dc|phd|psyd|lcsw|mft|pa-c)\b/gi, '')
-       .replace(/[,.]/g, ' ').replace(/\s+/g, ' ').trim();
-  return n.split(' ').filter(Boolean).sort().join(' ');
+  // Strip credentials
+  n = n.replace(/\b(md|do|pa|np|aprn|rn|pt|dpt|ot|otd|dc|phd|psyd|lcsw|mft|pa-c)\b/gi, '');
+  // Keep only the PRIMARY provider — split on multi-provider separators (; / and)
+  // then take only the first segment to avoid false non-merges from cosigner names
+  const primarySegment = n.split(/[;/]|\band\b/i)[0];
+  // Strip honorifics and punctuation
+  let p = primarySegment.replace(/\bdr\.?\b/gi, ' ').replace(/[,.]/g, ' ').replace(/\s+/g, ' ').trim();
+  const tokens = p.split(' ').filter(t => t.length >= 2);
+  // Sort tokens so "Cheng Whay-Yih" and "Whay-Yih Cheng" both map to same key
+  return tokens.sort().join(' ');
 };
 
 const mergeVisitPair = (acc, cur) => {
@@ -356,6 +365,50 @@ const mergeVisitPair = (acc, cur) => {
     chief_complaint:        longer(acc.chief_complaint, cur.chief_complaint),
     icd10_codes:            mergeList(acc.icd10_codes, cur.icd10_codes),
   };
+};
+
+
+// Stub suppression: drop shell visits (no HPI/diagnosis/treatment) when a fuller
+// visit exists on the same date at the same facility (first word of practice_setting)
+const suppressStubVisits = (visits) => {
+  const isStub = (v) => {
+    const hpi  = (v.hpi_summary || '').trim();
+    const diag = (v.impression_diagnosis || '').trim();
+    const tx   = (v.treatment_plan || '').trim();
+    // A stub has essentially no clinical content
+    return hpi.length < 30 && diag.length < 10 && tx.length < 10;
+  };
+
+  // Build a map: date → list of non-stub visits
+  const fullVisitsByDate = new Map();
+  for (const v of visits) {
+    const dk = (v.visit_date || '').trim();
+    if (!isStub(v)) {
+      if (!fullVisitsByDate.has(dk)) fullVisitsByDate.set(dk, []);
+      fullVisitsByDate.get(dk).push(v);
+    }
+  }
+
+  // Facility prefix: first significant word of practice_setting
+  const facilityPrefix = (v) => {
+    const s = (v.practice_setting || '').toLowerCase().trim();
+    // Take first token ≥ 3 chars
+    return (s.split(/[\s,.-]+/).find(t => t.length >= 3) || s).slice(0, 8);
+  };
+
+  return visits.filter(v => {
+    if (!isStub(v)) return true; // keep all non-stubs
+    const dk = (v.visit_date || '').trim();
+    const fp = facilityPrefix(v);
+    const fulls = fullVisitsByDate.get(dk) || [];
+    // Drop stub if any full visit on the same date shares the same facility prefix
+    const hasCoverage = fulls.some(f => facilityPrefix(f) === fp);
+    if (hasCoverage) {
+      console.log(`Stub suppressed: ${dk} — "${v.practice_setting}" (covered by fuller entry)`);
+      return false;
+    }
+    return true;
+  });
 };
 
 // Updated: 2026-05-13 — upgraded to merge-based dedup (keeps longest narrative per field)
@@ -1199,6 +1252,8 @@ const parseDateSortKey = (d) => {
 };
 
 const CLINICAL_DOC_ORDER = [
+  /police\s*(report)?|law\s*enforcement/i,           // rank 0 — always first on same date
+  /ambulance|\bems\b|paramedic|pre.?hospital/i,      // rank 1
   /c-4|workers.*comp/i,
   /emergency\s+department|urgent\s+care/i,
   /history\s*(&|and)\s*physical|\bh&p\b/i,
@@ -1227,6 +1282,11 @@ const visitSortComparator = (a, b) => {
     // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
     allVisits = deduplicateVisits(allVisits);
+
+    // Stub suppression: remove shell entries that have no clinical content
+    // when a fuller entry exists on the same date at the same facility
+    allVisits = suppressStubVisits(allVisits);
+
     allVisits.sort(visitSortComparator);
 
     // ── 9. Recovery pass (same as before) ────────────────────────────────────
