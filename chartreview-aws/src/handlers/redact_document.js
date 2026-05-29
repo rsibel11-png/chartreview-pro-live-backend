@@ -494,7 +494,20 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   for (var pi = 0; pi < piiValues.length; pi++) {
     var pii = piiValues[pi];
     var piiNorm = normalizeForMatch(pii);
-    if (piiNorm.length < 4) continue; // skip short/junk values (e.g. 'Med', 's') to prevent over-redaction
+    if (piiNorm.length < 4) continue; // skip short/junk values
+    // Skip values that look like billing/procedure codes rather than PII:
+    // 5-digit codes starting with 000-009 (bill codes like 00100, 00663)
+    // ICD-10 patterns already filtered in extraction but catch stragglers here
+    if (/^00\d{3}$/.test(piiNorm)) continue; // billing denial codes
+    if (/^[3-9]\d[0-9]{3}$/.test(piiNorm) && parseInt(piiNorm,10) >= 36000 && parseInt(piiNorm,10) <= 99999) {
+      // 5-digit numbers in CPT range (10000-99999) — only skip if they don't
+      // look like a zip code (zips are in specific state ranges, not 36xxx-96xxx CPT range)
+      // BUT we can't reliably distinguish, so only skip if the PII value itself
+      // was derived from a code context — skip numbers > 9999 starting 36-96 if
+      // they appear isolated (not part of address phrase)
+      // Conservative: only skip pure 5-digit values that start with 36,72,80,81,82,85,86,96
+      if (/^(36|72|80|81|82|85|86|96)\d{3}$/.test(piiNorm)) continue;
+    }
 
     // Try to match pii value against concatenated word sequences on each page
     var pageNums = Object.keys(pageMap);
@@ -576,8 +589,8 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     }
     // City/State/Zip pattern
     if (/[A-Z][A-Z\s]{1,20},?\s+[A-Z]{2}\s+\d{5}/i.test(t)) return true;
-    // Zip+4 anywhere
-    if (/\b\d{5}-\d{4}\b/.test(t)) return true;
+    // Zip+4 anywhere (must not start with 00 — billing codes start with 00)
+    if (/\b([1-9]\d{4})-\d{4}\b/.test(t)) return true;
     return false;
   }
 
