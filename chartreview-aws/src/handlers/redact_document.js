@@ -180,14 +180,14 @@ function extractKnownPiiValues(extractedText) {
       for (var gi = 0; gi < groups.length; gi++) {
         var val = groups[gi];
         if (!val) continue;
-        // Skip ICD/CPT codes
+        // Skip ICD/CPT codes (e.g. S52.592D, M79.3)
         if (/^[A-Z]\d{2}\.?\d{0,3}[A-Z]?$/.test(val)) continue;
         // Skip pure clinical lowercase text (long narrative fragments)
         if (/^[a-z\s,\.]{15,}$/.test(val)) continue;
-        // Skip single short numbers (age, vitals, room numbers)
-        if (/^\d{1,3}$/.test(val)) continue;
         // Skip bare 2-letter state abbreviations
         if (/^[A-Z]{2}$/.test(val)) continue;
+        // Skip pure single digits
+        if (/^\d$/.test(val)) continue;
         // Skip PII field label words — these are extraction triggers, not values to redact.
         // Redacting them causes words like "patient", "address", "name" to be blacked out
         // in clinical narrative text throughout the document.
@@ -501,7 +501,6 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   for (var pi = 0; pi < piiValues.length; pi++) {
     var pii = piiValues[pi];
     var piiNorm = normalizeForMatch(pii);
-    if (piiNorm.length < 4) continue; // skip short/junk values
     // Skip common English words that should never be redacted
     // These can end up in piiValues if extraction patterns grab sentence fragments
     var _piiWord = piiNorm.toLowerCase();
@@ -1292,7 +1291,7 @@ module.exports.redactDocumentWorker = async function(event) {
     });
     const knownPiiValues = knownPiiValuesBase
       .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
-      .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 2; }));
+      .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
     console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
@@ -1549,7 +1548,7 @@ module.exports.redactCaseWorker = async function(event) {
       });
       var knownPiiValues = knownPiiValuesBase
         .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
-        .concat(caseUserPiiExpanded.filter(function(v) { return v && v.trim().length >= 2; }));
+        .concat(caseUserPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
       console.log('[ADDR] Added ' + discoveredAddrTokens.length + ' addr + ' + caseDocUserPii.length + ' user-supplied tokens to PII set');
       var wordBlocks     = await loadTextractBlocks(fileKey);
       var allPii         = {};
