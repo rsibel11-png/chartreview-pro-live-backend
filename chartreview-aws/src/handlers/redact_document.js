@@ -210,7 +210,7 @@ function extractKnownPiiValues(extractedText) {
         // but allow MRN/account numbers (which can be short alphanumeric)
         if (_vl.length <= 4 && /^[a-z]+$/.test(_vl) && !/^(jose|juan|ana|luis|rosa|adam|alan|alan|alan|alan)$/.test(_vl)) continue;
         // Skip values extracted under provider/physician labels — those are staff names not patient PII
-        var _prefix = (regexMatch[0] || '').slice(0, -(val.length)).toLowerCase();
+        var _prefix = (match[0] || '').slice(0, -(val.length)).toLowerCase();
         if (/(?:rendering|treating|attending|referring|ordering|prescrib|provider|physician|surgeon|clinician|practitioner|therapist|radiologist|specialist)/.test(_prefix)) continue;
         found.add(val);
       }
