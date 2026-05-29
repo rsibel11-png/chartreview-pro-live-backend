@@ -154,6 +154,11 @@ function extractKnownPiiValues(extractedText) {
         if (/^\d{1,3}$/.test(val)) continue;
         // Skip bare 2-letter state abbreviations
         if (/^[A-Z]{2}$/.test(val)) continue;
+        // Skip PII field label words — these are extraction triggers, not values to redact.
+        // Redacting them causes words like "patient", "address", "name" to be blacked out
+        // in clinical narrative text throughout the document.
+        var _vl = val.toLowerCase().replace(/[:\s]/g, '');
+        if (/^(patient|patients|address|homeaddress|name|patientname|ptname|claimant|client|guardian|guarantor|subscriber|insured|dob|dateofbirth|birthdate|ssn|socialsecurity|mrn|medicalrecord|phone|telephone|cell|mobile|fax|email|spouse|nextofkin|nok|poa|emergencycontact|firstname|lastname|middleinitial|street|city|state|zip|zipcode)s?$/.test(_vl)) continue;
         found.add(val);
       }
     }
@@ -397,6 +402,113 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
         }
       }
     }
+  }
+
+
+  // ── GATED LINE-LEVEL ADDRESS PASS ────────────────────────────────────────────
+  // Reconstruct LINE groups from WORD block geometry, then apply three gates:
+  //   1. Line must structurally look like an address (street num, city/state/zip)
+  //   2. Line must NOT look like clinical narrative (no lowercase prose)
+  //   3. Line must NOT be a facility address (no suite/hospital keywords)
+  // Only when all gates pass do we redact the entire line as an address.
+
+  function reconstructLineGroups(words) {
+    var sorted = words.slice().sort(function(a, b) {
+      if (a.p !== b.p) return a.p - b.p;
+      if (Math.abs(a.tp - b.tp) > 0.008) return a.tp - b.tp;
+      return a.l - b.l;
+    });
+    var groups = [];
+    for (var _ri = 0; _ri < sorted.length; _ri++) {
+      var _rw = sorted[_ri];
+      var placed = false;
+      for (var _rg = groups.length - 1; _rg >= 0; _rg--) {
+        var _lg2 = groups[_rg];
+        if (_lg2.page === _rw.p && Math.abs(_lg2.top - _rw.tp) <= 0.008) {
+          _lg2.words.push(_rw);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) groups.push({ page: _rw.p, top: _rw.tp, words: [_rw] });
+    }
+    return groups;
+  }
+
+  function addrLineIsAddressLike(txt) {
+    var t = txt.trim();
+    if (/^\d{2,5}\s+[A-Z]/i.test(t)) return true;
+    if (/[A-Z][A-Z\s]{1,20},?\s+[A-Z]{2}\s+\d{5}/i.test(t)) return true;
+    if (/\b\d{5}-\d{4}\b/.test(t)) return true;
+    return false;
+  }
+
+  function addrLineIsClinical(txt) {
+    var t = txt.trim();
+    if (/[a-z]{4,}/.test(t)) return true;
+    if (/^(the|patient|pt\.|he |she |this |there |upon |with |no |history|hpi|assessment|plan|diagnosis)/i.test(t)) return true;
+    if (/\d+\s*(mg|ml|mm|cm|lbs?|kg|bpm|mmhg|mcg)/i.test(t)) return true;
+    if (t.length > 90) return true;
+    if (/\b(and|the|with|for|was|has|had|are|were|not|from|that|will|have|been|pain|left|right|hand|wrist|fracture|therapy|treatment|injury|motion|strength|follow|continue|improve)\b/i.test(t)) return true;
+    return false;
+  }
+
+  function addrLineIsFacility(txt) {
+    if (/\b(ste\.?|suite|floor|fl\.)/i.test(txt)) return true;
+    if (/hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent|orthopedic|physical\s*therapy|imaging|radiology|university|institute/i.test(txt)) return true;
+    return false;
+  }
+
+  var _allWords2 = [];
+  var _pgKeys2 = Object.keys(pageMap);
+  for (var _aw = 0; _aw < _pgKeys2.length; _aw++) {
+    _allWords2 = _allWords2.concat(pageMap[parseInt(_pgKeys2[_aw], 10)]);
+  }
+  var _lineGroups2 = reconstructLineGroups(_allWords2);
+
+  for (var _lgi2 = 0; _lgi2 < _lineGroups2.length; _lgi2++) {
+    var _lg3      = _lineGroups2[_lgi2];
+    var _lineTxt  = _lg3.words.map(function(w) { return w.t; }).join(' ');
+    var _pgIdx4   = _lg3.page - 1;
+
+    if (!addrLineIsAddressLike(_lineTxt)) continue;
+    if (addrLineIsClinical(_lineTxt))    continue;
+    if (addrLineIsFacility(_lineTxt))    continue;
+
+    // Require at least one PII token match OR a clear street number > 99
+    var _lineNorm2 = normalizeForMatch(_lineTxt);
+    var _hasPii2   = false;
+    for (var _pi4 = 0; _pi4 < piiValues.length; _pi4++) {
+      var _pn2 = normalizeForMatch(piiValues[_pi4]);
+      if (_pn2.length >= 3 && _lineNorm2.indexOf(_pn2) !== -1) { _hasPii2 = true; break; }
+    }
+    var _snM = _lineTxt.trim().match(/^(\d{2,5})\s/);
+    if (_snM && parseInt(_snM[1], 10) > 99) _hasPii2 = true;
+    // Also fire on city/state/zip lines where zip matches a discovered PII value
+    if (!_hasPii2) {
+      var _zipMatches = _lineTxt.match(/\b(\d{5})(?:-\d{4})?\b/g);
+      if (_zipMatches) {
+        for (var _zmi = 0; _zmi < _zipMatches.length; _zmi++) {
+          if (piiValues.indexOf(_zipMatches[_zmi].substring(0, 5)) !== -1) { _hasPii2 = true; break; }
+        }
+      }
+    }
+    if (!_hasPii2) continue;
+
+    var _lMinL = Math.min.apply(null, _lg3.words.map(function(w) { return w.l; }));
+    var _lMinT = Math.min.apply(null, _lg3.words.map(function(w) { return w.tp; }));
+    var _lMaxR = Math.max.apply(null, _lg3.words.map(function(w) { return w.l + w.w; }));
+    var _lMaxB = Math.max.apply(null, _lg3.words.map(function(w) { return w.tp + w.h; }));
+
+    if (!result[String(_pgIdx4)]) result[String(_pgIdx4)] = [];
+    result[String(_pgIdx4)].push({
+      label: 'addr-line:' + _lineTxt.substring(0, 40),
+      x: Math.max(0, _lMinL - 0.005),
+      y: _lMinT,
+      width: Math.min(1, (_lMaxR - _lMinL) + 0.01),
+      height: (_lMaxB - _lMinT),
+    });
+    console.log('[LINE-PASS] Redacting address line p' + _lg3.page + ': "' + _lineTxt.substring(0, 60) + '"');
   }
 
   // ── SIGNATURE LINE DETECTION ─────────────────────────────────────────────
