@@ -204,6 +204,17 @@ function extractKnownPiiValues(extractedText) {
       }
     }
   }
+  // Expand state+zip: "NV 89084" → also "89084", "NV89084"
+  Array.from(found).forEach(function(val) {
+    if (!val) return;
+    var stZip = val.match(/^([A-Z]{2})\s+(\d{5})(-\d{4})?$/);
+    if (stZip) {
+      found.add(stZip[2]);
+      found.add(stZip[1] + stZip[2]);
+      if (stZip[3]) found.add(stZip[2] + stZip[3]);
+    }
+  });
+
   // Expand hyphenated compound names: MORA-MALDONADO -> also add MORA and MALDONADO separately
   var expanded = new Set(found);
   found.forEach(function(val) {
