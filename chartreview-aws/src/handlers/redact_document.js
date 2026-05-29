@@ -192,7 +192,14 @@ function extractKnownPiiValues(extractedText) {
         // Redacting them causes words like "patient", "address", "name" to be blacked out
         // in clinical narrative text throughout the document.
         var _vl = val.toLowerCase().replace(/[:\s]/g, '');
+        // Skip PII field label words AND common document/medical words that
+        // should never be treated as PII values
         if (/^(patient|patients|address|homeaddress|name|patientname|ptname|claimant|client|guardian|guarantor|subscriber|insured|dob|dateofbirth|birthdate|ssn|socialsecurity|mrn|medicalrecord|phone|telephone|cell|mobile|fax|email|spouse|nextofkin|nok|poa|emergencycontact|firstname|lastname|middleinitial|street|city|state|zip|zipcode)s?$/.test(_vl)) continue;
+        // Skip common document navigation / medical form words
+        if (/^(page|pages|date|time|form|type|code|codes|unit|room|bed|ward|floor|wing|note|notes|visit|visits|total|balance|amount|paid|status|level|none|null|same|info|information|record|records|report|order|orders|plan|plans|initial|final|follow|continued|continued|signature|initials|signed|print|printed|copy|original|draft|revised|version|section|part|item|items|number|numbers|detail|details|summary|description|comment|comments)s?$/.test(_vl)) continue;
+        // Skip 1-4 char values that are clearly not PII (short words, abbreviations)
+        // but allow MRN/account numbers (which can be short alphanumeric)
+        if (_vl.length <= 4 && /^[a-z]+$/.test(_vl) && !/^(jose|juan|ana|luis|rosa|adam|alan|alan|alan|alan)$/.test(_vl)) continue;
         found.add(val);
       }
     }
@@ -495,6 +502,10 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     var pii = piiValues[pi];
     var piiNorm = normalizeForMatch(pii);
     if (piiNorm.length < 4) continue; // skip short/junk values
+    // Skip common English words that should never be redacted
+    // These can end up in piiValues if extraction patterns grab sentence fragments
+    var _piiWord = piiNorm.toLowerCase();
+    if (/^(page|pages|date|time|form|type|code|unit|room|note|visit|total|amount|paid|status|level|none|same|info|record|report|order|plan|initial|final|signature|signed|print|copy|draft|section|part|item|number|detail|summary|description|comment|follow|continued|information|balance|right|left|hand|wrist|pain|none|test|exam|normal|within|limits)$/.test(_piiWord)) continue;
     // Skip values that look like billing/procedure codes rather than PII:
     // 5-digit codes starting with 000-009 (bill codes like 00100, 00663)
     // ICD-10 patterns already filtered in extraction but catch stragglers here
