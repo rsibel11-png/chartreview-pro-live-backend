@@ -78,8 +78,10 @@ function extractKnownPiiValues(extractedText) {
     /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /Patient['\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]+)/gi,
 
-    // Date of birth — must follow label
+    // Date of birth — must follow label (captures MM/DD/YYYY and variants)
     /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date|Date\s*of\s*Birth)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
+    // Also catch handwritten DOB variants: "2/06/76" "-2/06/76" without label (C-4 forms)
+    /\bBirthdate\s*[:\|]?\s*-?([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
 
     // SSN — dashed xxx-xx-xxxx OR bare 9-digit after label
     /(\d{3}-\d{2}-\d{4})/g,
@@ -163,9 +165,48 @@ function extractKnownPiiValues(extractedText) {
       }
     }
   }
+  var MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  var MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  function expandDob(raw) {
+    // Parse M/D/YY or MM/DD/YYYY (also handles - separator)
+    var m = raw.replace(/[-]/g, '/').match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (!m) return [raw];
+    var mon = parseInt(m[1], 10), day = parseInt(m[2], 10), yr = parseInt(m[3], 10);
+    if (yr < 100) yr += (yr > 30 ? 1900 : 2000);
+    var yr2 = String(yr).slice(2); // 2-digit year
+    var mm = String(mon).padStart(2, '0'), dd = String(day).padStart(2, '0');
+    var variants = [
+      raw,                                          // original
+      mm + '/' + dd + '/' + yr,                    // MM/DD/YYYY
+      mm + '/' + dd + '/' + yr2,                   // MM/DD/YY
+      mon + '/' + day + '/' + yr,                  // M/D/YYYY
+      mon + '/' + day + '/' + yr2,                 // M/D/YY
+      mm + '-' + dd + '-' + yr,                    // MM-DD-YYYY
+      mon + '-' + day + '-' + yr,                  // M-D-YYYY
+    ];
+    if (mon >= 1 && mon <= 12) {
+      var mName = MONTH_NAMES[mon-1], mShort = MONTH_SHORT[mon-1];
+      variants.push(mName + ' ' + day + ', ' + yr);   // February 6, 1976
+      variants.push(mName + ' ' + day + ' ' + yr);    // February 6 1976
+      variants.push(mShort + ' ' + day + ' ' + yr);   // Feb 6 1976
+      variants.push(mShort + ' ' + dd + ' ' + yr);    // Feb 06 1976
+      variants.push(dd + mShort.toUpperCase() + yr);   // 06FEB1976 (military)
+    }
+    // Deduplicate
+    var seen = {};
+    return variants.filter(function(v) { if (seen[v]) return false; seen[v]=true; return true; });
+  }
+
   // Expand hyphenated compound names: MORA-MALDONADO -> also add MORA and MALDONADO separately
   var expanded = new Set(found);
   found.forEach(function(val) {
+    if (!val) return;
+    // DOB variant expansion — detect date strings and add all format variants
+    if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(val.trim())) {
+      expandDob(val.trim()).forEach(function(v) { if (v.length >= 4) expanded.add(v); });
+      return;
+    }
     if (val && val.indexOf('-') !== -1) {
       var parts = val.split('-');
       parts.forEach(function(p) {
@@ -437,25 +478,50 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
 
   function addrLineIsAddressLike(txt) {
     var t = txt.trim();
-    if (/^\d{2,5}\s+[A-Z]/i.test(t)) return true;
+    // Street number check: must be followed by a real street-name word
+    // (not a pure number, not a CPT/revenue/procedure code like J1885 or 36415)
+    // Require the word after the number to be ≥3 alpha chars (street name word)
+    if (/^\d{2,5}\s+[A-Za-z]{3,}/.test(t)) {
+      // Reject if line contains dollar amounts or billing indicators
+      if (/\$|\d+\.\d{2}\s*$|\bBilled\b|\bCharged\b|\bAllowed\b/i.test(t)) return false;
+      // Reject if the line looks like a procedure/revenue code description
+      // (starts with number then a CPT/HCPCS-like code or "Billed as:")
+      if (/^\d+\s+\d{5}/.test(t)) return false; // two numbers = billing line
+      if (/^\d{4,5}\s+[A-Z]{1,2}\d{4,5}/.test(t)) return false; // revenue + CPT
+      return true;
+    }
+    // City/State/Zip pattern
     if (/[A-Z][A-Z\s]{1,20},?\s+[A-Z]{2}\s+\d{5}/i.test(t)) return true;
+    // Zip+4 anywhere
     if (/\b\d{5}-\d{4}\b/.test(t)) return true;
     return false;
   }
 
   function addrLineIsClinical(txt) {
     var t = txt.trim();
+    // Fax header lines contain timestamps and phone numbers — not addresses
+    if (/^\d{2}\/\d{2}\/\d{2}\s+\d{2}:\d{2}/.test(t)) return true;
     if (/[a-z]{4,}/.test(t)) return true;
     if (/^(the|patient|pt\.|he |she |this |there |upon |with |no |history|hpi|assessment|plan|diagnosis)/i.test(t)) return true;
     if (/\d+\s*(mg|ml|mm|cm|lbs?|kg|bpm|mmhg|mcg)/i.test(t)) return true;
     if (t.length > 90) return true;
     if (/\b(and|the|with|for|was|has|had|are|were|not|from|that|will|have|been|pain|left|right|hand|wrist|fracture|therapy|treatment|injury|motion|strength|follow|continue|improve)\b/i.test(t)) return true;
+    // Billing line indicators
+    if (/\$|00\.00|\bPAID\b|\bBALANCE\b|\bCHARGE\b/i.test(t)) return true;
     return false;
   }
 
   function addrLineIsFacility(txt) {
-    if (/\b(ste\.?|suite|floor|fl\.)/i.test(txt)) return true;
-    if (/hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent|orthopedic|physical\s*therapy|imaging|radiology|university|institute/i.test(txt)) return true;
+    // Suite/floor indicators are facility giveaways
+    if (/\b(ste\.?|suite|floor|fl\.|suite\s*\d)/i.test(txt)) return true;
+    // Facility type keywords
+    if (/hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent|orthopedic|physical\s*therapy|imaging|radiology|university|institute|pkwy|parkway/i.test(txt)) return true;
+    // Known facility street patterns: Washington Ave, Wigwam Pkwy, Amazing View St
+    // that appear in office letterheads — guard by checking well-known zip codes
+    // that belong to facilities (not the patient zip 89084)
+    if (/89128|89074|89129|89103|89117|89135|90074|90004|52733/i.test(txt)) return true;
+    // PO Box is always a billing/facility address
+    if (/^P\.?O\.?\s*BOX/i.test(txt)) return true;
     return false;
   }
 
@@ -1106,9 +1172,19 @@ module.exports.redactDocumentWorker = async function(event) {
     const knownPiiValuesBase = extractKnownPiiValues(extractedText);
     const discoveredAddrTokens = discoverPatientAddress(extractedText);
     const userSuppliedPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
+    // Expand DOB variants from user-supplied values
+    var userPiiExpanded = [];
+    userSuppliedPii.forEach(function(v) {
+      if (!v) return;
+      if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(v.trim())) {
+        expandDob(v.trim()).forEach(function(ev) { userPiiExpanded.push(ev); });
+      } else {
+        userPiiExpanded.push(v);
+      }
+    });
     const knownPiiValues = knownPiiValuesBase
       .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
-      .concat(userSuppliedPii.filter(function(v) { return v && v.trim().length >= 2; }));
+      .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 2; }));
     console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
@@ -1354,9 +1430,18 @@ module.exports.redactCaseWorker = async function(event) {
       var knownPiiValuesBase = extractKnownPiiValues(extractedText);
       var discoveredAddrTokens = discoverPatientAddress(extractedText);
       var caseDocUserPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
+      var caseUserPiiExpanded = [];
+      caseDocUserPii.forEach(function(v) {
+        if (!v) return;
+        if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(v.trim())) {
+          expandDob(v.trim()).forEach(function(ev) { caseUserPiiExpanded.push(ev); });
+        } else {
+          caseUserPiiExpanded.push(v);
+        }
+      });
       var knownPiiValues = knownPiiValuesBase
         .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
-        .concat(caseDocUserPii.filter(function(v) { return v && v.trim().length >= 2; }));
+        .concat(caseUserPiiExpanded.filter(function(v) { return v && v.trim().length >= 2; }));
       console.log('[ADDR] Added ' + discoveredAddrTokens.length + ' addr + ' + caseDocUserPii.length + ' user-supplied tokens to PII set');
       var wordBlocks     = await loadTextractBlocks(fileKey);
       var allPii         = {};
