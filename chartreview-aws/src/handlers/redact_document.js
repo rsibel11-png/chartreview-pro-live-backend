@@ -179,6 +179,169 @@ function extractKnownPiiValues(extractedText) {
   return Array.from(expanded);
 }
 
+
+// ── STEP 1B: Discover patient address from document structure ─────────────────
+// Scans extractedText for address patterns appearing:
+//   (a) adjacent to a patient name label, OR
+//   (b) following an address-type label (Home Address:, Address:, etc.)
+// Once discovered, individual components (street, zip) are returned so they
+// can be added to knownPiiValues before the main redaction pass runs.
+// Facility addresses are excluded via the facilityKeyword guard.
+//
+// Returns an array of string tokens to add to piiValues.
+function discoverPatientAddress(extractedText) {
+  if (!extractedText || typeof extractedText !== 'string') return [];
+
+  var discovered = new Set();
+  var lines = extractedText.split(/\r?\n/);
+
+  // Patterns that identify an address line
+  // Street: starts with 1-5 digits followed by at least one word
+  var STREET_RE  = /^(\d{1,5})\s+([A-Z][A-Z0-9\s\.]{2,40}(?:AVE?|ST(?:REET)?|BLVD|BOULEVARD|DR(?:IVE)?|RD|ROAD|WAY|LN|LANE|CT|COURT|PL(?:ACE)?|CIR(?:CLE)?|PKWY|PARKWAY|HWY|HWD)?)\b/i;
+  // City/State/Zip: word(s), optional comma, 2-letter state, 5-digit zip
+  var CSZ_RE     = /^([A-Z][A-Z\s\.]{1,25}),?\s+([A-Z]{2})\s+(\d{5})(-\d{4})?/i;
+  // Zip alone (5 digits — will only add if discovered in address context)
+  var ZIP_RE     = /\b(\d{5})\b/;
+
+  // Labels that introduce a patient address block (NOT a facility address)
+  var ADDR_LABEL_RE = /^(?:HOME\s*)?(?:ADDRESS|ADDR)\s*[:\|]|^PATIENT\s*ADDRESS\s*[:\|]|^MAILING\s*ADDRESS|^GUARANTOR\s*NAME\s*AND\s*ADDRESS|^GUAR(?:ANTOR)?\s*[:\|]|^INFO\s+/i;
+
+  // Patient name labels — address discovered near these gets captured
+  var NAME_LABEL_RE = /^(?:PATIENT|PATIENT\s*NAME|PT\.?\s*NAME|NAME|CLAIMANT|CLIENT)\s*[:\|]/i;
+
+  // Facility keyword guard — if a street appears after one of these, skip it
+  var FACILITY_RE = /hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent|orthopedic|physical\s*therapy|imaging|radiology|university|college|institute/i;
+
+  // Suite/floor indicator — facility addresses have these, patient ones usually don't
+  var SUITE_RE = /\b(?:STE|SUITE|FLOOR|FL\.|#)\s*\d/i;
+
+  function isFacilityLine(line) {
+    return FACILITY_RE.test(line);
+  }
+
+  // Pass 1: Find address blocks following known patient/address labels
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line) continue;
+
+    var isAddrLabel = ADDR_LABEL_RE.test(line);
+    var isNameLabel = NAME_LABEL_RE.test(line);
+
+    if (isAddrLabel || isNameLabel) {
+      // Check if a facility keyword precedes this block (within 3 lines above)
+      var facilityAbove = false;
+      for (var back = Math.max(0, i - 3); back < i; back++) {
+        if (isFacilityLine(lines[back])) { facilityAbove = true; break; }
+      }
+      if (facilityAbove) continue;
+
+      // Scan forward up to 4 lines for address pattern
+      for (var j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        var candidate = lines[j].trim();
+        if (!candidate) continue;
+
+        // Skip if this line is itself a facility address
+        if (isFacilityLine(candidate)) break;
+        // Skip if it has a suite/floor indicator (facility)
+        if (SUITE_RE.test(candidate)) continue;
+
+        // Check for street address line
+        var streetMatch = candidate.match(STREET_RE);
+        if (streetMatch) {
+          var streetNum  = streetMatch[1];
+          var streetName = streetMatch[2].trim();
+          // Don't add very common street numbers that appear everywhere (0-99)
+          if (parseInt(streetNum, 10) > 99) {
+            discovered.add(streetNum);
+          }
+          // Add meaningful street name components (skip single words < 4 chars)
+          var streetWords = streetName.replace(/\b(?:AVE?|ST|BLVD|DR|RD|WAY|LN|CT|PL|CIR|PKWY|HWY)\b/gi, '').trim();
+          if (streetWords.length >= 5) {
+            discovered.add(streetWords.trim());
+            // Also add individual words >= 4 chars from street name
+            streetWords.split(/\s+/).forEach(function(w) {
+              if (w.length >= 4 && !/^(NORTH|SOUTH|EAST|WEST|NEW)$/i.test(w)) {
+                discovered.add(w);
+              }
+            });
+          }
+          // Look at next line for city/state/zip
+          if (j + 1 < lines.length) {
+            var nextLine = lines[j + 1].trim();
+            var cszMatch = nextLine.match(CSZ_RE);
+            if (cszMatch) {
+              var zip = cszMatch[3];
+              discovered.add(zip);
+              // City name — split and add words >= 3 chars (skip state abbrev)
+              var city = cszMatch[1].replace(/,/g, '').trim();
+              // Only add city if it looks specific (not a super-common city name)
+              // We'll add it but keep it short to avoid over-redaction
+              // city words that are specific enough
+              city.split(/\s+/).forEach(function(w) {
+                if (w.length >= 5 && !/^(NORTH|SOUTH|EAST|WEST|NEW|CITY|TOWN)$/i.test(w)) {
+                  discovered.add(w);
+                }
+              });
+            } else {
+              // Maybe the zip is on the same street line or embedded
+              var zipMatch = candidate.match(ZIP_RE);
+              if (zipMatch) discovered.add(zipMatch[1]);
+            }
+          }
+          break; // Found address for this label block — move on
+        }
+
+        // Check for city/state/zip line directly (no street number above)
+        var cszMatch2 = candidate.match(CSZ_RE);
+        if (cszMatch2) {
+          discovered.add(cszMatch2[3]); // zip
+        }
+      }
+    }
+  }
+
+  // Pass 2: Look for standalone guarantor address blocks in billing docs
+  // Pattern: line = city/state/zip immediately following a name-looking line
+  // that is NOT preceded by a facility keyword
+  for (var ii = 1; ii < lines.length; ii++) {
+    var l = lines[ii].trim();
+    var cszM = l.match(CSZ_RE);
+    if (!cszM) continue;
+    // Check the line above — should look like a street address
+    var prevL = lines[ii - 1] ? lines[ii - 1].trim() : '';
+    var streetM = prevL.match(STREET_RE);
+    if (!streetM) continue;
+    // Facility guard — check 4 lines above
+    var isFacility = false;
+    for (var bk = Math.max(0, ii - 5); bk < ii - 1; bk++) {
+      if (isFacilityLine(lines[bk]) || SUITE_RE.test(lines[bk])) { isFacility = true; break; }
+    }
+    if (isFacility) continue;
+
+    // Looks like a patient address block in a billing statement
+    var sNum = streetM[1];
+    var sName = streetM[2].trim();
+    var zip2 = cszM[3];
+    if (parseInt(sNum, 10) > 99) discovered.add(sNum);
+    if (zip2) discovered.add(zip2);
+    var sWords = sName.replace(/\b(?:AVE?|ST|BLVD|DR|RD|WAY|LN|CT|PL|CIR|PKWY|HWY)\b/gi, '').trim();
+    if (sWords.length >= 5) {
+      discovered.add(sWords.trim());
+      sWords.split(/\s+/).forEach(function(w) {
+        if (w.length >= 4 && !/^(NORTH|SOUTH|EAST|WEST|NEW)$/i.test(w)) {
+          discovered.add(w);
+        }
+      });
+    }
+  }
+
+  var result = Array.from(discovered).filter(function(v) { return v && v.trim().length >= 3; });
+  if (result.length > 0) {
+    console.log('[ADDR-DISCOVER] Discovered patient address tokens:', JSON.stringify(result));
+  }
+  return result;
+}
+
 // ── STEP 2A: Textract-coordinate-based redaction ──────────────────────────────
 // Returns piiByPage map using exact Textract bounding boxes — no LLM needed
 
@@ -821,8 +984,12 @@ module.exports.redactDocumentWorker = async function(event) {
 
     // Extract known PII values from stored Textract text to anchor Claude's redaction
     const extractedText  = await fetchExtractedText(doc_id);
-    const knownPiiValues = extractKnownPiiValues(extractedText);
-    console.log('Known PII values (' + knownPiiValues.length + '):', JSON.stringify(knownPiiValues.slice(0, 15)));
+    const knownPiiValuesBase = extractKnownPiiValues(extractedText);
+    const discoveredAddrTokens = discoverPatientAddress(extractedText);
+    const knownPiiValues = knownPiiValuesBase.concat(
+      discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; })
+    );
+    console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr tokens added]:', JSON.stringify(knownPiiValues.slice(0, 20)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
@@ -1064,7 +1231,12 @@ module.exports.redactCaseWorker = async function(event) {
       var fileKey  = doc.file_key || doc.s3_key;
       var pdfBytes = await getS3Bytes(fileKey);
       var extractedText  = await fetchExtractedText(doc_id);
-      var knownPiiValues = extractKnownPiiValues(extractedText);
+      var knownPiiValuesBase = extractKnownPiiValues(extractedText);
+      var discoveredAddrTokens = discoverPatientAddress(extractedText);
+      var knownPiiValues = knownPiiValuesBase.concat(
+        discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; })
+      );
+      console.log('[ADDR] Added ' + discoveredAddrTokens.length + ' address tokens to PII set');
       var wordBlocks     = await loadTextractBlocks(fileKey);
       var allPii         = {};
 
