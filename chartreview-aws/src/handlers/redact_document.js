@@ -318,15 +318,12 @@ function discoverPatientAddress(extractedText) {
             discovered.add(streetNum);
           }
           // Add meaningful street name components (skip single words < 4 chars)
-          var streetWords = streetName.replace(/\b(?:AVE?|ST|BLVD|DR|RD|WAY|LN|CT|PL|CIR|PKWY|HWY)\b/gi, '').trim();
-          if (streetWords.length >= 5) {
-            discovered.add(streetWords.trim());
-            // Also add individual words >= 4 chars from street name
-            streetWords.split(/\s+/).forEach(function(w) {
-              if (w.length >= 4 && !/^(NORTH|SOUTH|EAST|WEST|NEW)$/i.test(w)) {
-                discovered.add(w);
-              }
-            });
+          // Add full street name phrase (without suffix) — NOT individual words
+          // Individual word splitting causes common words like FREE, FALL, MAIN to be redacted
+          var streetWords = streetName.replace(/\b(?:AVE?|ST(?:REET)?|BLVD|BOULEVARD|DR(?:IVE)?|RD|ROAD|WAY|LN|LANE|CT|COURT|PL(?:ACE)?|CIR(?:CLE)?|PKWY|PARKWAY|HWY)\b/gi, '').trim();
+          if (streetWords.length >= 3) {
+            // Add as full phrase only — sliding window matches it multi-token
+            discovered.add(streetNum + ' ' + streetWords.trim());
           }
           // Look at next line for city/state/zip
           if (j + 1 < lines.length) {
@@ -337,14 +334,8 @@ function discoverPatientAddress(extractedText) {
               discovered.add(zip);
               // City name — split and add words >= 3 chars (skip state abbrev)
               var city = cszMatch[1].replace(/,/g, '').trim();
-              // Only add city if it looks specific (not a super-common city name)
-              // We'll add it but keep it short to avoid over-redaction
-              // city words that are specific enough
-              city.split(/\s+/).forEach(function(w) {
-                if (w.length >= 5 && !/^(NORTH|SOUTH|EAST|WEST|NEW|CITY|TOWN)$/i.test(w)) {
-                  discovered.add(w);
-                }
-              });
+              // Add city as whole phrase only — no word splitting
+              if (city.length >= 3) discovered.add(city);
             } else {
               // Maybe the zip is on the same street line or embedded
               var zipMatch = candidate.match(ZIP_RE);
@@ -387,18 +378,19 @@ function discoverPatientAddress(extractedText) {
     var zip2 = cszM[3];
     if (parseInt(sNum, 10) > 99) discovered.add(sNum);
     if (zip2) discovered.add(zip2);
-    var sWords = sName.replace(/\b(?:AVE?|ST|BLVD|DR|RD|WAY|LN|CT|PL|CIR|PKWY|HWY)\b/gi, '').trim();
-    if (sWords.length >= 5) {
-      discovered.add(sWords.trim());
-      sWords.split(/\s+/).forEach(function(w) {
-        if (w.length >= 4 && !/^(NORTH|SOUTH|EAST|WEST|NEW)$/i.test(w)) {
-          discovered.add(w);
-        }
-      });
+    var sWords = sName.replace(/\b(?:AVE?|ST(?:REET)?|BLVD|BOULEVARD|DR(?:IVE)?|RD|ROAD|WAY|LN|LANE|CT|COURT|PL(?:ACE)?|CIR(?:CLE)?|PKWY|PARKWAY|HWY)\b/gi, '').trim();
+    if (sWords.length >= 3) {
+      discovered.add(sNum + ' ' + sWords.trim());
     }
   }
 
-  var result = Array.from(discovered).filter(function(v) { return v && v.trim().length >= 3; });
+  var COMMON_WORDS = new Set(['free','fall','feel','main','park','hill','lake','pine','rose','oak','view','high','long','open','good','best','full','just','also','only','both','even','well','help','find','call','send','back','next','last','same','none','page','date','time','form','type','code','unit','room','note','info','plan','test','exam','name','addr','city','state','with','from','have','they','your','more','some','over','after','about']);
+  var result = Array.from(discovered).filter(function(v) {
+    if (!v || v.trim().length < 3) return false;
+    // Skip pure common English words
+    if (COMMON_WORDS.has(v.trim().toLowerCase())) return false;
+    return true;
+  });
   if (result.length > 0) {
     console.log('[ADDR-DISCOVER] Discovered patient address tokens:', JSON.stringify(result));
   }
@@ -516,6 +508,8 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     // These can end up in piiValues if extraction patterns grab sentence fragments
     var _piiWord = piiNorm.toLowerCase();
     if (/^(page|pages|date|time|form|type|code|unit|room|note|visit|total|amount|paid|status|level|none|same|info|record|report|order|plan|initial|final|signature|signed|print|copy|draft|section|part|item|number|detail|summary|description|comment|follow|continued|information|balance|right|left|hand|wrist|pain|none|test|exam|normal|within|limits)$/.test(_piiWord)) continue;
+    // Also skip common English words that appear in street names and general text
+    if (/^(free|fall|feel|free|main|park|hill|lake|pine|rose|oak|elm|view|high|long|old|new|far|near|open|good|best|full|plus|just|also|only|both|even|well|help|find|call|send|back|next|last|first|second|third|must|will|that|this|with|from|have|been|they|what|when|your|their|more|most|some|other|over|under|after|before|above|below|between|through|about|should|could|would)$/.test(_piiWord)) continue;
     // Skip values that look like billing/procedure codes rather than PII:
     // 5-digit codes starting with 000-009 (bill codes like 00100, 00663)
     // ICD-10 patterns already filtered in extraction but catch stragglers here
