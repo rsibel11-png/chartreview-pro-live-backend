@@ -406,6 +406,91 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
 
   var result = {}; // page (0-indexed) -> array of boxes
 
+  // ── HANDWRITING PASS: redact ALL handwritten tokens unconditionally ─────────
+  var HW_LINE_GAP  = 0.015;
+  var HW_VERT_TOL  = 0.012;
+  var HW_MIN_CHARS = 2;
+
+  var pageNums2 = Object.keys(pageMap);
+  for (var pni = 0; pni < pageNums2.length; pni++) {
+    var pgNum    = pageNums2[pni];
+    var pgBlocks = pageMap[pgNum];
+
+    var hwBlocks = pgBlocks.filter(function(b) {
+      if (!b.hw) return false;
+      var txt = (b.t || '').trim();
+      if (txt.length < HW_MIN_CHARS) return false;
+      if (/^\d+$/.test(txt)) return false;
+      if (/^[^A-Za-z0-9]+$/.test(txt)) return false; // punctuation-only tokens
+      return true;
+    });
+
+    if (!hwBlocks.length) continue;
+
+    hwBlocks.sort(function(a, b) {
+      var dy = a.tp - b.tp;
+      if (Math.abs(dy) > HW_VERT_TOL) return dy;
+      return a.l - b.l;
+    });
+
+    var hwLines = [];
+    var currentLine = [hwBlocks[0]];
+    for (var hi = 1; hi < hwBlocks.length; hi++) {
+      var prev = currentLine[currentLine.length - 1];
+      var cur  = hwBlocks[hi];
+      if (Math.abs(cur.tp - prev.tp) <= HW_VERT_TOL) {
+        currentLine.push(cur);
+      } else {
+        hwLines.push(currentLine);
+        currentLine = [cur];
+      }
+    }
+    hwLines.push(currentLine);
+
+    for (var li = 0; li < hwLines.length; li++) {
+      var lineTokens = hwLines[li];
+      if (!lineTokens.length) continue;
+      var groups = [];
+      var curGroup = [lineTokens[0]];
+      for (var ti = 1; ti < lineTokens.length; ti++) {
+        var prevTok = curGroup[curGroup.length - 1];
+        var curTok  = lineTokens[ti];
+        var gap = curTok.l - (prevTok.l + prevTok.w);
+        if (gap <= HW_LINE_GAP) {
+          curGroup.push(curTok);
+        } else {
+          groups.push(curGroup);
+          curGroup = [curTok];
+        }
+      }
+      groups.push(curGroup);
+
+      for (var gi = 0; gi < groups.length; gi++) {
+        var grp = groups[gi];
+        if (!grp.length) continue;
+        var minL = grp[0].l, minT = grp[0].tp;
+        var maxR = grp[0].l + grp[0].w, maxB = grp[0].tp + grp[0].h;
+        for (var gbi = 1; gbi < grp.length; gbi++) {
+          if (grp[gbi].l < minL) minL = grp[gbi].l;
+          if (grp[gbi].tp < minT) minT = grp[gbi].tp;
+          if (grp[gbi].l + grp[gbi].w > maxR) maxR = grp[gbi].l + grp[gbi].w;
+          if (grp[gbi].tp + grp[gbi].h > maxB) maxB = grp[gbi].tp + grp[gbi].h;
+        }
+        var pgIdx2 = parseInt(pgNum, 10) - 1;
+        if (!result[pgIdx2]) result[pgIdx2] = [];
+        var pad = 0.005;
+        result[pgIdx2].push({
+          x: Math.max(0, minL - pad),
+          y: Math.max(0, minT - pad),
+          w: Math.min(1, maxR - minL + pad * 2),
+          h: Math.min(1, maxB - minT + pad * 2),
+          reason: 'handwriting',
+        });
+      }
+    }
+  }
+  // ── END HANDWRITING PASS ───────────────────────────────────────────────────
+
   for (var pi = 0; pi < piiValues.length; pi++) {
     var pii = piiValues[pi];
     var piiNorm = normalizeForMatch(pii);
