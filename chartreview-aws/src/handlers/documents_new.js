@@ -658,6 +658,7 @@ Return ONLY a JSON object with these exact fields:
                   tp: b.Geometry.BoundingBox.Top,
                   w: b.Geometry.BoundingBox.Width,
                   h: b.Geometry.BoundingBox.Height,
+                  hw: b.TextType === 'HANDWRITING' ? 1 : 0,
                 };
               });
             var blocksKey = (doc.file_key || '').replace(/\/[^\/]+$/, '') + '/textract_blocks.json';
