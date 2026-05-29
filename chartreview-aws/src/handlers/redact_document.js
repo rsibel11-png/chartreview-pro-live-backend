@@ -318,12 +318,14 @@ function discoverPatientAddress(extractedText) {
             discovered.add(streetNum);
           }
           // Add meaningful street name components (skip single words < 4 chars)
-          // Add full street name phrase (without suffix) — NOT individual words
-          // Individual word splitting causes common words like FREE, FALL, MAIN to be redacted
+          // Add number+name+suffix variants — complete address phrase only, no bare words
+          var SFXS = ['AVE', 'AVENUE', 'ST', 'STREET', 'BLVD', 'BOULEVARD', 'DR', 'DRIVE', 'RD', 'ROAD', 'LN', 'LANE', 'CT', 'COURT', 'WAY', 'PL', 'PLACE', 'CIR', 'CIRCLE', 'PKWY', 'PARKWAY', 'HWY', 'HIGHWAY', 'TER', 'TERRACE', 'TRAIL', 'TRL', 'LOOP', 'RUN', 'PATH', 'PASS'];
           var streetWords = streetName.replace(/\b(?:AVE?|ST(?:REET)?|BLVD|BOULEVARD|DR(?:IVE)?|RD|ROAD|WAY|LN|LANE|CT|COURT|PL(?:ACE)?|CIR(?:CLE)?|PKWY|PARKWAY|HWY)\b/gi, '').trim();
-          if (streetWords.length >= 3) {
-            // Add as full phrase only — sliding window matches it multi-token
-            discovered.add(streetNum + ' ' + streetWords.trim());
+          if (streetWords.length >= 2) {
+            SFXS.forEach(function(sfx) {
+              discovered.add(streetNum + ' ' + streetWords + ' ' + sfx);
+            });
+            discovered.add(streetNum + ' ' + streetWords); // fallback: no suffix
           }
           // Look at next line for city/state/zip
           if (j + 1 < lines.length) {
@@ -378,9 +380,13 @@ function discoverPatientAddress(extractedText) {
     var zip2 = cszM[3];
     if (parseInt(sNum, 10) > 99) discovered.add(sNum);
     if (zip2) discovered.add(zip2);
+    var SFXS2 = ['AVE', 'AVENUE', 'ST', 'STREET', 'BLVD', 'BOULEVARD', 'DR', 'DRIVE', 'RD', 'ROAD', 'LN', 'LANE', 'CT', 'COURT', 'WAY', 'PL', 'PLACE', 'CIR', 'CIRCLE', 'PKWY', 'PARKWAY', 'HWY', 'HIGHWAY', 'TER', 'TERRACE', 'TRAIL', 'TRL', 'LOOP', 'RUN', 'PATH', 'PASS'];
     var sWords = sName.replace(/\b(?:AVE?|ST(?:REET)?|BLVD|BOULEVARD|DR(?:IVE)?|RD|ROAD|WAY|LN|LANE|CT|COURT|PL(?:ACE)?|CIR(?:CLE)?|PKWY|PARKWAY|HWY)\b/gi, '').trim();
-    if (sWords.length >= 3) {
-      discovered.add(sNum + ' ' + sWords.trim());
+    if (sWords.length >= 2) {
+      SFXS2.forEach(function(sfx) {
+        discovered.add(sNum + ' ' + sWords + ' ' + sfx);
+      });
+      discovered.add(sNum + ' ' + sWords);
     }
   }
 
