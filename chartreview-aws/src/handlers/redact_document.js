@@ -64,6 +64,38 @@ async function updateJob(job_id, patch) {
 
 // ── STEP 1: Regex scan — extract all known PII values from stored text ────────
 
+// ── DOB variant expansion (module-scope so all workers can use it) ────────────
+var MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+var MONTH_SHORT  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function expandDob(raw) {
+  var m = raw.replace(/[-]/g, '/').match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (!m) return [raw];
+  var mon = parseInt(m[1], 10), day = parseInt(m[2], 10), yr = parseInt(m[3], 10);
+  if (yr < 100) yr += (yr > 30 ? 1900 : 2000);
+  var yr2 = String(yr).slice(2);
+  var mm = String(mon).padStart(2, '0'), dd = String(day).padStart(2, '0');
+  var variants = [
+    raw,
+    mm + '/' + dd + '/' + yr,
+    mm + '/' + dd + '/' + yr2,
+    mon + '/' + day + '/' + yr,
+    mon + '/' + day + '/' + yr2,
+    mm + '-' + dd + '-' + yr,
+    mon + '-' + day + '-' + yr,
+  ];
+  if (mon >= 1 && mon <= 12) {
+    var mName = MONTH_NAMES[mon-1], mShort = MONTH_SHORT[mon-1];
+    variants.push(mName + ' ' + day + ', ' + yr);
+    variants.push(mName + ' ' + day + ' ' + yr);
+    variants.push(mShort + ' ' + day + ' ' + yr);
+    variants.push(mShort + ' ' + dd + ' ' + yr);
+    variants.push(dd + mShort.toUpperCase() + yr);
+  }
+  var seen = {};
+  return variants.filter(function(v) { if (seen[v]) return false; seen[v]=true; return true; });
+}
+
 function extractKnownPiiValues(extractedText) {
   // Extract all values following explicit demographic labels.
   // No minimum/maximum character limits — any labeled value is treated as PII.
@@ -165,39 +197,6 @@ function extractKnownPiiValues(extractedText) {
       }
     }
   }
-  var MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  var MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-
-  function expandDob(raw) {
-    // Parse M/D/YY or MM/DD/YYYY (also handles - separator)
-    var m = raw.replace(/[-]/g, '/').match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-    if (!m) return [raw];
-    var mon = parseInt(m[1], 10), day = parseInt(m[2], 10), yr = parseInt(m[3], 10);
-    if (yr < 100) yr += (yr > 30 ? 1900 : 2000);
-    var yr2 = String(yr).slice(2); // 2-digit year
-    var mm = String(mon).padStart(2, '0'), dd = String(day).padStart(2, '0');
-    var variants = [
-      raw,                                          // original
-      mm + '/' + dd + '/' + yr,                    // MM/DD/YYYY
-      mm + '/' + dd + '/' + yr2,                   // MM/DD/YY
-      mon + '/' + day + '/' + yr,                  // M/D/YYYY
-      mon + '/' + day + '/' + yr2,                 // M/D/YY
-      mm + '-' + dd + '-' + yr,                    // MM-DD-YYYY
-      mon + '-' + day + '-' + yr,                  // M-D-YYYY
-    ];
-    if (mon >= 1 && mon <= 12) {
-      var mName = MONTH_NAMES[mon-1], mShort = MONTH_SHORT[mon-1];
-      variants.push(mName + ' ' + day + ', ' + yr);   // February 6, 1976
-      variants.push(mName + ' ' + day + ' ' + yr);    // February 6 1976
-      variants.push(mShort + ' ' + day + ' ' + yr);   // Feb 6 1976
-      variants.push(mShort + ' ' + dd + ' ' + yr);    // Feb 06 1976
-      variants.push(dd + mShort.toUpperCase() + yr);   // 06FEB1976 (military)
-    }
-    // Deduplicate
-    var seen = {};
-    return variants.filter(function(v) { if (seen[v]) return false; seen[v]=true; return true; });
-  }
-
   // Expand hyphenated compound names: MORA-MALDONADO -> also add MORA and MALDONADO separately
   var expanded = new Set(found);
   found.forEach(function(val) {
