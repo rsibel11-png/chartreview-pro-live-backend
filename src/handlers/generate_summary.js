@@ -460,6 +460,15 @@ const EXCLUDED_PATTERNS = [
   // Attending countersignature pages — "Operative Note" labels are EMR co-sign artifacts,
   // not separate clinical encounters. The real surgical record is "Operative Report".
   /\boperative\s+note\b(?!.*report)/i,
+  // Billing / financial ledger documents — not clinical records
+  /patient\s+history\s*[-–]?\s*detail/i,
+  /billing\s+(statement|ledger|summary|detail|history)/i,
+  /\bcharge\s+summary\b/i,
+  /\bfinancial\s+(statement|summary|ledger)/i,
+  /\binvoice\b/i,
+  /\bremittance\s+(advice|statement)/i,
+  /\bexplanation\s+of\s+benefits?\b/i,
+  /\beob\b/i,
 ];
 
 const isExcludedVisit = (visit) => {
@@ -580,6 +589,10 @@ B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIE
    - treatment_plan: the expert's recommendations or causation opinions
    - imaging_findings: any imaging reviewed or interpreted by the expert
    - visit_date: the date the report was authored or the examination was performed
+
+IMPORTANT — SKIP THESE DOCUMENT TYPES ENTIRELY (return no visit entries):
+   - Billing statements, ledgers, or financial summaries (e.g., "Patient History - Detail", charge summaries, invoices, EOBs, remittance advice)
+   - These contain CPT codes and dollar amounts but no clinical narrative. Do not generate visit entries from them.
 
 C) POLICE REPORTS:
    Treat as a single entry with:
