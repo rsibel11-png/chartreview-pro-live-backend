@@ -144,7 +144,10 @@ function extractKnownPiiValues(extractedText) {
     // Spouse / next of kin / emergency contact / POA / guardian
     /(?:Spouse|SPOUSE)\s*[:\|]\s*(.+)/gi,
     /(?:Next\s*of\s*Kin|NOK)\s*[:\|]\s*(.+)/gi,
-    /(?:First\s*Name(?:\s*\/?\s*MI)?|Last\s*Name)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)/gi,
+    // First/Last Name — only fires when content follows, and not when it's a column
+    // header row (C-4 forms list "First Name | MI | Last Name" as headers, not values)
+    // Negative lookahead prevents matching header rows with multiple pipe-separated fields
+    /(?:First\s*Name|Last\s*Name)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{1,30})(?![\s\|]*(?:MI|Middle|Last|First|Birth|Claim|Sex))/gi,
     /(?:Guardian\s*Name|GUARDIAN)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]+)/gi,
     /(?:Emergency\s*Contact|EMERGENCY\s*CONTACT)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]+)/gi,
     /(?:POA|Power\s*of\s*Attorney)\s*[:\|]\s*(.+)/gi,
@@ -180,14 +183,20 @@ function extractKnownPiiValues(extractedText) {
       for (var gi = 0; gi < groups.length; gi++) {
         var val = groups[gi];
         if (!val) continue;
-        // Skip ICD/CPT codes (e.g. S52.592D, M79.3)
+        // Skip ICD-10 codes (e.g. S52.592D, M79.3)
         if (/^[A-Z]\d{2}\.?\d{0,3}[A-Z]?$/.test(val)) continue;
+        // Skip CPT codes (4-5 digit numeric, e.g. 72125, 96361, 99213)
+        if (/^\d{4,5}$/.test(val)) continue;
+        // Skip HCPCS codes (letter + 4 digits, e.g. J1885, G0463)
+        if (/^[A-Z]\d{4}$/.test(val)) continue;
+        // Skip revenue codes (0xxx UB-04 format)
+        if (/^0\d{3}$/.test(val)) continue;
         // Skip pure clinical lowercase text (long narrative fragments)
         if (/^[a-z\s,\.]{15,}$/.test(val)) continue;
         // Skip bare 2-letter state abbreviations
         if (/^[A-Z]{2}$/.test(val)) continue;
-        // Skip pure single digits
-        if (/^\d$/.test(val)) continue;
+        // Skip pure digit strings < 4 digits (ROM values, vitals, age, room#)
+        if (/^\d{1,3}$/.test(val)) continue;
         // Skip PII field label words — these are extraction triggers, not values to redact.
         // Redacting them causes words like "patient", "address", "name" to be blacked out
         // in clinical narrative text throughout the document.
@@ -200,6 +209,9 @@ function extractKnownPiiValues(extractedText) {
         // Skip 1-4 char values that are clearly not PII (short words, abbreviations)
         // but allow MRN/account numbers (which can be short alphanumeric)
         if (_vl.length <= 4 && /^[a-z]+$/.test(_vl) && !/^(jose|juan|ana|luis|rosa|adam|alan|alan|alan|alan)$/.test(_vl)) continue;
+        // Skip values extracted under provider/physician labels — those are staff names not patient PII
+        var _prefix = (regexMatch[0] || '').slice(0, -(val.length)).toLowerCase();
+        if (/(?:rendering|treating|attending|referring|ordering|prescrib|provider|physician|surgeon|clinician|practitioner|therapist|radiologist|specialist)/.test(_prefix)) continue;
         found.add(val);
       }
     }
@@ -510,6 +522,12 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   for (var pi = 0; pi < piiValues.length; pi++) {
     var pii = piiValues[pi];
     var piiNorm = normalizeForMatch(pii);
+    // Skip pure digit strings < 4 digits (ROM values, vitals, ages)
+    if (/^\d{1,3}$/.test(piiNorm)) continue;
+    // Skip CPT (4-5 digit), HCPCS (letter+4 digits), ICD-10 codes
+    if (/^\d{4,5}$/.test(piiNorm)) continue;
+    if (/^[a-z]\d{4}$/.test(piiNorm)) continue;
+    if (/^[a-z]\d{2}\.?\d{0,3}[a-z]?$/.test(piiNorm)) continue;
     // Skip common English words that should never be redacted
     // These can end up in piiValues if extraction patterns grab sentence fragments
     var _piiWord = piiNorm.toLowerCase();
