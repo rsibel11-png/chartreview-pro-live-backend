@@ -10,8 +10,19 @@ jobs:
       - name: List all API Gateway resources
         run: |
           aws apigateway get-resources --rest-api-id 1h4kpspbs6 --region us-east-1 \
-            --query 'items[].{id:id, path:path, methods:keys(resourceMethods)}' \
-            --output table
+            --query 'items[].{id:id, path:path}' --output table
+
+          echo "--- Methods on folder resources ---"
+          for RES_ID in $(aws apigateway get-resources --rest-api-id 1h4kpspbs6 --region us-east-1 \
+            --query "items[?contains(path,'folder')].id" --output text); do
+            echo "Resource $RES_ID:"
+            aws apigateway get-resource --rest-api-id 1h4kpspbs6 --resource-id $RES_ID --region us-east-1 \
+              --query '{path:path, methods:keys(resourceMethods)}' --output json 2>/dev/null || echo "  no methods"
+          done
+
+          echo "--- Scan folder-pii DynamoDB table ---"
+          aws dynamodb scan --table-name chartreview-folder-pii-prod --region us-east-1 \
+            --query 'Items' --output json 2>/dev/null || echo "Table not found or empty"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
