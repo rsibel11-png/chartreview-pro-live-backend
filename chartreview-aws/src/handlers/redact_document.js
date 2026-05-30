@@ -96,74 +96,6 @@ function expandDob(raw) {
   return variants.filter(function(v) { if (seen[v]) return false; seen[v]=true; return true; });
 }
 
-// ── NAME VARIANT EXPANSION ────────────────────────────────────────────────────
-// Expands a PII list with name variants so "MOORE, KIMBERLY" and "KIMBERLY MOORE"
-// both match regardless of OCR format. Also extracts standalone first/last/middle.
-function expandNameVariants(piiList, patientNameOverride) {
-  var extras = [];
-  var seen = new Set(piiList.map(function(v) { return (v || '').trim().toLowerCase(); }));
-
-  function addIfNew(v) {
-    var k = (v || '').trim().toLowerCase();
-    if (k.length >= 2 && !seen.has(k)) { seen.add(k); extras.push(v.trim()); }
-  }
-
-  piiList.forEach(function(v) {
-    if (!v || typeof v !== 'string') return;
-    var t = v.trim();
-    // "LAST, FIRST [MIDDLE]" → "FIRST [MIDDLE] LAST"
-    var m1 = t.match(/^([A-Z][A-Z'\-\.]+),\s+([A-Z][A-Z'\-\. ]+)$/i);
-    if (m1) {
-      addIfNew(m1[2].trim() + ' ' + m1[1].trim());
-      addIfNew(m1[1].trim());
-      addIfNew(m1[2].trim().split(/\s+/)[0]);
-      // NOTE: do NOT add middle name standalone - it appears in clinical text
-      return;
-    }
-    // "FIRST LAST" → "LAST, FIRST"
-    var m2 = t.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
-    if (m2) {
-      addIfNew(m2[2].trim() + ', ' + m2[1].trim());
-      addIfNew(m2[1].trim());
-      addIfNew(m2[2].trim());
-    }
-    // "FIRST MIDDLE LAST"
-    var m3 = t.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
-    if (m3) {
-      addIfNew(m3[3].trim() + ', ' + m3[1].trim() + ' ' + m3[2].trim());
-      // Only add first and last standalone, NOT middle name
-      addIfNew(m3[1].trim()); addIfNew(m3[3].trim());
-    }
-  });
-
-  // Handle explicitly-supplied patient name override (from modal or folder PII)
-  if (patientNameOverride && typeof patientNameOverride === 'string') {
-    var pn = patientNameOverride.trim();
-    addIfNew(pn);
-    var pm1 = pn.match(/^([A-Z][A-Z'\-\.]+),\s+([A-Z][A-Z'\-\. ]+)$/i);
-    if (pm1) {
-      addIfNew(pm1[2].trim() + ' ' + pm1[1].trim());
-      addIfNew(pm1[1].trim());
-      addIfNew(pm1[2].trim().split(/\s+/)[0]);
-      // NOTE: do NOT add middle name standalone
-    }
-    var pm2 = pn.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
-    if (pm2) {
-      addIfNew(pm2[2].trim() + ', ' + pm2[1].trim());
-      addIfNew(pm2[1].trim()); addIfNew(pm2[2].trim());
-    }
-    var pm3 = pn.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
-    if (pm3) {
-      // Only add first and last, NOT middle name (appears in clinical narrative)
-      addIfNew(pm3[1].trim()); addIfNew(pm3[3].trim());
-    }
-  }
-
-  if (extras.length) console.log('[NAME-VARIANTS] Added', extras.length, ':', JSON.stringify(extras.slice(0, 10)));
-  return piiList.concat(extras);
-}
-
-
 function extractKnownPiiValues(extractedText) {
   // Extract all values following explicit demographic labels.
   // No minimum/maximum character limits — any labeled value is treated as PII.
@@ -174,9 +106,9 @@ function extractKnownPiiValues(extractedText) {
     // Patient name — explicit label on same line
     /^(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+)$/mg,
     // Certification / lien / legal doc inline references
-    /[Rr]ecords\s+(?:pertaining\s+to|of|for)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]{2,60})/g,
-    /[Rr]egarding\s+([A-Za-z][A-Za-z\-,'\. ]{2,60})/g,
-    /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{1,80})$/mgi,
+    /[Rr]ecords\s+(?:pertaining\s+to|of|for)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]{3,40})/g,
+    /[Rr]egarding\s+([A-Za-z][A-Za-z\-,'\. ]{3,40})/g,
+    /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /Patient['\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]+)/gi,
@@ -515,7 +447,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   // ── HANDWRITING PASS: redact ALL handwritten tokens unconditionally ─────────
   var HW_LINE_GAP  = 0.015;
   var HW_VERT_TOL  = 0.012;
-  var HW_MIN_CHARS = 2; // floor of 2 chars - single OCR artifacts excluded
+  var HW_MIN_CHARS = 2;
 
   var pageNums2 = Object.keys(pageMap);
   for (var pni = 0; pni < pageNums2.length; pni++) {
@@ -526,7 +458,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
       if (!b.hw) return false;
       var txt = (b.t || '').trim();
       if (txt.length < HW_MIN_CHARS) return false;
-      if (/^\d{1,3}$/.test(txt)) return false; // skip 1-3 digit tokens (vitals, ages, page#) — 4+ digit handwritten numbers (addresses, codes) pass through
+      if (/^\d{1,4}$/.test(txt)) return false; // skip short pure-digit tokens (vitals, page#, etc) but keep longer ones (dates, phones)
       if (/^[^A-Za-z0-9]+$/.test(txt)) return false; // punctuation-only tokens
       return true;
     });
@@ -608,7 +540,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     var _isDlPage = /DRIVER'?S?\s*LICEN[CS]E|STATE\s*ID|IDENTIFICATION\s*CARD/.test(_idPageText);
     if (!_isDlPage) continue;
 
-    // Full card blackout — DL has zero clinical value, redact everything
+    // Card bounding box from all tokens on this page
     var _cardMinL = Math.min.apply(null, _idWords.map(function(w) { return w.l; }));
     var _cardMinT = Math.min.apply(null, _idWords.map(function(w) { return w.tp; }));
     var _cardMaxR = Math.max.apply(null, _idWords.map(function(w) { return w.l + w.w; }));
@@ -617,13 +549,21 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     var _cardH    = _cardMaxB - _cardMinT;
     if (!result[String(_idPgIdx)]) result[String(_idPgIdx)] = [];
 
-    // Redact the entire card bounding box
+    // Primary face photo — left ~36% x top ~58% of card
     result[String(_idPgIdx)].push({
-      label: 'dl-full-blackout',
-      x: Math.max(0, _cardMinL - 0.01),
-      y: Math.max(0, _cardMinT - 0.01),
-      width: Math.min(1, _cardW + 0.02),
-      height: Math.min(1, _cardH + 0.02),
+      label: 'dl-photo-primary',
+      x: Math.max(0, _cardMinL - 0.005),
+      y: Math.max(0, _cardMinT - 0.005),
+      width: Math.min(1, _cardW * 0.27),   // narrowed: photo is left ~27% of card
+      height: Math.min(1, _cardH * 0.55),  // slightly reduced height
+    });
+    // Thumbnail — lower-right ~17% x 20% of card
+    result[String(_idPgIdx)].push({
+      label: 'dl-photo-thumbnail',
+      x: Math.max(0, _cardMaxR - _cardW * 0.19),
+      y: Math.max(0, _cardMaxB - _cardH * 0.24),
+      width: Math.min(1, _cardW * 0.18),
+      height: Math.min(1, _cardH * 0.23),
     });
     console.log('[ID-PHOTO] p' + _idPgNum + ' — redacting face photo and thumbnail');
 
@@ -898,14 +838,6 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     // Witness and occupational form fields
     'witnesstoaccident', 'witnessname', 'nameofwitness',
     'occupationaldisease', 'injureddescription',
-    // HIPAA / lien form signatures
-    'signatureofpatientclientorclaimantoriguardianifaminor',
-    'signatureofpatientorclaimantorguardianifaminor',
-    'signatureofpatient', 'signatureofclaimant',
-    'signaturedate', 'datesigned',
-    'patientprintedsignature', 'printname', 'printedname',
-    // Generic "signature" alone below a line
-    'signature', 'signed', 'sign',
   ];
 
   var pageNums2 = Object.keys(pageMap);
@@ -1611,30 +1543,6 @@ module.exports.redactDocumentWorker = async function(event) {
     const knownPiiValuesBase = extractKnownPiiValues(extractedText);
     const discoveredAddrTokens = discoverPatientAddress(extractedText);
     const userSuppliedPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
-
-    // ── Inject patient name from folder PII store ──────────────────────────
-    // The free-floating "KIMBERLY MOORE" header on surgical forms has no label,
-    // so extractKnownPiiValues won't catch it. We inject the name directly from
-    // the folder PII table so expandNameVariants can produce all variants.
-    var folderPatientName = null;
-    try {
-      var _docRec = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
-      var _folderName = (_docRec.Item && (_docRec.Item.folder || _docRec.Item.folder_name) || '').trim();
-      var _orgId = (_docRec.Item && _docRec.Item.org_id) || '';
-      if (_folderName && _orgId) {
-        var _piiRec = await dynamo.send(new GetCommand({
-          TableName: 'chartreview-folder-pii-prod',
-          Key: { folder_key: _orgId + '#' + _folderName }
-        }));
-        if (_piiRec.Item && _piiRec.Item.patient_name) {
-          folderPatientName = _piiRec.Item.patient_name.trim();
-          console.log('[FOLDER-PII] Injecting patient name:', folderPatientName);
-        }
-      }
-    } catch (e) {
-      console.log('[FOLDER-PII] Could not fetch folder PII:', e.message);
-    }
-    // ── End folder PII injection ───────────────────────────────────────────
     // Expand DOB variants from user-supplied values
     var userPiiExpanded = [];
     userSuppliedPii.forEach(function(v) {
@@ -1645,10 +1553,9 @@ module.exports.redactDocumentWorker = async function(event) {
         userPiiExpanded.push(v);
       }
     });
-    const knownPiiValuesRaw = knownPiiValuesBase
+    const knownPiiValues = knownPiiValuesBase
       .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
       .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
-    const knownPiiValues = expandNameVariants(knownPiiValuesRaw, folderPatientName || event.patient_name || null);
     console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
