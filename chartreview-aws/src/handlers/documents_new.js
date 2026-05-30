@@ -462,7 +462,17 @@ function parsePiiFromWindow(window) {
   const spouse   = (spouseRaw && !(/^(PERSON TO NOTIFY|NEXT OF KIN|NOK|N\/A|NONE|EMERGENCY CONTACT|RELATIONSHIP|NAME)$/i.test(spouseRaw))) ? spouseRaw : '';
   const empM     = window.match(/(?:PATIENT\s+)?EMPLOYER[:\n\s]+([A-Z][A-Z &,.]{3,50})/i);
   const employer = (empM && !/UNEMPLOYED|NONE|N\/A|GUARANTOR|SELF|RETIRED|DISABLED|STUDENT/i.test(empM[1])) ? empM[1].trim() : '';
-  return { patientName: name, dob, ssn, phone, mrn, street, city, stateZip, spouse, employer };
+  // Extract middle name if present in "LAST, FIRST MIDDLE" or "First Middle Last" format
+  let middleName = '';
+  if (name) {
+    // "MOORE, KIMBERLY MARIA" → middle = "MARIA"
+    const mLastFirstMid = name.match(/^[A-Z][A-Z'\-\.]+,\s+[A-Z][A-Z'\-\.]+\s+([A-Z][A-Z'\-\.]+)$/i);
+    if (mLastFirstMid) middleName = mLastFirstMid[1].trim();
+    // "Kimberly Maria Moore" → middle = "Maria" (3 words, middle is word 2)
+    const mFirstMidLast = name.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
+    if (mFirstMidLast && !middleName) middleName = mFirstMidLast[2].trim();
+  }
+  return { patientName: name, middleName, dob, ssn, phone, mrn, street, city, stateZip, spouse, employer };
 }
 
 async function detectAndStoreFacesheetPii(extractedText, orgId, folder) {
@@ -492,6 +502,7 @@ async function detectAndStoreFacesheetPii(extractedText, orgId, folder) {
       folder:       folder.trim(),
       updated_at:   now,
       patientName:  pii.patientName  || base.patientName  || '',
+      middleName:   pii.middleName   || base.middleName   || '',
       dob:          pii.dob          || base.dob          || '',
       ssn:          pii.ssn          || base.ssn          || '',
       phone:        pii.phone        || base.phone        || '',
