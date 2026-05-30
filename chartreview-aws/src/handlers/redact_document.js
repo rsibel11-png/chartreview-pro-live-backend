@@ -96,6 +96,75 @@ function expandDob(raw) {
   return variants.filter(function(v) { if (seen[v]) return false; seen[v]=true; return true; });
 }
 
+// ── NAME VARIANT EXPANSION ────────────────────────────────────────────────────
+// Expands a PII list with name variants so "MOORE, KIMBERLY" and "KIMBERLY MOORE"
+// both match regardless of OCR format. Also extracts standalone first/last/middle.
+function expandNameVariants(piiList, patientNameOverride) {
+  var extras = [];
+  var seen = new Set(piiList.map(function(v) { return (v || '').trim().toLowerCase(); }));
+
+  function addIfNew(v) {
+    var k = (v || '').trim().toLowerCase();
+    if (k.length >= 2 && !seen.has(k)) { seen.add(k); extras.push(v.trim()); }
+  }
+
+  piiList.forEach(function(v) {
+    if (!v || typeof v !== 'string') return;
+    var t = v.trim();
+    // "LAST, FIRST [MIDDLE]" → "FIRST [MIDDLE] LAST"
+    var m1 = t.match(/^([A-Z][A-Z'\-\.]+),\s+([A-Z][A-Z'\-\. ]+)$/i);
+    if (m1) {
+      addIfNew(m1[2].trim() + ' ' + m1[1].trim());
+      addIfNew(m1[1].trim());
+      addIfNew(m1[2].trim().split(/\s+/)[0]);
+      // middle name if present
+      var parts = m1[2].trim().split(/\s+/);
+      if (parts.length > 1) addIfNew(parts[1]);
+      return;
+    }
+    // "FIRST LAST" → "LAST, FIRST"
+    var m2 = t.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
+    if (m2) {
+      addIfNew(m2[2].trim() + ', ' + m2[1].trim());
+      addIfNew(m2[1].trim());
+      addIfNew(m2[2].trim());
+    }
+    // "FIRST MIDDLE LAST"
+    var m3 = t.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
+    if (m3) {
+      addIfNew(m3[3].trim() + ', ' + m3[1].trim() + ' ' + m3[2].trim());
+      addIfNew(m3[1].trim()); addIfNew(m3[2].trim()); addIfNew(m3[3].trim());
+    }
+  });
+
+  // Handle explicitly-supplied patient name override (from modal or folder PII)
+  if (patientNameOverride && typeof patientNameOverride === 'string') {
+    var pn = patientNameOverride.trim();
+    addIfNew(pn);
+    var pm1 = pn.match(/^([A-Z][A-Z'\-\.]+),\s+([A-Z][A-Z'\-\. ]+)$/i);
+    if (pm1) {
+      addIfNew(pm1[2].trim() + ' ' + pm1[1].trim());
+      addIfNew(pm1[1].trim());
+      addIfNew(pm1[2].trim().split(/\s+/)[0]);
+      var pmParts = pm1[2].trim().split(/\s+/);
+      if (pmParts.length > 1) addIfNew(pmParts[1]);
+    }
+    var pm2 = pn.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
+    if (pm2) {
+      addIfNew(pm2[2].trim() + ', ' + pm2[1].trim());
+      addIfNew(pm2[1].trim()); addIfNew(pm2[2].trim());
+    }
+    var pm3 = pn.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
+    if (pm3) {
+      addIfNew(pm3[1].trim()); addIfNew(pm3[2].trim()); addIfNew(pm3[3].trim());
+    }
+  }
+
+  if (extras.length) console.log('[NAME-VARIANTS] Added', extras.length, ':', JSON.stringify(extras.slice(0, 10)));
+  return piiList.concat(extras);
+}
+
+
 function extractKnownPiiValues(extractedText) {
   // Extract all values following explicit demographic labels.
   // No minimum/maximum character limits — any labeled value is treated as PII.
