@@ -561,6 +561,17 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
           var slice = pageWords.slice(start, start + len);
           var rawConcat = slice.map(function(w) { return w.t; }).join(''); var concat = normalizeForMatch(rawConcat);
           if (piiNorm.length > 0 && concat === piiNorm) {
+            // ── ICD/diagnosis line guard ──────────────────────────────────────
+            // If the matched tokens are on a line that contains an ICD-10 code
+            // (e.g. Z86.73, G56.03, E11.9, M79.89), this is a diagnosis description
+            // cell in a billing ledger — not patient PII. Skip.
+            var matchTop = slice[0].tp;
+            var lineHasIcd = pageWords.some(function(w) {
+              return Math.abs(w.tp - matchTop) <= 0.008 &&
+                /^[A-Z]\d{2}(\.\d{0,4})?[A-Z]?$/i.test((w.t || '').trim());
+            });
+            if (lineHasIcd) break; // skip this match entirely
+            // ── End ICD guard ─────────────────────────────────────────────────
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
             var minT = Math.min.apply(null, slice.map(function(w) { return w.tp; }));
