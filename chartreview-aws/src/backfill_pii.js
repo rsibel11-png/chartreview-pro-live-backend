@@ -70,8 +70,8 @@ function parsePii(w) {
     street:   grab(t, [/(?:ADDRESS|STREET)\s*[:\-]?\s*(\d+\s+[A-Z][A-Z0-9\s,\.#'\-]{5,50})/i]),
     city:     grab(t, [/CITY\s*[:\-]?\s*([A-Z][A-Z\s]{2,30})/i]),
     stateZip: grab(t, [/(?:STATE|ZIP)\s*[:\-]?\s*([A-Z]{2}[\s\-]*\d{5}[\-\d]*)/i]),
-    employer: grab(t, [/(?:EMPLOYER|EMPLOYER NAME)\s*[:\-]?\s*([A-Z][A-Z0-9\s,\.&'\-]{3,50})/i], true),
-    spouse:   grab(t, [/(?:SPOUSE|PARTNER)\s*[:\-]?\s*([A-Z][A-Z ,'\-]{3,40})/i], true),
+    employer: (function(){ const m=t.match(/(?:EMPLOYER|EMPLOYER NAME)\s*[:\-]?\s*([A-Z][A-Z0-9\s,\.&'\-]{3,50})/i); return (m&&m[1]&&!/GUARANTOR|UNEMPLOYED|NONE|N\/A|SELF|RETIRED|DISABLED|STUDENT/i.test(m[1])) ? m[1].trim().toUpperCase() : ''; })(),
+    spouse:   (function(){ const m=t.match(/(?:SPOUSE|PARTNER)\s*[:\-]?\s*([A-Z][A-Z ,'\-]{3,40})/i); const v=m&&m[1]?m[1].trim().toUpperCase():''; return /^(PERSON TO NOTIFY|NEXT OF KIN|NOK|N\/A|NONE|EMERGENCY CONTACT|RELATIONSHIP|NAME)$/i.test(v)?'':v; })(),
   };
 }
 
