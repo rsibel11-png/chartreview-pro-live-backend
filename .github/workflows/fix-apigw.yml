@@ -15,6 +15,7 @@ jobs:
         with:
           node-version: '20'
       - run: npm ci --omit=dev
+      - run: npm install @aws-sdk/client-api-gateway --no-save
       - name: Wire OPTIONS CORS and deploy
         run: node src/wire_cors.js
         env:
