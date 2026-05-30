@@ -106,9 +106,9 @@ function extractKnownPiiValues(extractedText) {
     // Patient name — explicit label on same line
     /^(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+)$/mg,
     // Certification / lien / legal doc inline references
-    /[Rr]ecords\s+(?:pertaining\s+to|of|for)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]{3,40})/g,
-    /[Rr]egarding\s+([A-Za-z][A-Za-z\-,'\. ]{3,40})/g,
-    /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
+    /[Rr]ecords\s+(?:pertaining\s+to|of|for)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]{2,60})/g,
+    /[Rr]egarding\s+([A-Za-z][A-Za-z\-,'\. ]{2,60})/g,
+    /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{1,80})$/mgi,
     /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /Patient['\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]+)/gi,
@@ -447,7 +447,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   // ── HANDWRITING PASS: redact ALL handwritten tokens unconditionally ─────────
   var HW_LINE_GAP  = 0.015;
   var HW_VERT_TOL  = 0.012;
-  var HW_MIN_CHARS = 2;
+  var HW_MIN_CHARS = 1; // lowered: cursive signatures often yield single-char tokens
 
   var pageNums2 = Object.keys(pageMap);
   for (var pni = 0; pni < pageNums2.length; pni++) {
@@ -458,7 +458,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
       if (!b.hw) return false;
       var txt = (b.t || '').trim();
       if (txt.length < HW_MIN_CHARS) return false;
-      if (/^\d{1,4}$/.test(txt)) return false; // skip short pure-digit tokens (vitals, page#, etc) but keep longer ones (dates, phones)
+      if (/^\d{1,3}$/.test(txt)) return false; // skip 1-3 digit tokens (vitals, ages, page#) — 4+ digit handwritten numbers (addresses, codes) pass through
       if (/^[^A-Za-z0-9]+$/.test(txt)) return false; // punctuation-only tokens
       return true;
     });
@@ -830,6 +830,15 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     // Witness and occupational form fields
     'witnesstoaccident', 'witnessname', 'nameofwitness',
     'occupationaldisease', 'injureddescription',
+    // HIPAA / lien form signatures
+    'signatureofpatientclientorclaimantoriguardianifaminor',
+    'signatureofpatientorclaimantorguardianifaminor',
+    'signatureofpatient', 'signatureofclaimant',
+    'clientpatient', 'client', 'patient',
+    'signaturedate', 'datesigned',
+    'patientprintedsignature', 'printname', 'printedname',
+    // Generic "signature" alone below a line
+    'signature', 'signed', 'sign',
   ];
 
   var pageNums2 = Object.keys(pageMap);
@@ -1535,6 +1544,30 @@ module.exports.redactDocumentWorker = async function(event) {
     const knownPiiValuesBase = extractKnownPiiValues(extractedText);
     const discoveredAddrTokens = discoverPatientAddress(extractedText);
     const userSuppliedPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
+
+    // ── Inject patient name from folder PII store ──────────────────────────
+    // The free-floating "KIMBERLY MOORE" header on surgical forms has no label,
+    // so extractKnownPiiValues won't catch it. We inject the name directly from
+    // the folder PII table so expandNameVariants can produce all variants.
+    var folderPatientName = null;
+    try {
+      var _docRec = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
+      var _folderName = (_docRec.Item && (_docRec.Item.folder || _docRec.Item.folder_name) || '').trim();
+      var _orgId = (_docRec.Item && _docRec.Item.org_id) || '';
+      if (_folderName && _orgId) {
+        var _piiRec = await dynamo.send(new GetCommand({
+          TableName: 'chartreview-folder-pii-prod',
+          Key: { folder_key: _orgId + '#' + _folderName }
+        }));
+        if (_piiRec.Item && _piiRec.Item.patient_name) {
+          folderPatientName = _piiRec.Item.patient_name.trim();
+          console.log('[FOLDER-PII] Injecting patient name:', folderPatientName);
+        }
+      }
+    } catch (e) {
+      console.log('[FOLDER-PII] Could not fetch folder PII:', e.message);
+    }
+    // ── End folder PII injection ───────────────────────────────────────────
     // Expand DOB variants from user-supplied values
     var userPiiExpanded = [];
     userSuppliedPii.forEach(function(v) {
@@ -1545,9 +1578,10 @@ module.exports.redactDocumentWorker = async function(event) {
         userPiiExpanded.push(v);
       }
     });
-    const knownPiiValues = knownPiiValuesBase
+    const knownPiiValuesRaw = knownPiiValuesBase
       .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
       .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
+    const knownPiiValues = expandNameVariants(knownPiiValuesRaw, folderPatientName || event.patient_name || null);
     console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
