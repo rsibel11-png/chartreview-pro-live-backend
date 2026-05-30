@@ -7,34 +7,13 @@ jobs:
   fix-apigw:
     runs-on: ubuntu-latest
     steps:
-      - name: Find and delete orphaned methods, then deploy
+      - name: Deploy API Gateway stage
         run: |
-          API_ID=1h4kpspbs6
-          REGION=us-east-1
-          STAGE=prod
-
-          # Get all resource IDs
-          RESOURCE_IDS=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
-            --query 'items[].id' --output text)
-
-          for RES_ID in $RESOURCE_IDS; do
-            for METHOD in GET POST PUT DELETE PATCH OPTIONS; do
-              # Try to get method — if exists, check for integration
-              if aws apigateway get-method --rest-api-id $API_ID --resource-id $RES_ID \
-                  --http-method $METHOD --region $REGION > /dev/null 2>&1; then
-                if ! aws apigateway get-integration --rest-api-id $API_ID --resource-id $RES_ID \
-                    --http-method $METHOD --region $REGION > /dev/null 2>&1; then
-                  echo "Deleting orphaned $METHOD on resource $RES_ID"
-                  aws apigateway delete-method --rest-api-id $API_ID --resource-id $RES_ID \
-                    --http-method $METHOD --region $REGION || true
-                fi
-              fi
-            done
-          done
-
-          echo "Deploying stage..."
-          aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION
-          echo "Done!"
+          aws apigateway create-deployment \
+            --rest-api-id 1h4kpspbs6 \
+            --stage-name prod \
+            --region us-east-1
+          echo "Deployed."
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
