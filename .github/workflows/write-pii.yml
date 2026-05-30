@@ -1,0 +1,35 @@
+name: Write JonesMoore PII
+
+on:
+  workflow_dispatch:
+
+jobs:
+  write:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write known-good PII to DynamoDB
+        run: |
+          aws dynamodb put-item \
+            --table-name chartreview-folder-pii-prod \
+            --region us-east-1 \
+            --item '{
+              "org_folder":  {"S": "69ceb1ab037acdd4467b31c3#JonesMoore"},
+              "org_id":      {"S": "69ceb1ab037acdd4467b31c3"},
+              "patientName": {"S": "MOORE, KIMBERLY"},
+              "dob":         {"S": "12/20/1961"},
+              "phone":       {"S": "(702)277-9970"},
+              "ssn":         {"S": "xxx-xx-5367"},
+              "mrn":         {"S": "D002916777"},
+              "street":      {"S": "312 POCONO RANCH AVE"},
+              "city":        {"S": "NORTH LAS VEGAS"},
+              "stateZip":    {"S": "NV 89031"},
+              "employer":    {"S": ""},
+              "spouse":      {"S": ""},
+              "source_doc":  {"S": "g._Nevada_Health_Center_-_Meds_Part5.pdf"},
+              "updated_at":  {"S": "2026-05-30T15:30:00.000Z"}
+            }'
+          echo "Written."
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
