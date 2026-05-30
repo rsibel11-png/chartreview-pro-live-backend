@@ -14,26 +14,18 @@ jobs:
           REGION=us-east-1
           STAGE=prod
 
-          echo "=== 2. MOCK integration ==="
-          TEMPLATE=$(printf '%s' '{"application/json":"{\"statusCode\":200}"}')
-          aws apigateway put-integration \
-            --rest-api-id $API --resource-id $RES \
-            --http-method OPTIONS --type MOCK \
-            --request-templates "$TEMPLATE" \
-            --region $REGION
-
-          echo "=== 3. Method response ==="
-          aws apigateway put-method-response \
-            --rest-api-id $API --resource-id $RES \
-            --http-method OPTIONS --status-code 200 \
-            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":false,"method.response.header.Access-Control-Allow-Methods":false,"method.response.header.Access-Control-Allow-Origin":false}' \
-            --region $REGION
-
-          echo "=== 4. Integration response ==="
+          echo "=== 4. Integration response (via file) ==="
+          cat > /tmp/integ_resp.json << 'JSONEOF'
+{
+  "method.response.header.Access-Control-Allow-Headers": "'Content-Type,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id'",
+  "method.response.header.Access-Control-Allow-Methods": "'GET,OPTIONS'",
+  "method.response.header.Access-Control-Allow-Origin": "'*'"
+}
+JSONEOF
           aws apigateway put-integration-response \
             --rest-api-id $API --resource-id $RES \
             --http-method OPTIONS --status-code 200 \
-            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"\x27Content-Type,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id\x27","method.response.header.Access-Control-Allow-Methods":"\x27GET,OPTIONS\x27","method.response.header.Access-Control-Allow-Origin":"\x27*\x27"}' \
+            --response-parameters file:///tmp/integ_resp.json \
             --region $REGION
 
           echo "=== 5. Deploy ==="
