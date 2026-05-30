@@ -1,4 +1,4 @@
-name: Check processWorker and getFolderPii
+name: Check PII Resource
 
 on:
   workflow_dispatch:
@@ -7,27 +7,30 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Check logs and authorizer
+      - name: Inspect /folders/{folderName}/pii methods
         run: |
-          echo "=== getFolderPii GET method details ==="
-          aws apigateway get-method --rest-api-id 1h4kpspbs6 --resource-id uivykb \
-            --http-method GET --region us-east-1 --output json
+          echo "=== Methods on uivykb ==="
+          for METHOD in GET OPTIONS; do
+            echo "--- $METHOD ---"
+            aws apigateway get-method \
+              --rest-api-id 1h4kpspbs6 --resource-id uivykb \
+              --http-method $METHOD --region us-east-1 2>&1 || echo "No $METHOD method"
 
-          echo ""
-          echo "=== processWorker logs (last 30 min) ==="
-          START=$(date -d '30 minutes ago' +%s%3N)
-          END=$(date +%s%3N)
-          aws logs filter-log-events \
-            --log-group-name /aws/lambda/chartreview-pro-prod-processWorker \
-            --start-time $START --end-time $END \
-            --filter-pattern "facesheet OR pii OR JonesMoore OR folder" \
-            --region us-east-1 \
-            --query 'events[].message' --output text 2>/dev/null | head -60 || echo "No matching logs"
+            echo "-- integration --"
+            aws apigateway get-integration \
+              --rest-api-id 1h4kpspbs6 --resource-id uivykb \
+              --http-method $METHOD --region us-east-1 2>&1 || echo "No integration for $METHOD"
 
-          echo ""
-          echo "=== folder-pii table scan ==="
-          aws dynamodb scan --table-name chartreview-folder-pii-prod \
-            --region us-east-1 --output json 2>/dev/null || echo "Table empty or missing"
+            echo "-- method response --"
+            aws apigateway get-method-response \
+              --rest-api-id 1h4kpspbs6 --resource-id uivykb \
+              --http-method $METHOD --status-code 200 --region us-east-1 2>&1 || echo "No method response for $METHOD"
+
+            echo "-- integration response --"
+            aws apigateway get-integration-response \
+              --rest-api-id 1h4kpspbs6 --resource-id uivykb \
+              --http-method $METHOD --status-code 200 --region us-east-1 2>&1 || echo "No integration response for $METHOD"
+          done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
