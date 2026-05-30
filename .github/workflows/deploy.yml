@@ -332,25 +332,31 @@ jobs:
           API_ID=1h4kpspbs6
           STAGE=prod
 
-          # Find and clean up any methods missing integrations (prevents CreateDeployment failure)
-          echo "Checking for methods missing integrations..."
-          RESOURCES=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION --query 'items[].id' --output text)
-          for RES_ID in $RESOURCES; do
-            for METHOD in GET POST PUT DELETE PATCH OPTIONS; do
-              # Check if method exists but has no integration
-              HAS_METHOD=$(aws apigateway get-method --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>/dev/null && echo "yes" || echo "no")
-              if [ "$HAS_METHOD" = "yes" ]; then
-                HAS_INT=$(aws apigateway get-integration --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>/dev/null && echo "yes" || echo "no")
-                if [ "$HAS_INT" = "no" ]; then
-                  echo "Deleting orphaned method $METHOD on $RES_ID"
-                  aws apigateway delete-method --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>/dev/null || true
-                fi
+          # Scan ALL resources and delete any method that has no integration (causes CreateDeployment to fail)
+          echo "Scanning for orphaned methods..."
+          ALL_RESOURCES=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION --output json)
+          RESOURCE_IDS=$(echo "$ALL_RESOURCES" | python3 -c "import sys,json; [print(r['id']) for r in json.load(sys.stdin)['items']]")
+
+          for RES_ID in $RESOURCE_IDS; do
+            METHODS=$(echo "$ALL_RESOURCES" | python3 -c "
+import sys,json
+items = json.load(sys.stdin)['items']
+r = next((x for x in items if x['id']=='$RES_ID'), None)
+if r and 'resourceMethods' in r:
+    print(' '.join(r['resourceMethods'].keys()))
+")
+            for METHOD in $METHODS; do
+              INT=$(aws apigateway get-integration --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>&1)
+              if echo "$INT" | grep -q "NotFoundException\|No integration"; then
+                echo "Deleting orphaned $METHOD on $RES_ID"
+                aws apigateway delete-method --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>/dev/null || true
               fi
             done
           done
 
-          aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION || true
-          echo "Deployed — GET /folders/{folderName}/pii is live"
+          echo "Deploying..."
+          aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION
+          echo "Done — GET /folders/{folderName}/pii is live"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
