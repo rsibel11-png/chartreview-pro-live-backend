@@ -1,0 +1,125 @@
+name: Backfill Folder PII
+
+on:
+  workflow_dispatch:
+    inputs:
+      org_id:
+        description: 'Org ID'
+        required: true
+        default: '69ceb1ab037acdd4467b31c3'
+      folder:
+        description: 'Folder name (exact, including leading space if any)'
+        required: true
+        default: ' JonesMoore'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run backfill script
+        run: |
+          node - << 'SCRIPT'
+          const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+          const { DynamoDBDocumentClient, ScanCommand, PutCommand } = require('@aws-sdk/lib-dynamodb');
+
+          const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1' }));
+          const DOCS_TABLE   = 'chartreview-documents-prod';
+          const PII_TABLE    = 'chartreview-folder-pii-prod';
+          const ORG_ID       = '${{ github.event.inputs.org_id }}';
+          const FOLDER_INPUT = '${{ github.event.inputs.folder }}';
+
+          // PII extraction helpers (same logic as documents_new.js)
+          const ADMISSION_ANCHORS = [
+            'IN/OUT/ER PATIENT ADMISSION RECORD', 'ADMISSION RECORD', 'PATIENT REGISTRATION',
+            'REGISTRATION FORM', 'PATIENT INFORMATION', 'DEMOGRAPHIC', 'FACE SHEET', 'FACESHEET',
+            'PATIENT DEMOGRAPHICS', 'PATIENT PROFILE', 'ADMISSION FORM',
+          ];
+          function findFacesheetWindow(text) {
+            if (!text) return null;
+            const upper = text.toUpperCase();
+            for (const anchor of ADMISSION_ANCHORS) {
+              const idx = upper.indexOf(anchor);
+              if (idx !== -1) return text.slice(idx, idx + 3000);
+            }
+            return null;
+          }
+          function extractField(text, patterns) {
+            for (const p of patterns) {
+              const m = text.match(p);
+              if (m && m[1] && m[1].trim().length > 1) return m[1].trim().toUpperCase();
+            }
+            return '';
+          }
+          function parsePiiFromWindow(w) {
+            const t = w.replace(/\n/g, ' ').replace(/\s{2,}/g, ' ');
+            return {
+              patientName: extractField(t, [/PATIENT\s*NAME[:\s]+([A-Z][A-Z ,'-]{3,40})/i, /NAME[:\s]+([A-Z][A-Z ,'-]{3,40})/i]),
+              dob:         extractField(t, [/(?:DOB|DATE OF BIRTH|BIRTH DATE)[:\s]+([\d\/\-]+)/i]),
+              ssn:         extractField(t, [/(?:SSN|SOCIAL SECURITY)[:\s#]*([\d\-X*]{4,11})/i]),
+              phone:       extractField(t, [/(?:PHONE|TEL|TELEPHONE|CELL|HOME)[:\s]+([\d\s\(\)\-\.]{7,16})/i]),
+              mrn:         extractField(t, [/(?:MRN|MEDICAL RECORD|ACCOUNT\s*#?|ACCT\s*#?)[:\s]+([\w\-]{4,20})/i]),
+              street:      extractField(t, [/(?:ADDRESS|STREET)[:\s]+([\d]+\s+[A-Z][A-Z0-9\s,\.#'-]{5,50})/i]),
+              city:        extractField(t, [/CITY[:\s]+([A-Z][A-Z\s]{2,30})/i]),
+              stateZip:    extractField(t, [/(?:STATE|ZIP)[:\s]+([A-Z]{2}[\s\-]*[\d]{5}[\-\d]*)/i]),
+              employer:    extractField(t, [/(?:EMPLOYER|EMPLOYER NAME)[:\s]+([A-Z][A-Z0-9\s,\.&'\-]{3,50})/i]),
+              spouse:      extractField(t, [/(?:SPOUSE|PARTNER)[:\s]+([A-Z][A-Z ,'-]{3,40})/i]),
+            };
+          }
+
+          async function run() {
+            // Scan all docs in this org+folder
+            let ExclusiveStartKey;
+            let processed = 0;
+            let found = false;
+
+            do {
+              const res = await dynamo.send(new ScanCommand({
+                TableName: DOCS_TABLE,
+                FilterExpression: 'org_id = :o AND folder = :f AND attribute_exists(extracted_text)',
+                ExpressionAttributeValues: { ':o': ORG_ID, ':f': FOLDER_INPUT },
+                ExclusiveStartKey,
+                ProjectionExpression: 'aws_document_id, file_name, extracted_text, folder',
+              }));
+              ExclusiveStartKey = res.LastEvaluatedKey;
+
+              for (const doc of (res.Items || [])) {
+                if (!doc.extracted_text || doc.extracted_text.length < 100) continue;
+                const window = findFacesheetWindow(doc.extracted_text);
+                if (!window) { processed++; continue; }
+                const pii = parsePiiFromWindow(window);
+                const hasData = Object.values(pii).some(v => v && v.length > 0);
+                if (!hasData) { processed++; continue; }
+
+                console.log('Found facesheet in:', doc.file_name);
+                console.log('PII:', JSON.stringify(pii, null, 2));
+
+                const orgFolder = ORG_ID + '#' + FOLDER_INPUT.trim();
+                await dynamo.send(new PutCommand({
+                  TableName: PII_TABLE,
+                  Item: { org_folder: orgFolder, org_id: ORG_ID, ...pii, updated_at: new Date().toISOString(), source_doc: doc.file_name },
+                }));
+                console.log('Written to folder-pii table. Key:', orgFolder);
+                found = true;
+                break; // one facesheet per folder is enough
+              }
+              if (found) break;
+            } while (ExclusiveStartKey);
+
+            if (!found) console.log('No facesheet found in folder. Docs scanned:', processed);
+          }
+
+          run().catch(e => { console.error(e); process.exit(1); });
+          SCRIPT
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        working-directory: chartreview-aws
