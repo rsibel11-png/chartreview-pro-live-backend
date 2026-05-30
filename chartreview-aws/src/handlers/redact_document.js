@@ -105,6 +105,9 @@ function extractKnownPiiValues(extractedText) {
   var patterns = [
     // Patient name — explicit label on same line
     /^(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+)$/mg,
+    // Certification / lien / legal doc inline references
+    /[Rr]ecords\s+(?:pertaining\s+to|of|for)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]{3,40})/g,
+    /[Rr]egarding\s+([A-Za-z][A-Za-z\-,'\. ]{3,40})/g,
     /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
@@ -119,8 +122,15 @@ function extractKnownPiiValues(extractedText) {
     /(\d{3}-\d{2}-\d{4})/g,
     /(?:SSN|S\.S\.N\.|SOCIAL\s*SECURITY)\s*[:\|]?\s*(\d{9})/gi,
 
-    // MRN — must follow label
-    /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
+    // MRN / PRN / Patient Record Number — must follow label
+    /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|]|PRN\s*[:\|]?|Patient\s*Record\s*(?:No\.?|#)|Record\s*(?:No\.?|#))\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
+
+    // Driver's License number + Document Discriminator
+    /(?:DL\s*(?:NO\.?|#|NUMBER)|LICENSE\s*(?:NO\.?|#|NUMBER)|DRIVERS?\s*(?:LIC(?:ENSE)?)?\s*(?:NO\.?|#)?|4[dD]\s*DL\s*NO\.?)\s*[:\|]?\s*([A-Z0-9]+)/gi,
+    /\b(?:5\s*DD|DD)\s+([0-9A-Z]{10,})/gi,
+
+    // Market URN / Encounter ID
+    /(?:MARKET\s*URN|VISIT\s*(?:NO\.?|#|ID)|ENCOUNTER\s*(?:NO\.?|#|ID)|URN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
 
     // Account / unit / episode numbers
     /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct\s*#|ACCOUNT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
@@ -131,7 +141,7 @@ function extractKnownPiiValues(extractedText) {
     /(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#|Member\s*ID#?)\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
 
     // Phone — labeled OR bare xxx-xxx-xxxx OR (xxx) xxx-xxxx
-    /(?:PHONE|CELL|MOBILE|TEL(?:EPHONE)?|Home\s*Phone|Work\s*Phone|Phone\s*Number|Phone\s*#|Fax)\s*[:\|]\s*([\d\(\)\-\.\s]+)/gi,
+    /(?:PHONE#?|CELL|MOBILE|TEL(?:EPHONE)?|Home\s*Phone|Work\s*Phone|Patient\s*[Pp]hone|Patient\s*PH|Phone\s*Number|Phone\s*#|PH\s*#?|Fax)\s*[:\|]?\s*([\d\(\)\-\.\s]{10,})/gi,
     /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g,
     /\b(\d{3}-\d{3}-\d{4})\b/g,
 
@@ -518,6 +528,46 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     }
   }
   // ── END HANDWRITING PASS ───────────────────────────────────────────────────
+
+  // ── ID DOCUMENT PHOTO PASS ────────────────────────────────────────────────
+  // Detect Driver's License / State ID pages and redact face photos
+  var _pgNums3 = Object.keys(pageMap);
+  for (var _idp = 0; _idp < _pgNums3.length; _idp++) {
+    var _idPgNum  = parseInt(_pgNums3[_idp], 10);
+    var _idWords  = pageMap[_idPgNum];
+    var _idPgIdx  = _idPgNum - 1;
+    var _idPageText = _idWords.map(function(w) { return w.t; }).join(' ').toUpperCase();
+    var _isDlPage = /DRIVER'?S?\s*LICEN[CS]E|STATE\s*ID|IDENTIFICATION\s*CARD/.test(_idPageText);
+    if (!_isDlPage) continue;
+
+    // Card bounding box from all tokens on this page
+    var _cardMinL = Math.min.apply(null, _idWords.map(function(w) { return w.l; }));
+    var _cardMinT = Math.min.apply(null, _idWords.map(function(w) { return w.tp; }));
+    var _cardMaxR = Math.max.apply(null, _idWords.map(function(w) { return w.l + w.w; }));
+    var _cardMaxB = Math.max.apply(null, _idWords.map(function(w) { return w.tp + w.h; }));
+    var _cardW    = _cardMaxR - _cardMinL;
+    var _cardH    = _cardMaxB - _cardMinT;
+    if (!result[String(_idPgIdx)]) result[String(_idPgIdx)] = [];
+
+    // Primary face photo — left ~36% x top ~58% of card
+    result[String(_idPgIdx)].push({
+      label: 'dl-photo-primary',
+      x: Math.max(0, _cardMinL - 0.01),
+      y: Math.max(0, _cardMinT - 0.01),
+      width: Math.min(1, _cardW * 0.38),
+      height: Math.min(1, _cardH * 0.60),
+    });
+    // Thumbnail — lower-right ~17% x 20% of card
+    result[String(_idPgIdx)].push({
+      label: 'dl-photo-thumbnail',
+      x: Math.max(0, _cardMaxR - _cardW * 0.19),
+      y: Math.max(0, _cardMaxB - _cardH * 0.24),
+      width: Math.min(1, _cardW * 0.18),
+      height: Math.min(1, _cardH * 0.23),
+    });
+    console.log('[ID-PHOTO] p' + _idPgNum + ' — redacting face photo and thumbnail');
+  }
+  // ── END ID DOCUMENT PHOTO PASS ────────────────────────────────────────────
 
   for (var pi = 0; pi < piiValues.length; pi++) {
     var pii = piiValues[pi];
