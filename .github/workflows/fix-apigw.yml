@@ -7,68 +7,36 @@ jobs:
   fix-apigw:
     runs-on: ubuntu-latest
     steps:
-      - name: Wire OPTIONS CORS + add method responses + deploy
+      - name: Wire OPTIONS CORS + deploy
         run: |
           API=1h4kpspbs6
           RES=uivykb
           REGION=us-east-1
           STAGE=prod
 
-          echo "=== 1. Create OPTIONS method ==="
-          aws apigateway put-method \
-            --rest-api-id $API --resource-id $RES \
-            --http-method OPTIONS --authorization-type NONE \
-            --no-api-key-required \
-            --region $REGION 2>&1 || echo "OPTIONS method already exists"
-
-          echo "=== 2. Create OPTIONS MOCK integration ==="
+          echo "=== 2. MOCK integration ==="
+          TEMPLATE=$(printf '%s' '{"application/json":"{\"statusCode\":200}"}')
           aws apigateway put-integration \
             --rest-api-id $API --resource-id $RES \
             --http-method OPTIONS --type MOCK \
-            --request-templates '{"application/json":"{"statusCode":200}"}' \
+            --request-templates "$TEMPLATE" \
             --region $REGION
 
-          echo "=== 3. Create OPTIONS method response ==="
+          echo "=== 3. Method response ==="
           aws apigateway put-method-response \
             --rest-api-id $API --resource-id $RES \
             --http-method OPTIONS --status-code 200 \
-            --response-parameters '{
-              "method.response.header.Access-Control-Allow-Headers": false,
-              "method.response.header.Access-Control-Allow-Methods": false,
-              "method.response.header.Access-Control-Allow-Origin": false
-            }' \
+            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":false,"method.response.header.Access-Control-Allow-Methods":false,"method.response.header.Access-Control-Allow-Origin":false}' \
             --region $REGION
 
-          echo "=== 4. Create OPTIONS integration response with CORS headers ==="
+          echo "=== 4. Integration response ==="
           aws apigateway put-integration-response \
             --rest-api-id $API --resource-id $RES \
             --http-method OPTIONS --status-code 200 \
-            --response-parameters '{
-              "method.response.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization,X-Amz-Date,X-Api-Key,x-api-key,X-Org-Id,x-org-id'"'"'",
-              "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,OPTIONS'"'"'",
-              "method.response.header.Access-Control-Allow-Origin": "'"'"'*'"'"'"
-            }' \
+            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"\x27Content-Type,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id\x27","method.response.header.Access-Control-Allow-Methods":"\x27GET,OPTIONS\x27","method.response.header.Access-Control-Allow-Origin":"\x27*\x27"}' \
             --region $REGION
 
-          echo "=== 5. Add method response to GET ==="
-          aws apigateway put-method-response \
-            --rest-api-id $API --resource-id $RES \
-            --http-method GET --status-code 200 \
-            --response-parameters '{
-              "method.response.header.Access-Control-Allow-Origin": false
-            }' \
-            --region $REGION 2>&1 || echo "GET method response already exists"
-
-          echo "=== 6. Add integration response to GET ==="
-          aws apigateway put-integration-response \
-            --rest-api-id $API --resource-id $RES \
-            --http-method GET --status-code 200 \
-            --response-parameters '{
-              "method.response.header.Access-Control-Allow-Origin": "'"'"'*'"'"'"
-            }' \
-            --region $REGION 2>&1 || echo "GET integration response already exists"
-
-          echo "=== 7. Deploy ==="
+          echo "=== 5. Deploy ==="
           aws apigateway create-deployment --rest-api-id $API --stage-name $STAGE --region $REGION
           echo "Done."
         env:
