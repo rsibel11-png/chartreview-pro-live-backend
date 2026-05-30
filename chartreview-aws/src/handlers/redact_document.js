@@ -540,7 +540,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     var _isDlPage = /DRIVER'?S?\s*LICEN[CS]E|STATE\s*ID|IDENTIFICATION\s*CARD/.test(_idPageText);
     if (!_isDlPage) continue;
 
-    // Card bounding box from all tokens on this page
+    // Full card blackout — DL has zero clinical value, redact everything
     var _cardMinL = Math.min.apply(null, _idWords.map(function(w) { return w.l; }));
     var _cardMinT = Math.min.apply(null, _idWords.map(function(w) { return w.tp; }));
     var _cardMaxR = Math.max.apply(null, _idWords.map(function(w) { return w.l + w.w; }));
@@ -549,21 +549,13 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     var _cardH    = _cardMaxB - _cardMinT;
     if (!result[String(_idPgIdx)]) result[String(_idPgIdx)] = [];
 
-    // Primary face photo — left ~36% x top ~58% of card
+    // Redact the entire card bounding box
     result[String(_idPgIdx)].push({
-      label: 'dl-photo-primary',
-      x: Math.max(0, _cardMinL - 0.005),
-      y: Math.max(0, _cardMinT - 0.005),
-      width: Math.min(1, _cardW * 0.27),   // narrowed: photo is left ~27% of card
-      height: Math.min(1, _cardH * 0.55),  // slightly reduced height
-    });
-    // Thumbnail — lower-right ~17% x 20% of card
-    result[String(_idPgIdx)].push({
-      label: 'dl-photo-thumbnail',
-      x: Math.max(0, _cardMaxR - _cardW * 0.19),
-      y: Math.max(0, _cardMaxB - _cardH * 0.24),
-      width: Math.min(1, _cardW * 0.18),
-      height: Math.min(1, _cardH * 0.23),
+      label: 'dl-full-blackout',
+      x: Math.max(0, _cardMinL - 0.01),
+      y: Math.max(0, _cardMinT - 0.01),
+      width: Math.min(1, _cardW + 0.02),
+      height: Math.min(1, _cardH + 0.02),
     });
     console.log('[ID-PHOTO] p' + _idPgNum + ' — redacting face photo and thumbnail');
 
