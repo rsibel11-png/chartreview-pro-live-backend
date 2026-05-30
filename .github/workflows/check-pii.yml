@@ -1,0 +1,34 @@
+name: Check processWorker and getFolderPii
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check logs and authorizer
+        run: |
+          echo "=== getFolderPii GET method details ==="
+          aws apigateway get-method --rest-api-id 1h4kpspbs6 --resource-id uivykb \
+            --http-method GET --region us-east-1 --output json
+
+          echo ""
+          echo "=== processWorker logs (last 30 min) ==="
+          START=$(date -d '30 minutes ago' +%s%3N)
+          END=$(date +%s%3N)
+          aws logs filter-log-events \
+            --log-group-name /aws/lambda/chartreview-pro-prod-processWorker \
+            --start-time $START --end-time $END \
+            --filter-pattern "facesheet OR pii OR JonesMoore OR folder" \
+            --region us-east-1 \
+            --query 'events[].message' --output text 2>/dev/null | head -60 || echo "No matching logs"
+
+          echo ""
+          echo "=== folder-pii table scan ==="
+          aws dynamodb scan --table-name chartreview-folder-pii-prod \
+            --region us-east-1 --output json 2>/dev/null || echo "Table empty or missing"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
