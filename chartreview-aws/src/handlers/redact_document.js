@@ -458,7 +458,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
       if (!b.hw) return false;
       var txt = (b.t || '').trim();
       if (txt.length < HW_MIN_CHARS) return false;
-      if (/^\d+$/.test(txt)) return false;
+      if (/^\d{1,4}$/.test(txt)) return false; // skip short pure-digit tokens (vitals, page#, etc) but keep longer ones (dates, phones)
       if (/^[^A-Za-z0-9]+$/.test(txt)) return false; // punctuation-only tokens
       return true;
     });
@@ -987,6 +987,116 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     }
   }
   // ── End patient-name label gap pass ──────────────────────────────────────────
+
+  // ── PHONE NUMBER PASS (all pages, print text) ────────────────────────────────
+  // Redact any token sequence that forms a phone number pattern, regardless of
+  // whether it matches a known PII value. Phones have no clinical significance.
+  // Patterns: (NXX) NXX-XXXX | NXX-NXX-XXXX | NXX.NXX.XXXX | 10 consecutive digits
+  var PHONE_RE = /^\(?\d{3}\)?[\s\-\.]\d{3}[\-\.]\d{4}$|^\d{10}$|^\d{3}[\-\.]\d{3}[\-\.]\d{4}$/;
+  var _pgNumsPhone = Object.keys(pageMap);
+  for (var _phi = 0; _phi < _pgNumsPhone.length; _phi++) {
+    var _phPg    = parseInt(_pgNumsPhone[_phi], 10);
+    var _phWords = pageMap[_phPg];
+    var _phIdx   = _phPg - 1;
+
+    // Sort words left-to-right, top-to-bottom
+    var _phSorted = _phWords.slice().sort(function(a, b) {
+      if (Math.abs(a.tp - b.tp) > 0.008) return a.tp - b.tp;
+      return a.l - b.l;
+    });
+
+    for (var _phw = 0; _phw < _phSorted.length; _phw++) {
+      var _w0 = _phSorted[_phw];
+      // Test 1-token match (e.g. "7022779970" or "702-277-9970")
+      var _t0 = (_w0.t || '').trim();
+      if (PHONE_RE.test(_t0)) {
+        if (!result[String(_phIdx)]) result[String(_phIdx)] = [];
+        result[String(_phIdx)].push({ label: 'phone', x: Math.max(0, _w0.l - 0.003), y: _w0.tp, width: Math.min(1, _w0.w + 0.006), height: _w0.h });
+        continue;
+      }
+      // Test 2-token match: "(702)" + "277-9970" or "702" + "277-9970"
+      if (_phw + 1 < _phSorted.length) {
+        var _w1 = _phSorted[_phw + 1];
+        var _t01 = (_t0 + _w1.t).replace(/[\s\(\)]/g, '');
+        if (/^\d{10}$/.test(_t01) || /^\d{3}[\-\.]\d{3}[\-\.]\d{4}$/.test(_t0 + ' ' + _w1.t)) {
+          var _pMinL = Math.min(_w0.l, _w1.l);
+          var _pMaxR = Math.max(_w0.l + _w0.w, _w1.l + _w1.w);
+          if (!result[String(_phIdx)]) result[String(_phIdx)] = [];
+          result[String(_phIdx)].push({ label: 'phone-2tok', x: Math.max(0, _pMinL - 0.003), y: _w0.tp, width: Math.min(1, _pMaxR - _pMinL + 0.006), height: Math.max(_w0.h, _w1.h) });
+          continue;
+        }
+      }
+      // Test 3-token match: "(702)" + "277" + "9970"  or "702" + "277" + "9970"
+      if (_phw + 2 < _phSorted.length) {
+        var _w2 = _phSorted[_phw + 2];
+        var _t012 = (_t0 + _phSorted[_phw+1].t + _w2.t).replace(/[\s\(\)\-\.]/g, '');
+        if (/^\d{10}$/.test(_t012)) {
+          var _p3MinL = Math.min(_w0.l, _phSorted[_phw+1].l, _w2.l);
+          var _p3MaxR = Math.max(_w0.l + _w0.w, _phSorted[_phw+1].l + _phSorted[_phw+1].w, _w2.l + _w2.w);
+          if (!result[String(_phIdx)]) result[String(_phIdx)] = [];
+          result[String(_phIdx)].push({ label: 'phone-3tok', x: Math.max(0, _p3MinL - 0.003), y: _w0.tp, width: Math.min(1, _p3MaxR - _p3MinL + 0.006), height: Math.max(_w0.h, _phSorted[_phw+1].h, _w2.h) });
+        }
+      }
+    }
+  }
+  // ── End phone pass ──────────────────────────────────────────────────────────
+
+  // ── DATE PASS (all pages, print + handwriting) ───────────────────────────────
+  // HIPAA Safe Harbor element #4: redact all dates except year-only.
+  // Catches: MM/DD/YYYY  MM-DD-YYYY  M/D/YY  Month DD, YYYY  DD-Mon-YYYY
+  // Skips: bare 4-digit years (1961, 2025) since those are allowed under Safe Harbor.
+  // Skips: time values (HH:MM), procedure codes, CPT codes.
+  var DATE_RE = new RegExp(
+    '^(?:' +
+    // MM/DD/YYYY or M/D/YY or MM-DD-YY
+    '(?:0?[1-9]|1[0-2])[/\\-](?:0?[1-9]|[12]\\d|3[01])[/\\-](?:19|20)?\\d{2}' +
+    '|' +
+    // Named month: Jan(uary) DD, YYYY or DD-Jan-YYYY
+    '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)' +
+    '[\\s\\-,\\.]+(?:0?[1-9]|[12]\\d|3[01])[\\s\\-,\\.]+(?:19|20)?\\d{2,4}' +
+    '|' +
+    // DD-Mon-YYYY
+    '(?:0?[1-9]|[12]\\d|3[01])[\\-](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\\-](?:19|20)?\\d{2,4}' +
+    ')$', 'i'
+  );
+  // Also single-token date patterns (OCR sometimes gives "06/20/2025" as one block)
+  var DATE_SINGLE_RE = /^(?:0?[1-9]|1[0-2])[\/\-](?:0?[1-9]|[12]\d|3[01])[\/\-](?:19|20)?\d{2}$/;
+
+  var _pgNumsDate = Object.keys(pageMap);
+  for (var _dti = 0; _dti < _pgNumsDate.length; _dti++) {
+    var _dtPg    = parseInt(_pgNumsDate[_dti], 10);
+    var _dtWords = pageMap[_dtPg];
+    var _dtIdx   = _dtPg - 1;
+
+    for (var _dtw = 0; _dtw < _dtWords.length; _dtw++) {
+      var _dw = _dtWords[_dtw];
+      var _dt = (_dw.t || '').trim();
+
+      // Single-token date: "06/20/2025" or "12/20/1961"
+      if (DATE_SINGLE_RE.test(_dt)) {
+        // Skip bare 4-digit years
+        if (/^(19|20)\d{2}$/.test(_dt)) continue;
+        if (!result[String(_dtIdx)]) result[String(_dtIdx)] = [];
+        result[String(_dtIdx)].push({ label: 'date', x: Math.max(0, _dw.l - 0.003), y: _dw.tp, width: Math.min(1, _dw.w + 0.006), height: _dw.h * 1.1 });
+        continue;
+      }
+
+      // Multi-token dates: "06" "/" "20" "/" "2025" or "06" "20" "2025" with separators
+      // Try to reconstruct from 3-5 adjacent tokens
+      if (_dtw + 2 < _dtWords.length) {
+        var _dtSlice = _dtWords.slice(_dtw, Math.min(_dtw + 5, _dtWords.length));
+        var _dtConcat = _dtSlice.map(function(w) { return w.t; }).join('');
+        if (DATE_SINGLE_RE.test(_dtConcat)) {
+          var _dtMinL = Math.min.apply(null, _dtSlice.map(function(w) { return w.l; }));
+          var _dtMaxR = Math.max.apply(null, _dtSlice.map(function(w) { return w.l + w.w; }));
+          var _dtMaxB = Math.max.apply(null, _dtSlice.map(function(w) { return w.tp + w.h; }));
+          if (!result[String(_dtIdx)]) result[String(_dtIdx)] = [];
+          result[String(_dtIdx)].push({ label: 'date-multi', x: Math.max(0, _dtMinL - 0.003), y: _dtSlice[0].tp, width: Math.min(1, _dtMaxR - _dtMinL + 0.006), height: _dtMaxB - _dtSlice[0].tp });
+        }
+      }
+    }
+  }
+  // ── End date pass ────────────────────────────────────────────────────────────
 
   return result;
 }
