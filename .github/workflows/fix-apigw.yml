@@ -6,31 +6,17 @@ on:
 jobs:
   fix-apigw:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chartreview-aws
     steps:
-      - name: Wire OPTIONS CORS + deploy
-        run: |
-          API=1h4kpspbs6
-          RES=uivykb
-          REGION=us-east-1
-          STAGE=prod
-
-          echo "=== 4. Integration response (via file) ==="
-          cat > /tmp/integ_resp.json << 'JSONEOF'
-{
-  "method.response.header.Access-Control-Allow-Headers": "'Content-Type,Authorization,X-Api-Key,x-api-key,X-Org-Id,x-org-id'",
-  "method.response.header.Access-Control-Allow-Methods": "'GET,OPTIONS'",
-  "method.response.header.Access-Control-Allow-Origin": "'*'"
-}
-JSONEOF
-          aws apigateway put-integration-response \
-            --rest-api-id $API --resource-id $RES \
-            --http-method OPTIONS --status-code 200 \
-            --response-parameters file:///tmp/integ_resp.json \
-            --region $REGION
-
-          echo "=== 5. Deploy ==="
-          aws apigateway create-deployment --rest-api-id $API --stage-name $STAGE --region $REGION
-          echo "Done."
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci --omit=dev
+      - name: Wire OPTIONS CORS and deploy
+        run: node src/wire_cors.js
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
