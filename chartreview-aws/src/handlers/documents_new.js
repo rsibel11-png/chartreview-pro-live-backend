@@ -21,6 +21,7 @@ const PROCESSING_QUEUE_URL = process.env.PROCESSING_QUEUE_URL || null;
 
 const TABLE                = process.env.DOCUMENTS_TABLE;
 const SUMMARIES_TABLE      = process.env.SUMMARIES_TABLE;
+const FOLDER_PII_TABLE     = process.env.FOLDER_PII_TABLE || 'chartreview-folder-pii-prod';
 const BUCKET               = process.env.S3_BUCKET;
 const BEDROCK_MODEL        = 'us.anthropic.claude-sonnet-4-6'; // PDF vision requires Sonnet
 const WORKER_FUNCTION_NAME = process.env.WORKER_FUNCTION_NAME   || 'chartreview-pro-prod-processWorker';
@@ -377,6 +378,136 @@ function buildPrompt(extractedText, docPatientName, docCaseNumber, chunkTag) {
 }
 
 // --- PROCESS WORKER (async, no HTTP) ----------------------------------------
+
+// ── Facesheet detection & folder-level PII storage ───────────────────────────
+// Anchors: these headers appear on hospital admission / ER registration pages
+const ADMISSION_ANCHORS = [
+  'IN/OUT/ER PATIENT ADMISSION RECORD',
+  'ADMISSION RECORD',
+  'PATIENT REGISTRATION',
+  'REGISTRATION FORM',
+  'FACE SHEET',
+  'FACESHEET',
+  'ER REGISTRATION',
+  'EMERGENCY REGISTRATION',
+];
+
+// How many labeled PII fields must co-occur within the window to confirm it's a facesheet
+const FACESHEET_FIELD_THRESHOLD = 3;
+const FACESHEET_FIELD_SIGNALS   = ['NAME:', 'DOB:', 'D.O.B', 'STREET:', 'ADDRESS:', 'PHONE', 'SS#:', 'SSN:', 'DATE OF BIRTH'];
+
+function findFacesheetWindow(text) {
+  // Find the earliest admission anchor in the text
+  const upper = text.toUpperCase();
+  let anchorIdx = -1;
+  for (const anchor of ADMISSION_ANCHORS) {
+    const idx = upper.indexOf(anchor);
+    if (idx >= 0 && (anchorIdx === -1 || idx < anchorIdx)) anchorIdx = idx;
+  }
+  if (anchorIdx === -1) return null;
+
+  // Grab 2000 chars starting from the anchor (covers the full demographics block)
+  const window = text.slice(anchorIdx, anchorIdx + 2000);
+
+  // Confirm enough PII signals are present
+  const hits = FACESHEET_FIELD_SIGNALS.filter(sig => window.toUpperCase().includes(sig));
+  if (hits.length < FACESHEET_FIELD_THRESHOLD) return null;
+
+  return window;
+}
+
+function parsePiiFromWindow(window) {
+  const find = (patterns) => {
+    for (const p of patterns) {
+      const m = p.exec(window);
+      if (m && m[1]) return m[1].trim();
+    }
+    return '';
+  };
+  const name = find([
+    /^NAME:\s*([A-Z][A-Z,'.\- ]{2,40})/m,
+    /PATIENT\s*NAME[:\s]+([A-Z][A-Z,'.\- ]{2,40})/i,
+    /^Patient[:\s]+([A-Za-z][A-Za-z,'.\- ]{2,40})/m,
+  ]);
+  const dob = find([
+    /DOB[:\s]+([\d]{1,2}\/[\d]{1,2}\/[\d]{2,4})/i,
+    /D\.O\.B[.:\s]+([\d]{1,2}\/[\d]{1,2}\/[\d]{2,4})/i,
+    /DATE\s+OF\s+BIRTH[:\s]+([\d]{1,2}\/[\d]{1,2}\/[\d]{2,4})/i,
+  ]);
+  const ssn = find([
+    /SS#[:\s]+([Xx0-9-]{7,11})/,
+    /SSN[:#\s]+([Xx0-9-]{7,11})/i,
+    /(\d{3}-\d{2}-\d{4})/,
+  ]);
+  const phone = find([
+    /PHONE#?[:\s]+([\(\d][\d().\- ]{8,})/i,
+    /TELEPHONE[:\s]+([\(\d][\d().\- ]{8,})/i,
+  ]);
+  const mrn = find([
+    /UNIT\s*RCRD\s*#[:\s]+([A-Z0-9]{5,})/i,
+    /MRN[:\s]+([A-Z0-9]{5,})/i,
+    /ACCOUNT#?\s*([A-Z0-9]{6,})/i,
+  ]);
+  const streetM = window.match(/STREET[:\s]+([\w][^\n]{5,50})/i)
+    || window.match(/ADDRESS[:\s]+([\w][^\n]{5,50})/i)
+    || window.match(/(\d{2,5}\s+[A-Z][A-Z .]+(?:AVE|ST|BLVD|DR|RD|LN|WAY|CT|TRAIL|PKWY|CIR|PL|LOOP|RANCH)[A-Z .]*)/i);
+  const street = streetM ? streetM[1].trim().replace(/\s+/g, ' ') : '';
+  const cszM = window.match(/C\/S\/Z[P]?[:\s]+([A-Z][A-Z ]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/i)
+    || window.match(/([A-Z][A-Z ]+),\s*(NV|CA|TX|AZ|FL|NY|IL|WA|CO|GA|NM|UT|ID|OR|MN)\s+(\d{5}(?:-\d{4})?)/);
+  const city     = cszM ? cszM[1].trim() : '';
+  const stateZip = cszM ? (cszM[2] + ' ' + cszM[3]) : '';
+  const spouseM  = window.match(/SPOUSE\s*(?:\/\s*NOK)?[\s\S]{0,15}\n([A-Z][A-Z, ]{3,40})\n/i);
+  const spouse   = spouseM ? spouseM[1].trim() : '';
+  const empM     = window.match(/(?:PATIENT\s+)?EMPLOYER[:\n\s]+([A-Z][A-Z &,.]{3,50})/i);
+  const employer = (empM && !/UNEMPLOYED|NONE|N\/A/i.test(empM[1])) ? empM[1].trim() : '';
+  return { patientName: name, dob, ssn, phone, mrn, street, city, stateZip, spouse, employer };
+}
+
+async function detectAndStoreFacesheetPii(extractedText, orgId, folder) {
+  if (!folder || !orgId) return; // unfiled docs — no folder to associate with
+  try {
+    const window = findFacesheetWindow(extractedText || '');
+    if (!window) return; // not a facesheet
+
+    const pii = parsePiiFromWindow(window);
+    const hasData = Object.values(pii).some(v => v && v.length > 0);
+    if (!hasData) return;
+
+    const orgFolder = orgId + '#' + folder.trim();
+    const now = new Date().toISOString();
+
+    // Upsert — only overwrite fields that are currently empty
+    // Build SET expression dynamically so a richer record from a later part doesn't lose data
+    const existing = await dynamo.send(new GetCommand({
+      TableName: FOLDER_PII_TABLE,
+      Key: { org_folder: orgFolder },
+    })).catch(() => ({ Item: null }));
+
+    const base = (existing && existing.Item) ? existing.Item : {};
+    const merged = {
+      org_folder:   orgFolder,
+      org_id:       orgId,
+      folder:       folder.trim(),
+      updated_at:   now,
+      patientName:  pii.patientName  || base.patientName  || '',
+      dob:          pii.dob          || base.dob          || '',
+      ssn:          pii.ssn          || base.ssn          || '',
+      phone:        pii.phone        || base.phone        || '',
+      mrn:          pii.mrn          || base.mrn          || '',
+      street:       pii.street       || base.street       || '',
+      city:         pii.city         || base.city         || '',
+      stateZip:     pii.stateZip     || base.stateZip     || '',
+      spouse:       pii.spouse       || base.spouse       || '',
+      employer:     pii.employer     || base.employer     || '',
+    };
+
+    await dynamo.send(new PutCommand({ TableName: FOLDER_PII_TABLE, Item: merged }));
+    console.log('detectFacesheet: stored PII for folder', folder, '| name:', merged.patientName, 'dob:', merged.dob);
+  } catch (err) {
+    console.warn('detectFacesheet: non-fatal error:', err.message);
+  }
+}
+
 // v28: Textract update no longer overwrites is_rejected/rejection_reason/document_type -- assess pass owns these
 // v27: swapped EOL'd claude-3-5-sonnet-v2 -> claude-3-5-haiku-v1 (still active, faster, cheaper)
 // v26: improved prompt -- surveillance/photo-only doc rejection added
@@ -706,6 +837,11 @@ Return ONLY a JSON object with these exact fields:
     }));
 
     } // end if(!assessOnly)
+
+    // Detect facesheet and store PII at folder level (non-blocking, non-fatal)
+    if (!assessOnly && doc.folder) {
+      await detectAndStoreFacesheetPii(extractedText, orgId, doc.folder);
+    }
 
     console.log('processWorker completed for', aws_document_id);
 
@@ -1428,6 +1564,29 @@ const classifyJobWorkerHandler = async (event) => {
   await classifyJobWorker(payload.job_id, payload.aws_document_id, payload.org_id, payload.page_offset || 0);
 };
 
+
+// ── GET /folders/:folderName/pii ─────────────────────────────────────────────
+// Returns PII stored for a folder (from facesheet detection at upload time).
+// Used by Redaction modal to pre-fill patient fields.
+const getFolderPiiHandler = async (event) => {
+  const orgId = event._orgId;
+  const folderName = decodeURIComponent((event.pathParameters || {}).folderName || '');
+  if (!folderName) return response(400, { error: 'folderName required' });
+  const orgFolder = orgId + '#' + folderName.trim();
+  try {
+    const result = await dynamo.send(new GetCommand({
+      TableName: FOLDER_PII_TABLE,
+      Key: { org_folder: orgFolder },
+    }));
+    if (!result.Item) return response(404, { error: 'No PII found for this folder' });
+    const { org_folder, org_id, updated_at, ...pii } = result.Item;
+    return response(200, pii);
+  } catch (err) {
+    console.error('getFolderPii error:', err);
+    return response(500, { error: err.message });
+  }
+};
+
 module.exports = {
   directUpload:   validateApiKey(directUploadHandler),
   getUploadUrl:   validateApiKey(async (event) => {
@@ -1491,5 +1650,6 @@ module.exports = {
   classifyJobWorker: classifyJobWorkerHandler,
   getJob:           validateApiKey(getJobHandler),
   getFullText:      validateApiKey(getTextHandler),
+  getFolderPii:     validateApiKey(getFolderPiiHandler),
   options:          optionsHandler,
 };
