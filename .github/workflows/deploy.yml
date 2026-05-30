@@ -326,66 +326,26 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Create getFolderPii Lambda and wire API Gateway route
+      - name: Wire getFolderPii API Gateway route and deploy
         run: |
           REGION=us-east-1
           API_ID=1h4kpspbs6
           STAGE=prod
-          ACCOUNT_ID=531948420933
-          LAMBDA_ROLE=arn:aws:iam::${ACCOUNT_ID}:role/chartreview-pro-prod-us-east-1-lambdaRole
-          FUNC_NAME=chartreview-pro-prod-getFolderPii
 
-          # 1. Create Lambda if missing
-          aws lambda get-function --function-name $FUNC_NAME --region $REGION 2>/dev/null ||           aws lambda create-function             --function-name $FUNC_NAME             --runtime nodejs20.x             --role $LAMBDA_ROLE             --handler src/handlers/documents_new.getFolderPii             --timeout 10             --memory-size 256             --environment "Variables={DOCUMENTS_TABLE=chartreview-documents-prod,FOLDER_PII_TABLE=chartreview-folder-pii-prod,API_KEY=ChartReview#2026\$ProdKey!Rx}"             --zip-file fileb://function.zip             --region $REGION
-
-          # 2. Grant API Gateway permission to invoke it (idempotent)
-          aws lambda add-permission             --function-name $FUNC_NAME             --statement-id apigateway-getFolderPii             --action lambda:InvokeFunction             --principal apigateway.amazonaws.com             --source-arn "arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/*/folders/*"             --region $REGION 2>/dev/null || true
-
-          # 3. Find or create /folders resource
-          FOLDERS_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION             --query "items[?path=='/folders'].id" --output text)
-          if [ -z "$FOLDERS_RESOURCE" ] || [ "$FOLDERS_RESOURCE" = "None" ]; then
-            ROOT_ID=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION               --query "items[?path=='/'].id" --output text)
-            FOLDERS_RESOURCE=$(aws apigateway create-resource               --rest-api-id $API_ID --parent-id $ROOT_ID               --path-part folders --region $REGION --query id --output text)
-            echo "Created /folders resource: $FOLDERS_RESOURCE"
-          else
-            echo "Found /folders resource: $FOLDERS_RESOURCE"
-          fi
-
-          # 4. Find or create /folders/{folderName} resource
-          FNAME_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION             --query "items[?path=='/folders/{folderName}'].id" --output text)
-          if [ -z "$FNAME_RESOURCE" ] || [ "$FNAME_RESOURCE" = "None" ]; then
-            FNAME_RESOURCE=$(aws apigateway create-resource               --rest-api-id $API_ID --parent-id $FOLDERS_RESOURCE               --path-part "{folderName}" --region $REGION --query id --output text)
-            echo "Created /folders/{folderName} resource: $FNAME_RESOURCE"
-          else
-            echo "Found /folders/{folderName} resource: $FNAME_RESOURCE"
-          fi
-
-          # 5. Find or create /folders/{folderName}/pii resource
+          # Get the /folders/{folderName}/pii resource ID (already created in prior run)
           PII_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION             --query "items[?path=='/folders/{folderName}/pii'].id" --output text)
-          if [ -z "$PII_RESOURCE" ] || [ "$PII_RESOURCE" = "None" ]; then
-            PII_RESOURCE=$(aws apigateway create-resource               --rest-api-id $API_ID --parent-id $FNAME_RESOURCE               --path-part pii --region $REGION --query id --output text)
-            echo "Created /folders/{folderName}/pii resource: $PII_RESOURCE"
-          else
-            echo "Found /folders/{folderName}/pii resource: $PII_RESOURCE"
-          fi
+          echo "PII resource: $PII_RESOURCE"
 
-          LAMBDA_ARN=arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNC_NAME}
+          # Wire OPTIONS MOCK integration (use heredoc to avoid quoting issues)
+          aws apigateway put-integration --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method OPTIONS --type MOCK             --request-templates '{"application/json": "{\"statusCode\": 200}"}'             --region $REGION 2>/dev/null || true
 
-          # 6. Wire GET method
-          aws apigateway put-method --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method GET --authorization-type NONE             --request-parameters "method.request.header.x-api-key=false,method.request.header.x-org-id=false"             --region $REGION 2>/dev/null || true
+          aws apigateway put-integration-response --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method OPTIONS --status-code 200             --response-parameters '{
+              "method.response.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization,x-api-key,x-org-id'"'"'",
+              "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,OPTIONS'"'"'",
+              "method.response.header.Access-Control-Allow-Origin": "'"'"'*'"'"'"
+            }'             --region $REGION 2>/dev/null || true
 
-          aws apigateway put-integration --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method GET --type AWS_PROXY             --integration-http-method POST             --uri "arn:aws:apigateway:${REGION}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations"             --region $REGION 2>/dev/null || true
-
-          # 7. Wire OPTIONS for CORS
-          aws apigateway put-method --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method OPTIONS --authorization-type NONE             --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method OPTIONS --type MOCK             --request-templates '{"application/json":"{"statusCode":200}"}'             --region $REGION 2>/dev/null || true
-
-          aws apigateway put-method-response --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method OPTIONS --status-code 200             --response-parameters '{"method.response.header.Access-Control-Allow-Headers":false,"method.response.header.Access-Control-Allow-Methods":false,"method.response.header.Access-Control-Allow-Origin":false}'             --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration-response --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method OPTIONS --status-code 200             --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'''Content-Type,Authorization,x-api-key,x-org-id'''","method.response.header.Access-Control-Allow-Methods":"'''GET,OPTIONS'''","method.response.header.Access-Control-Allow-Origin":"'''*'''"}'             --region $REGION 2>/dev/null || true
-
-          # 8. Deploy
+          # Deploy
           aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION
           echo "Done — GET /folders/{folderName}/pii is live"
         env:
