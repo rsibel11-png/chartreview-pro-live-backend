@@ -326,42 +326,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Deploy API Gateway (getFolderPii route already wired)
-        run: |
-          REGION=us-east-1
-          API_ID=1h4kpspbs6
-          STAGE=prod
-
-          # Scan ALL resources and delete any method that has no integration (causes CreateDeployment to fail)
-          echo "Scanning for orphaned methods..."
-          ALL_RESOURCES=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION --output json)
-          RESOURCE_IDS=$(echo "$ALL_RESOURCES" | python3 -c "import sys,json; [print(r['id']) for r in json.load(sys.stdin)['items']]")
-
-          for RES_ID in $RESOURCE_IDS; do
-            METHODS=$(echo "$ALL_RESOURCES" | python3 -c "
-import sys,json
-items = json.load(sys.stdin)['items']
-r = next((x for x in items if x['id']=='$RES_ID'), None)
-if r and 'resourceMethods' in r:
-    print(' '.join(r['resourceMethods'].keys()))
-")
-            for METHOD in $METHODS; do
-              INT=$(aws apigateway get-integration --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>&1)
-              if echo "$INT" | grep -q "NotFoundException\|No integration"; then
-                echo "Deleting orphaned $METHOD on $RES_ID"
-                aws apigateway delete-method --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>/dev/null || true
-              fi
-            done
-          done
-
-          echo "Deploying..."
-          aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION
-          echo "Done — GET /folders/{folderName}/pii is live"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
       - name: Update redactDocumentStart env vars
         run: |
           aws lambda update-function-configuration             --function-name chartreview-pro-prod-redactDocumentStart             --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,REDACT_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactDocumentWorker,REDACT_CASE_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactCaseWorker,MODEL_ID=us.anthropic.claude-sonnet-4-6}"             --region us-east-1
