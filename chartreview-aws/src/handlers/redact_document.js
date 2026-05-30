@@ -113,6 +113,10 @@ function extractKnownPiiValues(extractedText) {
     /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /Patient['\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]+)/gi,
 
+    // Full 3-part name in "LAST, FIRST MIDDLE" format (e.g. UMC page headers: "Moore, Kimberly Maria")
+    // Captures the FULL phrase — never splits out middle name standalone
+    /^([A-Z][A-Z'\-\.]+,\s+[A-Z][A-Z'\-\.]+\s+[A-Z][A-Z'\-\.]+)$/mg,
+
     // Date of birth — must follow label (captures MM/DD/YYYY and variants)
     /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date|Date\s*of\s*Birth)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
     // Also catch handwritten DOB variants: "2/06/76" "-2/06/76" without label (C-4 forms)
@@ -1553,6 +1557,25 @@ module.exports.redactDocumentWorker = async function(event) {
         userPiiExpanded.push(v);
       }
     });
+    // ── 3-PART NAME PERMUTATIONS from extractKnownPiiValues ───────────────────
+    // If extractKnownPiiValues found "LAST, FIRST MIDDLE", also add "FIRST MIDDLE LAST"
+    var _3partExtras = [];
+    knownPiiValuesBase.forEach(function(_kv) {
+      if (!_kv) return;
+      var _m3 = _kv.match(/^([A-Z][A-Z'\-\.]+),\s+([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
+      if (_m3) {
+        var _fwd3 = _m3[2].trim() + ' ' + _m3[3].trim() + ' ' + _m3[1].trim(); // FIRST MID LAST
+        var _fwd2 = _m3[2].trim() + ' ' + _m3[1].trim();                        // FIRST LAST
+        var _rev2 = _m3[1].trim() + ', ' + _m3[2].trim();                       // LAST, FIRST
+        [_fwd3, _fwd2, _rev2].forEach(function(_v) {
+          if (_3partExtras.indexOf(_v) === -1 && knownPiiValuesBase.indexOf(_v) === -1) {
+            _3partExtras.push(_v);
+          }
+        });
+      }
+    });
+    if (_3partExtras.length) console.log('[3-PART-NAME] extras:', JSON.stringify(_3partExtras));
+
     // ── FOLDER PII: fetch patientName + middleName, build 3-part phrases ──────
     var _folderPiiExtras = [];
     try {
@@ -1602,7 +1625,8 @@ module.exports.redactDocumentWorker = async function(event) {
     const knownPiiValues = knownPiiValuesBase
       .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
       .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }))
-      .concat(_folderPiiExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }));
+      .concat(_folderPiiExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }))
+      .concat(_3partExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }));
     console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
