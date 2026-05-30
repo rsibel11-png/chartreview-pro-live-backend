@@ -457,9 +457,11 @@ function parsePiiFromWindow(window) {
   const city     = cszM ? cszM[1].trim() : '';
   const stateZip = cszM ? (cszM[2] + ' ' + cszM[3]) : '';
   const spouseM  = window.match(/SPOUSE\s*(?:\/\s*NOK)?[\s\S]{0,15}\n([A-Z][A-Z, ]{3,40})\n/i);
-  const spouse   = spouseM ? spouseM[1].trim() : '';
+  const spouseRaw = spouseM ? spouseM[1].trim() : '';
+  // Reject if it looks like a label phrase (all caps words with no comma, or known non-names)
+  const spouse   = (spouseRaw && !(/^(PERSON TO NOTIFY|NEXT OF KIN|NOK|N\/A|NONE|EMERGENCY CONTACT|RELATIONSHIP|NAME)$/i.test(spouseRaw))) ? spouseRaw : '';
   const empM     = window.match(/(?:PATIENT\s+)?EMPLOYER[:\n\s]+([A-Z][A-Z &,.]{3,50})/i);
-  const employer = (empM && !/UNEMPLOYED|NONE|N\/A/i.test(empM[1])) ? empM[1].trim() : '';
+  const employer = (empM && !/UNEMPLOYED|NONE|N\/A|GUARANTOR|SELF|RETIRED|DISABLED|STUDENT/i.test(empM[1])) ? empM[1].trim() : '';
   return { patientName: name, dob, ssn, phone, mrn, street, city, stateZip, spouse, employer };
 }
 
