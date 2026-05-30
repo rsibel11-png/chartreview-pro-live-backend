@@ -508,11 +508,11 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
         if (!result[pgIdx2]) result[pgIdx2] = [];
         var pad = 0.005;
         result[pgIdx2].push({
-          x: Math.max(0, minL - pad),
-          y: Math.max(0, minT - pad),
-          w: Math.min(1, maxR - minL + pad * 2),
-          h: Math.min(1, maxB - minT + pad * 2),
-          reason: 'handwriting',
+          x:      Math.max(0, minL - pad),
+          y:      Math.max(0, minT - pad),
+          width:  Math.min(1, maxR - minL + pad * 2),
+          height: Math.min(1, maxB - minT + pad * 2),
+          label:  'handwriting',
         });
       }
     }
@@ -561,17 +561,6 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
           var slice = pageWords.slice(start, start + len);
           var rawConcat = slice.map(function(w) { return w.t; }).join(''); var concat = normalizeForMatch(rawConcat);
           if (piiNorm.length > 0 && concat === piiNorm) {
-            // ── ICD/diagnosis line guard ──────────────────────────────────────
-            // If the matched tokens are on a line that contains an ICD-10 code
-            // (e.g. Z86.73, G56.03, E11.9, M79.89), this is a diagnosis description
-            // cell in a billing ledger — not patient PII. Skip.
-            var matchTop = slice[0].tp;
-            var lineHasIcd = pageWords.some(function(w) {
-              return Math.abs(w.tp - matchTop) <= 0.008 &&
-                /^[A-Z]\d{2}(\.\d{0,4})?[A-Z]?$/i.test((w.t || '').trim());
-            });
-            if (lineHasIcd) break; // skip this match entirely
-            // ── End ICD guard ─────────────────────────────────────────────────
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
             var minT = Math.min.apply(null, slice.map(function(w) { return w.tp; }));
@@ -1113,10 +1102,11 @@ async function applyRedactions(pdfBytes, piiByPage) {
     for (const box of boxes) {
       // box.x, box.y, box.width, box.height are Textract-normalized [0-1],
       // with origin at TOP-LEFT of the *visually rendered* page.
-      var bx = box.x;
-      var by = box.y;
-      var bw = box.width;
-      var bh = box.height;
+      var bx = typeof box.x     === 'number' ? box.x     : (box.l  || 0);
+      var by = typeof box.y     === 'number' ? box.y     : (box.tp || 0);
+      var bw = typeof box.width === 'number' ? box.width : (box.w  || 0);
+      var bh = typeof box.height=== 'number' ? box.height: (box.h  || 0);
+      if (!bw || !bh || isNaN(bx) || isNaN(by) || isNaN(bw) || isNaN(bh)) continue;
 
       var px, py, pw, ph;
 
