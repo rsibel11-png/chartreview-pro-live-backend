@@ -552,10 +552,10 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     // Primary face photo — left ~36% x top ~58% of card
     result[String(_idPgIdx)].push({
       label: 'dl-photo-primary',
-      x: Math.max(0, _cardMinL - 0.01),
-      y: Math.max(0, _cardMinT - 0.01),
-      width: Math.min(1, _cardW * 0.38),
-      height: Math.min(1, _cardH * 0.60),
+      x: Math.max(0, _cardMinL - 0.005),
+      y: Math.max(0, _cardMinT - 0.005),
+      width: Math.min(1, _cardW * 0.27),   // narrowed: photo is left ~27% of card
+      height: Math.min(1, _cardH * 0.55),  // slightly reduced height
     });
     // Thumbnail — lower-right ~17% x 20% of card
     result[String(_idPgIdx)].push({
@@ -566,6 +566,50 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
       height: Math.min(1, _cardH * 0.23),
     });
     console.log('[ID-PHOTO] p' + _idPgNum + ' — redacting face photo and thumbnail');
+
+    // ── DL FIELD EXTRACTION: pull first/middle name from DL field lines ────────
+    var _dlSorted = _idWords.slice().sort(function(a, b) {
+      if (Math.abs(a.tp - b.tp) > 0.010) return a.tp - b.tp;
+      return a.l - b.l;
+    });
+    var _dlLines = []; var _dlCurLine = [];
+    for (var _dfi = 0; _dfi < _dlSorted.length; _dfi++) {
+      var _dfw = _dlSorted[_dfi];
+      if (_dlCurLine.length === 0 || Math.abs(_dfw.tp - _dlCurLine[0].tp) <= 0.010) {
+        _dlCurLine.push(_dfw);
+      } else { _dlLines.push(_dlCurLine); _dlCurLine = [_dfw]; }
+    }
+    if (_dlCurLine.length) _dlLines.push(_dlCurLine);
+
+    for (var _dfl = 0; _dfl < _dlLines.length; _dfl++) {
+      var _dlLine = _dlLines[_dfl];
+      if (_dlLine.length < 2) continue;
+      var _dlFirst = (_dlLine[0].t || '').trim();
+      // NV DL: field "1" = middle name, field "2" = first name
+      if (_dlFirst === '1' || _dlFirst === '2') {
+        for (var _dfn = 1; _dfn < _dlLine.length; _dfn++) {
+          var _nameW = _dlLine[_dfn];
+          var _nameTok = (_nameW.t || '').trim();
+          if (/^[A-Z][A-Za-z'\-\.]{2,25}$/.test(_nameTok) && !/^(CLASS|REST|END|NONE|ISS|EXP|SEX|HGT|WGT|EYES|HAIR|DD|DL|DOB)$/.test(_nameTok)) {
+            if (piiValues.indexOf(_nameTok) === -1) piiValues.push(_nameTok);
+            if (piiValues.indexOf(_nameTok.toUpperCase()) === -1) piiValues.push(_nameTok.toUpperCase());
+            if (!result[String(_idPgIdx)]) result[String(_idPgIdx)] = [];
+            result[String(_idPgIdx)].push({ label: 'dl-field-name', x: Math.max(0, _nameW.l - 0.003), y: _nameW.tp, width: Math.min(1, _nameW.w + 0.006), height: _nameW.h * 1.1 });
+            console.log('[DL-FIELD] field=' + _dlFirst + ' name=' + _nameTok);
+          }
+        }
+      }
+      // Field "8" = address
+      if (_dlFirst === '8' && _dlLine.length > 1) {
+        var _addrTokens = _dlLine.slice(1);
+        var _addrL = Math.min.apply(null, _addrTokens.map(function(w){ return w.l; }));
+        var _addrR = Math.max.apply(null, _addrTokens.map(function(w){ return w.l + w.w; }));
+        var _addrB = Math.max.apply(null, _addrTokens.map(function(w){ return w.tp + w.h; }));
+        if (!result[String(_idPgIdx)]) result[String(_idPgIdx)] = [];
+        result[String(_idPgIdx)].push({ label: 'dl-field-addr', x: Math.max(0, _addrL-0.003), y: _dlLine[1].tp, width: Math.min(1, _addrR-_addrL+0.006), height: _addrB-_dlLine[1].tp });
+      }
+    }
+    // ── End DL field extraction ─────────────────────────────────────────────────
   }
   // ── END ID DOCUMENT PHOTO PASS ────────────────────────────────────────────
 
@@ -1041,62 +1085,92 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   }
   // ── End phone pass ──────────────────────────────────────────────────────────
 
-  // ── DATE PASS (all pages, print + handwriting) ───────────────────────────────
-  // HIPAA Safe Harbor element #4: redact all dates except year-only.
-  // Catches: MM/DD/YYYY  MM-DD-YYYY  M/D/YY  Month DD, YYYY  DD-Mon-YYYY
-  // Skips: bare 4-digit years (1961, 2025) since those are allowed under Safe Harbor.
-  // Skips: time values (HH:MM), procedure codes, CPT codes.
-  var DATE_RE = new RegExp(
-    '^(?:' +
-    // MM/DD/YYYY or M/D/YY or MM-DD-YY
-    '(?:0?[1-9]|1[0-2])[/\\-](?:0?[1-9]|[12]\\d|3[01])[/\\-](?:19|20)?\\d{2}' +
-    '|' +
-    // Named month: Jan(uary) DD, YYYY or DD-Jan-YYYY
-    '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)' +
-    '[\\s\\-,\\.]+(?:0?[1-9]|[12]\\d|3[01])[\\s\\-,\\.]+(?:19|20)?\\d{2,4}' +
-    '|' +
-    // DD-Mon-YYYY
-    '(?:0?[1-9]|[12]\\d|3[01])[\\-](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\\-](?:19|20)?\\d{2,4}' +
-    ')$', 'i'
-  );
-  // Also single-token date patterns (OCR sometimes gives "06/20/2025" as one block)
-  var DATE_SINGLE_RE = /^(?:0?[1-9]|1[0-2])[\/\-](?:0?[1-9]|[12]\d|3[01])[\/\-](?:19|20)?\d{2}$/;
+  // ── DATE PASS — DOB-LABELED ONLY ──────────────────────────────────────────────
+  // Only redact dates that appear on the same line as a DOB label token.
+  // This preserves: Date of Service, filing dates, EHR timestamps, surgery dates.
+  // Redacts: DOB field values wherever labeled with DOB / D.O.B. / DATE OF BIRTH etc.
+  // Safe Harbor element #4 scoping: we scope to DOB only since DOS has clinical value.
+  var DOB_LABEL_RE = /^(?:dob|d\.o\.b\.?|dateofbirth|birthdate|birthdt|dob:|birth)$/i;
+  var DATE_VALUE_RE = /^(?:0?[1-9]|1[0-2])[\/\-](?:0?[1-9]|[12]\d|3[01])[\/\-](?:19|20)?\d{2}$/;
 
-  var _pgNumsDate = Object.keys(pageMap);
-  for (var _dti = 0; _dti < _pgNumsDate.length; _dti++) {
-    var _dtPg    = parseInt(_pgNumsDate[_dti], 10);
-    var _dtWords = pageMap[_dtPg];
-    var _dtIdx   = _dtPg - 1;
+  var _pgNumsDob = Object.keys(pageMap);
+  for (var _dobi = 0; _dobi < _pgNumsDob.length; _dobi++) {
+    var _dobPg    = parseInt(_pgNumsDob[_dobi], 10);
+    var _dobWords = pageMap[_dobPg];
+    var _dobIdx   = _dobPg - 1;
 
-    for (var _dtw = 0; _dtw < _dtWords.length; _dtw++) {
-      var _dw = _dtWords[_dtw];
-      var _dt = (_dw.t || '').trim();
-
-      // Single-token date: "06/20/2025" or "12/20/1961"
-      if (DATE_SINGLE_RE.test(_dt)) {
-        // Skip bare 4-digit years
-        if (/^(19|20)\d{2}$/.test(_dt)) continue;
-        if (!result[String(_dtIdx)]) result[String(_dtIdx)] = [];
-        result[String(_dtIdx)].push({ label: 'date', x: Math.max(0, _dw.l - 0.003), y: _dw.tp, width: Math.min(1, _dw.w + 0.006), height: _dw.h * 1.1 });
-        continue;
+    // Reconstruct lines, then check each line for DOB label + date value
+    // Sort words into lines by vertical proximity
+    var _dobSorted = _dobWords.slice().sort(function(a, b) {
+      if (Math.abs(a.tp - b.tp) > 0.010) return a.tp - b.tp;
+      return a.l - b.l;
+    });
+    var _dobLines = [];
+    var _dobCurLine = [];
+    for (var _dli = 0; _dli < _dobSorted.length; _dli++) {
+      var _dw = _dobSorted[_dli];
+      if (_dobCurLine.length === 0 || Math.abs(_dw.tp - _dobCurLine[0].tp) <= 0.010) {
+        _dobCurLine.push(_dw);
+      } else {
+        _dobLines.push(_dobCurLine);
+        _dobCurLine = [_dw];
       }
+    }
+    if (_dobCurLine.length) _dobLines.push(_dobCurLine);
 
-      // Multi-token dates: "06" "/" "20" "/" "2025" or "06" "20" "2025" with separators
-      // Try to reconstruct from 3-5 adjacent tokens
-      if (_dtw + 2 < _dtWords.length) {
-        var _dtSlice = _dtWords.slice(_dtw, Math.min(_dtw + 5, _dtWords.length));
-        var _dtConcat = _dtSlice.map(function(w) { return w.t; }).join('');
-        if (DATE_SINGLE_RE.test(_dtConcat)) {
-          var _dtMinL = Math.min.apply(null, _dtSlice.map(function(w) { return w.l; }));
-          var _dtMaxR = Math.max.apply(null, _dtSlice.map(function(w) { return w.l + w.w; }));
-          var _dtMaxB = Math.max.apply(null, _dtSlice.map(function(w) { return w.tp + w.h; }));
-          if (!result[String(_dtIdx)]) result[String(_dtIdx)] = [];
-          result[String(_dtIdx)].push({ label: 'date-multi', x: Math.max(0, _dtMinL - 0.003), y: _dtSlice[0].tp, width: Math.min(1, _dtMaxR - _dtMinL + 0.006), height: _dtMaxB - _dtSlice[0].tp });
+    for (var _dli2 = 0; _dli2 < _dobLines.length; _dli2++) {
+      var _dobLine = _dobLines[_dli2];
+      var _lineText = _dobLine.map(function(w){ return normalizeForMatch(w.t); }).join(' ');
+
+      // Check if this line contains a DOB label
+      var _hasDobLabel = false;
+      for (var _dlw = 0; _dlw < _dobLine.length; _dlw++) {
+        var _tok = normalizeForMatch(_dobLine[_dlw].t);
+        if (DOB_LABEL_RE.test(_tok) || _tok === 'dob' || _tok.startsWith('dob')) {
+          _hasDobLabel = true; break;
+        }
+      }
+      // Also catch inline format "DOB:12/20/1961" as single token
+      var _inlineDobRe = /(?:dob|d\.o\.b\.?)[:\s]*((?:0?[1-9]|1[0-2])[\/\-](?:0?[1-9]|[12]\d|3[01])[\/\-](?:19|20)?\d{2})/i;
+      var _inlineM = _lineText.replace(/\s/g,'').match(/dob:?(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i);
+
+      if (!_hasDobLabel && !_inlineM) continue;
+
+      // Redact all date-shaped tokens on this line
+      for (var _dv = 0; _dv < _dobLine.length; _dv++) {
+        var _dvTok = (_dobLine[_dv].t || '').trim();
+        if (DATE_VALUE_RE.test(_dvTok)) {
+          if (!result[String(_dobIdx)]) result[String(_dobIdx)] = [];
+          result[String(_dobIdx)].push({
+            label: 'dob-date',
+            x: Math.max(0, _dobLine[_dv].l - 0.004),
+            y: _dobLine[_dv].tp,
+            width: Math.min(1, _dobLine[_dv].w + 0.008),
+            height: _dobLine[_dv].h * 1.15,
+          });
+        }
+        // Also catch multi-token dates split across adjacent tokens on same line
+        if (_dv + 2 < _dobLine.length) {
+          var _s3 = _dobLine.slice(_dv, _dv + 5);
+          var _s3c = _s3.map(function(w){ return w.t; }).join('');
+          if (DATE_VALUE_RE.test(_s3c)) {
+            var _s3L = Math.min.apply(null, _s3.map(function(w){ return w.l; }));
+            var _s3R = Math.max.apply(null, _s3.map(function(w){ return w.l + w.w; }));
+            var _s3B = Math.max.apply(null, _s3.map(function(w){ return w.tp + w.h; }));
+            if (!result[String(_dobIdx)]) result[String(_dobIdx)] = [];
+            result[String(_dobIdx)].push({
+              label: 'dob-date-multi',
+              x: Math.max(0, _s3L - 0.004),
+              y: _dobLine[_dv].tp,
+              width: Math.min(1, _s3R - _s3L + 0.008),
+              height: _s3B - _dobLine[_dv].tp,
+            });
+          }
         }
       }
     }
   }
-  // ── End date pass ────────────────────────────────────────────────────────────
+  // ── End DOB date pass ────────────────────────────────────────────────────────
 
   return result;
 }
