@@ -1553,9 +1553,56 @@ module.exports.redactDocumentWorker = async function(event) {
         userPiiExpanded.push(v);
       }
     });
+    // ── FOLDER PII: fetch patientName + middleName, build 3-part phrases ──────
+    var _folderPiiExtras = [];
+    try {
+      var _docRec = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
+      var _folderName = ((_docRec.Item && (_docRec.Item.folder || _docRec.Item.folder_name)) || '').trim();
+      var _orgId = (_docRec.Item && _docRec.Item.org_id) || '';
+      if (_folderName && _orgId) {
+        var _piiRec = await dynamo.send(new GetCommand({
+          TableName: 'chartreview-folder-pii-prod',
+          Key: { org_folder: _orgId + '#' + _folderName }
+        }));
+        if (_piiRec.Item) {
+          var _storedName = (_piiRec.Item.patientName || '').trim();
+          var _storedMid  = (_piiRec.Item.middleName  || '').trim();
+          if (_storedName && _folderPiiExtras.indexOf(_storedName) === -1) _folderPiiExtras.push(_storedName);
+          // Reversed form
+          var _nm1 = _storedName.match(/^([A-Z][A-Z'\-\.]+),\s*([A-Z][A-Z'\-\. ]+)$/i);
+          if (_nm1) {
+            var _fwd = _nm1[2].trim() + ' ' + _nm1[1].trim();
+            if (_folderPiiExtras.indexOf(_fwd) === -1) _folderPiiExtras.push(_fwd);
+          }
+          var _nm2 = _storedName.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
+          if (_nm2) {
+            var _rev = _nm2[2].trim() + ', ' + _nm2[1].trim();
+            if (_folderPiiExtras.indexOf(_rev) === -1) _folderPiiExtras.push(_rev);
+          }
+          // 3-part phrases using middleName — NEVER add middle name as standalone token
+          if (_storedMid) {
+            if (_nm1) {
+              var _fp1 = _nm1[2].trim() + ' ' + _storedMid + ' ' + _nm1[1].trim();
+              var _fp2 = _nm1[1].trim() + ', ' + _nm1[2].trim() + ' ' + _storedMid;
+              if (_folderPiiExtras.indexOf(_fp1) === -1) _folderPiiExtras.push(_fp1);
+              if (_folderPiiExtras.indexOf(_fp2) === -1) _folderPiiExtras.push(_fp2);
+            }
+            if (_nm2) {
+              var _fp3 = _nm2[1].trim() + ' ' + _storedMid + ' ' + _nm2[2].trim();
+              if (_folderPiiExtras.indexOf(_fp3) === -1) _folderPiiExtras.push(_fp3);
+            }
+          }
+          console.log('[FOLDER-PII] extras:', JSON.stringify(_folderPiiExtras));
+        }
+      }
+    } catch (_fpErr) {
+      console.log('[FOLDER-PII] skipped:', _fpErr.message);
+    }
+    // ── End folder PII ──────────────────────────────────────────────────────
     const knownPiiValues = knownPiiValuesBase
       .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
-      .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
+      .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }))
+      .concat(_folderPiiExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }));
     console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
