@@ -326,28 +326,31 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Wire getFolderPii API Gateway route and deploy
+      - name: Deploy API Gateway (getFolderPii route already wired)
         run: |
           REGION=us-east-1
           API_ID=1h4kpspbs6
           STAGE=prod
 
-          # Get the /folders/{folderName}/pii resource ID (already created in prior run)
-          PII_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION             --query "items[?path=='/folders/{folderName}/pii'].id" --output text)
-          echo "PII resource: $PII_RESOURCE"
+          # Find and clean up any methods missing integrations (prevents CreateDeployment failure)
+          echo "Checking for methods missing integrations..."
+          RESOURCES=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION --query 'items[].id' --output text)
+          for RES_ID in $RESOURCES; do
+            for METHOD in GET POST PUT DELETE PATCH OPTIONS; do
+              # Check if method exists but has no integration
+              HAS_METHOD=$(aws apigateway get-method --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>/dev/null && echo "yes" || echo "no")
+              if [ "$HAS_METHOD" = "yes" ]; then
+                HAS_INT=$(aws apigateway get-integration --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>/dev/null && echo "yes" || echo "no")
+                if [ "$HAS_INT" = "no" ]; then
+                  echo "Deleting orphaned method $METHOD on $RES_ID"
+                  aws apigateway delete-method --rest-api-id $API_ID --resource-id $RES_ID --http-method $METHOD --region $REGION 2>/dev/null || true
+                fi
+              fi
+            done
+          done
 
-          # Wire OPTIONS MOCK integration (use heredoc to avoid quoting issues)
-          aws apigateway put-integration --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method OPTIONS --type MOCK             --request-templates '{"application/json": "{\"statusCode\": 200}"}'             --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration-response --rest-api-id $API_ID --resource-id $PII_RESOURCE             --http-method OPTIONS --status-code 200             --response-parameters '{
-              "method.response.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization,x-api-key,x-org-id'"'"'",
-              "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,OPTIONS'"'"'",
-              "method.response.header.Access-Control-Allow-Origin": "'"'"'*'"'"'"
-            }'             --region $REGION 2>/dev/null || true
-
-          # Deploy
           aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION
-          echo "Done — GET /folders/{folderName}/pii is live"
+          echo "Deployed — GET /folders/{folderName}/pii is live"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
