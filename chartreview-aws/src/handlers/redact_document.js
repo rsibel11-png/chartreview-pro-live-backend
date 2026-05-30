@@ -117,9 +117,7 @@ function expandNameVariants(piiList, patientNameOverride) {
       addIfNew(m1[2].trim() + ' ' + m1[1].trim());
       addIfNew(m1[1].trim());
       addIfNew(m1[2].trim().split(/\s+/)[0]);
-      // middle name if present
-      var parts = m1[2].trim().split(/\s+/);
-      if (parts.length > 1) addIfNew(parts[1]);
+      // NOTE: do NOT add middle name standalone - it appears in clinical text
       return;
     }
     // "FIRST LAST" → "LAST, FIRST"
@@ -133,7 +131,8 @@ function expandNameVariants(piiList, patientNameOverride) {
     var m3 = t.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
     if (m3) {
       addIfNew(m3[3].trim() + ', ' + m3[1].trim() + ' ' + m3[2].trim());
-      addIfNew(m3[1].trim()); addIfNew(m3[2].trim()); addIfNew(m3[3].trim());
+      // Only add first and last standalone, NOT middle name
+      addIfNew(m3[1].trim()); addIfNew(m3[3].trim());
     }
   });
 
@@ -146,8 +145,7 @@ function expandNameVariants(piiList, patientNameOverride) {
       addIfNew(pm1[2].trim() + ' ' + pm1[1].trim());
       addIfNew(pm1[1].trim());
       addIfNew(pm1[2].trim().split(/\s+/)[0]);
-      var pmParts = pm1[2].trim().split(/\s+/);
-      if (pmParts.length > 1) addIfNew(pmParts[1]);
+      // NOTE: do NOT add middle name standalone
     }
     var pm2 = pn.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
     if (pm2) {
@@ -156,7 +154,8 @@ function expandNameVariants(piiList, patientNameOverride) {
     }
     var pm3 = pn.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
     if (pm3) {
-      addIfNew(pm3[1].trim()); addIfNew(pm3[2].trim()); addIfNew(pm3[3].trim());
+      // Only add first and last, NOT middle name (appears in clinical narrative)
+      addIfNew(pm3[1].trim()); addIfNew(pm3[3].trim());
     }
   }
 
@@ -516,7 +515,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
   // ── HANDWRITING PASS: redact ALL handwritten tokens unconditionally ─────────
   var HW_LINE_GAP  = 0.015;
   var HW_VERT_TOL  = 0.012;
-  var HW_MIN_CHARS = 1; // lowered: cursive signatures often yield single-char tokens
+  var HW_MIN_CHARS = 2; // floor of 2 chars - single OCR artifacts excluded
 
   var pageNums2 = Object.keys(pageMap);
   for (var pni = 0; pni < pageNums2.length; pni++) {
@@ -903,7 +902,6 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     'signatureofpatientclientorclaimantoriguardianifaminor',
     'signatureofpatientorclaimantorguardianifaminor',
     'signatureofpatient', 'signatureofclaimant',
-    'clientpatient', 'client', 'patient',
     'signaturedate', 'datesigned',
     'patientprintedsignature', 'printname', 'printedname',
     // Generic "signature" alone below a line
