@@ -115,7 +115,7 @@ function extractKnownPiiValues(extractedText) {
 
     // Full 3-part name in "LAST, FIRST MIDDLE" format (e.g. UMC page headers: "Moore, Kimberly Maria")
     // Captures the FULL phrase — never splits out middle name standalone
-    /^([A-Z][A-Z'\-\.]+,\s+[A-Z][A-Z'\-\.]+\s+[A-Z][A-Z'\-\.]+)$/mg,
+    /([A-Za-z][A-Za-z'\-\.]{2,},\s+[A-Za-z][A-Za-z'\-\.]{2,}\s+[A-Za-z][A-Za-z'\-\.]{2,})(?=\s*(?:MRN|DOB|Legal|\d|\n|$))/mgi,
 
     // Date of birth — must follow label (captures MM/DD/YYYY and variants)
     /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date|Date\s*of\s*Birth)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
