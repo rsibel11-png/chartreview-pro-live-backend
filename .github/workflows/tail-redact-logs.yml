@@ -14,8 +14,14 @@ jobs:
           aws logs filter-log-events \
             --log-group-name /aws/lambda/chartreview-pro-prod-redactCaseWorker \
             --start-time $START \
-            --output text \
-            --region us-east-1 2>&1 | tail -400 || echo "FAILED"
+            --query "events[*].message" \
+            --output json \
+            --region us-east-1 2>&1 | python3 -c "
+import sys, json
+lines = json.load(sys.stdin)
+for l in lines:
+    print(l.strip())
+" | tail -300 || echo "FAILED"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
