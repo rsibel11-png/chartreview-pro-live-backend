@@ -1966,7 +1966,7 @@ module.exports.redactCaseWorker = async function(event) {
 
       var redactedBytes = await applyRedactions(pdfBytes, allPii);
       var redactCount   = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
-      return { redactedBytes, redactCount };
+      return { redactedBytes, redactCount, piiByPage: allPii };
     }));
 
     await updateJob(job_id, { progress_message: 'Merging ' + partResults.length + ' redacted part(s)...', updated_at: new Date().toISOString() });
