@@ -1973,6 +1973,8 @@ module.exports.redactCaseWorker = async function(event) {
 
     var mergedDoc = await PDFDocument.create();
     var totalRedactions = 0;
+    var mergedPiiByPage = {};
+    var _globalPageOffset = 0;
     for (var _ri = 0; _ri < partResults.length; _ri++) {
       var partDoc    = await PDFDocument.load(partResults[_ri].redactedBytes);
       var pgCount    = partDoc.getPageCount();
@@ -1981,6 +1983,13 @@ module.exports.redactCaseWorker = async function(event) {
       var copiedPgs  = await mergedDoc.copyPages(partDoc, pgIndices);
       copiedPgs.forEach(function(p) { mergedDoc.addPage(p); });
       totalRedactions += partResults[_ri].redactCount;
+      var partPii = partResults[_ri].piiByPage || {};
+      for (var _pp in partPii) {
+        if (partPii.hasOwnProperty(_pp)) {
+          mergedPiiByPage[String(parseInt(_pp, 10) + _globalPageOffset)] = partPii[_pp];
+        }
+      }
+      _globalPageOffset += pgCount;
     }
     var mergedBytes = Buffer.from(await mergedDoc.save());
     var totalPages  = mergedDoc.getPageCount();
@@ -1991,6 +2000,24 @@ module.exports.redactCaseWorker = async function(event) {
     var mergedName = baseName + '_REDACTED.pdf';
 
     await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: mergedKey, Body: mergedBytes, ContentType: 'application/pdf' }));
+
+    // ── Redaction log CSV ────────────────────────────────────────────────────
+    var _caseLogKey = null; var _caseLogUrl = null;
+    try {
+      var _casePiiSummary = {
+        patientName: (folderPii && folderPii.patient_name) || folder_name || '',
+        dob:         (folderPii && folderPii.dob)          || '',
+        mrn:         (folderPii && folderPii.mrn)          || '',
+        folder:      folder_name || '',
+      };
+      var _caseLogBytes = buildRedactionLogCsv(mergedName, mergedPiiByPage, _casePiiSummary);
+      _caseLogKey = mergedKey.replace(/_REDACTED\.pdf$/i, '_REDACTION_LOG.csv');
+      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _caseLogKey, Body: _caseLogBytes, ContentType: 'text/csv' }));
+      _caseLogUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _caseLogKey }), { expiresIn: 604800 });
+      console.log('[REDACTION-LOG] Case CSV uploaded to', _caseLogKey);
+    } catch (_caseLogErr) {
+      console.warn('[REDACTION-LOG] Failed to generate case CSV:', _caseLogErr.message);
+    }
 
     var newDocId = randomUUID();
     await dynamo.send(new PutCommand({
