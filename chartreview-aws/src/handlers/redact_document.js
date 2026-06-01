@@ -1816,9 +1816,13 @@ module.exports.redactDocumentWorker = async function(event) {
       console.log('[REDACTION-LOG] Single-doc CSV: pages=' + _allPiiPageCount + ' boxes=' + _allPiiBoxCount + ' file=' + origFilename);
       var _logBytes = buildRedactionLogCsv(origFilename, allPii, _piiSummary);
       _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.csv']).join('/');
-      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBytes, ContentType: 'text/csv' }));
+      var _logBodyStr = Buffer.isBuffer(_logBytes) ? _logBytes : Buffer.from(String(_logBytes), 'utf8');
+      console.log('[REDACTION-LOG] Uploading CSV, bytes:', _logBodyStr.length, 'key:', _logKey);
+      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBodyStr, ContentType: 'text/csv' }));
       _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
       console.log('[REDACTION-LOG] CSV uploaded to', _logKey);
+      // Write log key to job record immediately so it's not lost if Lambda times out
+      try { await updateJob(job_id, { redaction_log_key: _logKey, updated_at: new Date().toISOString() }); } catch(_jle) {}
     } catch (_logErr) {
       console.error('[REDACTION-LOG] CATCH FIRED:', _logErr.message, _logErr.stack);
       _logKey = 'ERROR:' + (_logErr.message || 'unknown').substring(0, 80);
