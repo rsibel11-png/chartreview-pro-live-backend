@@ -1755,6 +1755,25 @@ module.exports.redactDocumentWorker = async function(event) {
       ContentType: 'application/pdf',
     }));
 
+    // ── Generate + upload redaction log DOCX ──────────────────────────────────
+    try {
+      var _piiSummary = { patientName: knownPiiValues[0] || '', dob: '', mrn: '', folder: doc.folder_name || '' };
+      // Try to pull DOB and MRN from extractedText
+      var _dobM = (extractedText || '').match(/DOB[:\s]+([\d\/]+)/i);
+      var _mrnM = (extractedText || '').match(/MRN[:\s]+([A-Z0-9]+)/i);
+      if (_dobM) _piiSummary.dob = _dobM[1];
+      if (_mrnM) _piiSummary.mrn = _mrnM[1];
+      var _logBytes = await buildRedactionLogDocx(origFilename, piiByPage, _piiSummary);
+      var _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.docx']).join('/');
+      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBytes, ContentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+      var _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
+      console.log('[REDACTION-LOG] DOCX uploaded to', _logKey);
+    } catch (_logErr) {
+      console.warn('[REDACTION-LOG] Failed to generate log DOCX:', _logErr.message);
+      var _logKey = null; var _logUrl = null;
+    }
+    // ── End redaction log ──────────────────────────────────────────────────────
+
     const newDocId = randomUUID();
     await dynamo.send(new PutCommand({
       TableName: DOCS_TABLE,
@@ -1771,6 +1790,8 @@ module.exports.redactDocumentWorker = async function(event) {
         redacted_from:     doc_id,
         redaction_count:   totalRedactions,
         redacted_pages:    totalPagesAffected,
+        redaction_log_key: _logKey  || null,
+        redaction_log_url: _logUrl  || null,
         status:            'processed',
         is_clinical:       doc.is_clinical        || false,
         created_at:        new Date().toISOString(),
