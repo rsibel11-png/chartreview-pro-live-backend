@@ -115,7 +115,9 @@ function extractKnownPiiValues(extractedText) {
 
     // Full 3-part name in "LAST, FIRST MIDDLE" format (e.g. UMC page headers: "Moore, Kimberly Maria")
     // Captures the FULL phrase — never splits out middle name standalone
-    /([A-Za-z][A-Za-z'\-\.]{2,},\s+[A-Za-z][A-Za-z'\-\.]{2,}\s+[A-Za-z][A-Za-z'\-\.]{2,})(?=\s*(?:MRN|DOB|Legal|\d|\n|$))/mgi,
+    // 3-part LAST, FIRST MIDDLE — requires end-of-line or MRN/DOB to follow
+    // Excludes lines where the 3rd component is a title (MD, DO, RN, etc.)
+    /([A-Za-z][A-Za-z'\-\.]{2,},\s+[A-Za-z][A-Za-z'\-\.]{2,}\s+[A-Za-z][A-Za-z'\-\.]{2,})(?=\s*(?:MRN|DOB|Legal|\d))/mgi,
 
     // Date of birth — must follow label (captures MM/DD/YYYY and variants)
     /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date|Date\s*of\s*Birth)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
@@ -299,13 +301,15 @@ function discoverPatientAddress(extractedText) {
   var NAME_LABEL_RE = /^(?:PATIENT|PATIENT\s*NAME|PT\.?\s*NAME|NAME|CLAIMANT|CLIENT)\s*[:\|]/i;
 
   // Facility keyword guard — if a street appears after one of these, skip it
-  var FACILITY_RE = /hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent|orthopedic|physical\s*therapy|imaging|radiology|university|college|institute/i;
+  var FACILITY_RE = /hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent|orthopedic|physical\s*therapy|imaging|radiology|university|college|institute|umc\s*rad|umc\s*radiology|testing\s*performed|lab.*abbreviation|valid\s*date/i;
+  // Known facility street names that should never be treated as patient address
+  var FACILITY_STREET_RE = /charleston\s*blvd|flamingo|desert\s*inn|mariah\s*drive|mount\s*mariah|eastern\s*ave|harrison\s*ave|pinto\s*lane|hope\s*place/i;
 
   // Suite/floor indicator — facility addresses have these, patient ones usually don't
   var SUITE_RE = /\b(?:STE|SUITE|FLOOR|FL\.|#)\s*\d/i;
 
   function isFacilityLine(line) {
-    return FACILITY_RE.test(line);
+    return FACILITY_RE.test(line) || FACILITY_STREET_RE.test(line);
   }
 
   // Pass 1: Find address blocks following known patient/address labels
@@ -340,7 +344,9 @@ function discoverPatientAddress(extractedText) {
           var streetNum  = streetMatch[1];
           var streetName = streetMatch[2].trim();
           // Don't add very common street numbers that appear everywhere (0-99)
-          if (parseInt(streetNum, 10) > 99) {
+          // Skip known facility street names even if address number > 99
+        if (FACILITY_STREET_RE.test(candidate)) break;
+        if (parseInt(streetNum, 10) > 99) {
             discovered.add(streetNum);
           }
           // Add meaningful street name components (skip single words < 4 chars)
@@ -629,7 +635,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
     // Skip common English words that should never be redacted
     // These can end up in piiValues if extraction patterns grab sentence fragments
     var _piiWord = piiNorm.toLowerCase();
-    if (/^(page|pages|date|time|form|type|code|unit|room|note|visit|total|amount|paid|status|level|none|same|info|record|report|order|plan|initial|final|signature|signed|print|copy|draft|section|part|item|number|detail|summary|description|comment|follow|continued|information|balance|right|left|hand|wrist|pain|none|test|exam|normal|within|limits)$/.test(_piiWord)) continue;
+    if (/^(page|pages|date|time|form|type|code|unit|room|note|visit|total|amount|paid|status|level|none|same|info|record|report|order|plan|initial|final|signature|signed|print|copy|draft|section|part|item|number|detail|summary|description|comment|follow|continued|information|balance|right|left|hand|wrist|pain|none|test|exam|normal|within|limits|chest|fever|chills|family|negative|positive|shortness|breath|constipation|diarrhea|dizziness|discharge|person|family|history|preferences|treatment|options|discussed)$/.test(_piiWord)) continue;
     // Also skip common English words that appear in street names and general text
     if (/^(free|fall|feel|free|main|park|hill|lake|pine|rose|oak|elm|view|high|long|old|new|far|near|open|good|best|full|plus|just|also|only|both|even|well|help|find|call|send|back|next|last|first|second|third|must|will|that|this|with|from|have|been|they|what|when|your|their|more|most|some|other|over|under|after|before|above|below|between|through|about|should|could|would)$/.test(_piiWord)) continue;
     // Skip values that look like billing/procedure codes rather than PII:
