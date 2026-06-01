@@ -110,7 +110,7 @@ function buildRedactionLogCsv(filename, piiByPage, summary) {
       var ht = typeof box.height === 'number' ? box.height.toFixed(4) : '';
       lines.push((pg+1) + ',' + _source + ',' + _rule + ',' + _text + ',' + x + ',' + y + ',' + w + ',' + ht);
       totalBoxes++;
-      ruleCounts[rule] = (ruleCounts[rule] || 0) + 1;
+      ruleCounts[_rule] = (ruleCounts[_rule] || 0) + 1;
     }
   }
   // Summary
