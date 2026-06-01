@@ -1803,6 +1803,7 @@ module.exports.redactDocumentWorker = async function(event) {
     }));
 
     // ── Generate + upload redaction log DOCX ──────────────────────────────────
+    console.log('[REDACTION-LOG] REACHED CSV BLOCK. allPii pages:', Object.keys(allPii||{}).length);
     var _logKey = null; var _logUrl = null;
     try {
       var _piiSummary = { patientName: knownPiiValues[0] || '', dob: '', mrn: '', folder: doc.folder_name || '' };
