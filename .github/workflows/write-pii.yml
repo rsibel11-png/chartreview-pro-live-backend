@@ -1,35 +1,37 @@
-name: Write JonesMoore PII
+name: Write PII
 
 on:
   workflow_dispatch:
+    inputs:
+      org_id:
+        description: 'Org ID'
+        required: false
+        default: 'check'
 
 jobs:
-  write:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - name: Write known-good PII to DynamoDB
+      - name: Scan redacted docs
         run: |
-          aws dynamodb put-item \
-            --table-name chartreview-folder-pii-prod \
+          aws dynamodb scan \
+            --table-name chartreview-documents-prod \
+            --filter-expression "is_redacted = :t" \
+            --expression-attribute-values '{":t":{"BOOL":true}}' \
+            --projection-expression "aws_document_id,original_filename,redaction_log_key,created_at,folder_name" \
             --region us-east-1 \
-            --item '{
-              "org_folder":  {"S": "69ceb1ab037acdd4467b31c3#JonesMoore"},
-              "org_id":      {"S": "69ceb1ab037acdd4467b31c3"},
-              "patientName": {"S": "MOORE, KIMBERLY"},
-              "dob":         {"S": "12/20/1961"},
-              "phone":       {"S": "(702)277-9970"},
-              "ssn":         {"S": "xxx-xx-5367"},
-              "mrn":         {"S": "D002916777"},
-              "street":      {"S": "312 POCONO RANCH AVE"},
-              "city":        {"S": "NORTH LAS VEGAS"},
-              "stateZip":    {"S": "NV 89031"},
-              "employer":    {"S": ""},
-              "spouse":      {"S": ""},
-              "source_doc":  {"S": "g._Nevada_Health_Center_-_Meds_Part5.pdf"},
-              "updated_at":  {"S": "2026-05-30T15:30:00.000Z"}
-            }'
-          echo "Written."
+            --output json | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items=sorted(data.get('Items',[]),key=lambda x:x.get('created_at',{}).get('S',''),reverse=True)
+for item in items[:15]:
+    fn=item.get('original_filename',{}).get('S','?')
+    lk=item.get('redaction_log_key',{}).get('S','NO_LOG_KEY')
+    ca=item.get('created_at',{}).get('S','?')[:19]
+    fo=item.get('folder_name',{}).get('S','?')
+    print(f'{ca} | {fo[:20]:20} | {fn[:40]:40} | {lk}')
+"
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
