@@ -1820,7 +1820,8 @@ module.exports.redactDocumentWorker = async function(event) {
       _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
       console.log('[REDACTION-LOG] CSV uploaded to', _logKey);
     } catch (_logErr) {
-      console.error('[REDACTION-LOG] Failed to generate log CSV:', _logErr.message, _logErr.stack);
+      console.error('[REDACTION-LOG] CATCH FIRED:', _logErr.message, _logErr.stack);
+      _logKey = 'ERROR:' + (_logErr.message || 'unknown').substring(0, 80);
     }
     // ── End redaction log ──────────────────────────────────────────────────────
 
