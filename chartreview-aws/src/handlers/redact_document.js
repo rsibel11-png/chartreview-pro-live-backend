@@ -2057,13 +2057,21 @@ module.exports.redactCaseWorker = async function(event) {
         mrn:         '',
         folder:      folder_name || '',
       };
+      console.log('[REDACTION-LOG] Building CSV, pages:', Object.keys(mergedPiiByPage).length, 'totalBoxes:', Object.values(mergedPiiByPage).reduce(function(s,b){return s+b.length;},0));
       var _caseLogBytes = buildRedactionLogCsv(mergedName, mergedPiiByPage, _casePiiSummary);
+      console.log('[REDACTION-LOG] CSV built, bytes:', _caseLogBytes ? _caseLogBytes.length : 0);
       _caseLogKey = mergedKey.replace(/_REDACTED\.pdf$/i, '_REDACTION_LOG.csv');
       await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _caseLogKey, Body: _caseLogBytes, ContentType: 'text/csv' }));
       _caseLogUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _caseLogKey }), { expiresIn: 604800 });
       console.log('[REDACTION-LOG] Case CSV uploaded to', _caseLogKey);
     } catch (_caseLogErr) {
-      console.warn('[REDACTION-LOG] Failed to generate case CSV:', _caseLogErr.message);
+      console.error('[REDACTION-LOG] Failed to generate case CSV:', _caseLogErr.message, _caseLogErr.stack);
+      console.error('[REDACTION-LOG] mergedPiiByPage keys:', Object.keys(mergedPiiByPage).length, 'mergedName:', mergedName);
+      var _samplePage = Object.keys(mergedPiiByPage)[0];
+      if (_samplePage) {
+        var _sampleBoxes = mergedPiiByPage[_samplePage];
+        console.error('[REDACTION-LOG] Sample page', _samplePage, 'boxes:', JSON.stringify(_sampleBoxes.slice(0,2)));
+      }
     }
 
     var newDocId = randomUUID();
