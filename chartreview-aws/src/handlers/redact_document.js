@@ -85,8 +85,8 @@ function buildRedactionLogCsv(filename, piiByPage, summary) {
     var boxes = piiByPage[String(pg)] || [];
     for (var bi = 0; bi < boxes.length; bi++) {
       var box = boxes[bi];
-      var rule = (box.rule || 'unknown').replace(/,/g, ';');
-      var text = ((box.text || box.matchedText || '')).replace(/,/g, ';').replace(/\n/g, ' ');
+      var rule = (box.label || box.rule || 'unknown').replace(/,/g, ';');
+      var text = (box.label || '').replace(/^[^:]+:/, '').replace(/,/g, ';').replace(/\n/g, ' ');
       var x    = typeof box.x === 'number' ? box.x.toFixed(4) : '';
       var y    = typeof box.y === 'number' ? box.y.toFixed(4) : '';
       var w    = typeof box.width === 'number' ? box.width.toFixed(4) : '';
