@@ -85,8 +85,8 @@ function buildRedactionLogCsv(filename, piiByPage, summary) {
     var boxes = piiByPage[String(pg)] || [];
     for (var bi = 0; bi < boxes.length; bi++) {
       var box = boxes[bi];
-      var rule = (box.label || box.rule || 'unknown').replace(/,/g, ';');
-      var text = (box.matchedText || box.text || box.value || '').replace(/,/g, ';').replace(/\n/g, ' ');
+      var rule = (box.rule || 'unknown').replace(/,/g, ';');
+      var text = ((box.text || box.matchedText || '')).replace(/,/g, ';').replace(/\n/g, ' ');
       var x    = typeof box.x === 'number' ? box.x.toFixed(4) : '';
       var y    = typeof box.y === 'number' ? box.y.toFixed(4) : '';
       var w    = typeof box.width === 'number' ? box.width.toFixed(4) : '';
@@ -719,7 +719,6 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
             if (!result[String(pageIdx)]) result[String(pageIdx)] = [];
             result[String(pageIdx)].push({
               label: 'textract:' + pii.substring(0, 30),
-              matchedText: pii,
               x: Math.max(0, minL - 0.005),
               y: minT,
               width: Math.min(1, (maxR - minL) + 0.01),
@@ -855,7 +854,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
 
     if (!result[String(_pgIdx4)]) result[String(_pgIdx4)] = [];
     result[String(_pgIdx4)].push({
-      label: 'addr-line:' + _lineTxt.substring(0, 40), matchedText: _addrPhrase,
+      label: 'addr-line:' + _lineTxt.substring(0, 40),
       x: Math.max(0, _lMinL - 0.005),
       y: _lMinT,
       width: Math.min(1, (_lMaxR - _lMinL) + 0.01),
@@ -1199,7 +1198,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
         if (DATE_VALUE_RE.test(_dvTok)) {
           if (!result[String(_dobIdx)]) result[String(_dobIdx)] = [];
           result[String(_dobIdx)].push({
-            label: 'dob-date', matchedText: _dv,
+            label: 'dob-date',
             x: Math.max(0, _dobLine[_dv].l - 0.004),
             y: _dobLine[_dv].tp,
             width: Math.min(1, _dobLine[_dv].w + 0.008),
@@ -1216,7 +1215,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
             var _s3B = Math.max.apply(null, _s3.map(function(w){ return w.tp + w.h; }));
             if (!result[String(_dobIdx)]) result[String(_dobIdx)] = [];
             result[String(_dobIdx)].push({
-              label: 'dob-date-multi', matchedText: _dv,
+              label: 'dob-date-multi',
               x: Math.max(0, _s3L - 0.004),
               y: _dobLine[_dv].tp,
               width: Math.min(1, _s3R - _s3L + 0.008),
@@ -1803,8 +1802,6 @@ module.exports.redactDocumentWorker = async function(event) {
     }));
 
     // ── Generate + upload redaction log DOCX ──────────────────────────────────
-    console.log('[REDACTION-LOG] REACHED CSV BLOCK. allPii pages:', Object.keys(allPii||{}).length);
-    var _logKey = null; var _logUrl = null;
     try {
       var _piiSummary = { patientName: knownPiiValues[0] || '', dob: '', mrn: '', folder: doc.folder_name || '' };
       // Try to pull DOB and MRN from extractedText
@@ -1812,21 +1809,14 @@ module.exports.redactDocumentWorker = async function(event) {
       var _mrnM = (extractedText || '').match(/MRN[:\s]+([A-Z0-9]+)/i);
       if (_dobM) _piiSummary.dob = _dobM[1];
       if (_mrnM) _piiSummary.mrn = _mrnM[1];
-      var _allPiiPageCount = Object.keys(allPii || {}).length;
-      var _allPiiBoxCount  = Object.values(allPii || {}).reduce(function(s,b){return s+(b?b.length:0);},0);
-      console.log('[REDACTION-LOG] Single-doc CSV: pages=' + _allPiiPageCount + ' boxes=' + _allPiiBoxCount + ' file=' + origFilename);
       var _logBytes = buildRedactionLogCsv(origFilename, allPii, _piiSummary);
-      _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.csv']).join('/');
-      var _logBodyStr = Buffer.isBuffer(_logBytes) ? _logBytes : Buffer.from(String(_logBytes), 'utf8');
-      console.log('[REDACTION-LOG] Uploading CSV, bytes:', _logBodyStr.length, 'key:', _logKey);
-      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBodyStr, ContentType: 'text/csv' }));
-      _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
-      console.log('[REDACTION-LOG] CSV uploaded to', _logKey);
-      // Write log key to job record immediately so it's not lost if Lambda times out
-      try { await updateJob(job_id, { redaction_log_key: _logKey, updated_at: new Date().toISOString() }); } catch(_jle) {}
+      var _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.csv']).join('/');
+      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBytes, ContentType: 'text/csv' }));
+      var _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
+      console.log('[REDACTION-LOG] DOCX uploaded to', _logKey);
     } catch (_logErr) {
-      console.error('[REDACTION-LOG] CATCH FIRED:', _logErr.message, _logErr.stack);
-      _logKey = 'ERROR:' + (_logErr.message || 'unknown').substring(0, 80);
+      console.warn('[REDACTION-LOG] Failed to generate log DOCX:', _logErr.message);
+      var _logKey = null; var _logUrl = null;
     }
     // ── End redaction log ──────────────────────────────────────────────────────
 
@@ -2066,21 +2056,13 @@ module.exports.redactCaseWorker = async function(event) {
         mrn:         '',
         folder:      folder_name || '',
       };
-      console.log('[REDACTION-LOG] Building CSV, pages:', Object.keys(mergedPiiByPage).length, 'totalBoxes:', Object.values(mergedPiiByPage).reduce(function(s,b){return s+b.length;},0));
       var _caseLogBytes = buildRedactionLogCsv(mergedName, mergedPiiByPage, _casePiiSummary);
-      console.log('[REDACTION-LOG] CSV built, bytes:', _caseLogBytes ? _caseLogBytes.length : 0);
       _caseLogKey = mergedKey.replace(/_REDACTED\.pdf$/i, '_REDACTION_LOG.csv');
       await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _caseLogKey, Body: _caseLogBytes, ContentType: 'text/csv' }));
       _caseLogUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _caseLogKey }), { expiresIn: 604800 });
       console.log('[REDACTION-LOG] Case CSV uploaded to', _caseLogKey);
     } catch (_caseLogErr) {
-      console.error('[REDACTION-LOG] Failed to generate case CSV:', _caseLogErr.message, _caseLogErr.stack);
-      console.error('[REDACTION-LOG] mergedPiiByPage keys:', Object.keys(mergedPiiByPage).length, 'mergedName:', mergedName);
-      var _samplePage = Object.keys(mergedPiiByPage)[0];
-      if (_samplePage) {
-        var _sampleBoxes = mergedPiiByPage[_samplePage];
-        console.error('[REDACTION-LOG] Sample page', _samplePage, 'boxes:', JSON.stringify(_sampleBoxes.slice(0,2)));
-      }
+      console.warn('[REDACTION-LOG] Failed to generate case CSV:', _caseLogErr.message);
     }
 
     var newDocId = randomUUID();
