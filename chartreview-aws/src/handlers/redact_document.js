@@ -85,8 +85,8 @@ function buildRedactionLogCsv(filename, piiByPage, summary) {
     var boxes = piiByPage[String(pg)] || [];
     for (var bi = 0; bi < boxes.length; bi++) {
       var box = boxes[bi];
-      var rule = (box.rule || 'unknown').replace(/,/g, ';');
-      var text = ((box.text || box.matchedText || '')).replace(/,/g, ';').replace(/\n/g, ' ');
+      var rule = (box.label || box.rule || 'unknown').replace(/,/g, ';');
+      var text = (box.matchedText || box.text || box.value || '').replace(/,/g, ';').replace(/\n/g, ' ');
       var x    = typeof box.x === 'number' ? box.x.toFixed(4) : '';
       var y    = typeof box.y === 'number' ? box.y.toFixed(4) : '';
       var w    = typeof box.width === 'number' ? box.width.toFixed(4) : '';
@@ -719,6 +719,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
             if (!result[String(pageIdx)]) result[String(pageIdx)] = [];
             result[String(pageIdx)].push({
               label: 'textract:' + pii.substring(0, 30),
+              matchedText: pii,
               x: Math.max(0, minL - 0.005),
               y: minT,
               width: Math.min(1, (maxR - minL) + 0.01),
@@ -854,7 +855,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
 
     if (!result[String(_pgIdx4)]) result[String(_pgIdx4)] = [];
     result[String(_pgIdx4)].push({
-      label: 'addr-line:' + _lineTxt.substring(0, 40),
+      label: 'addr-line:', matchedText: _addrPhrase, + _lineTxt.substring(0, 40),
       x: Math.max(0, _lMinL - 0.005),
       y: _lMinT,
       width: Math.min(1, (_lMaxR - _lMinL) + 0.01),
@@ -1198,7 +1199,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
         if (DATE_VALUE_RE.test(_dvTok)) {
           if (!result[String(_dobIdx)]) result[String(_dobIdx)] = [];
           result[String(_dobIdx)].push({
-            label: 'dob-date',
+            label: 'dob-date', matchedText: _dv,
             x: Math.max(0, _dobLine[_dv].l - 0.004),
             y: _dobLine[_dv].tp,
             width: Math.min(1, _dobLine[_dv].w + 0.008),
@@ -1215,7 +1216,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
             var _s3B = Math.max.apply(null, _s3.map(function(w){ return w.tp + w.h; }));
             if (!result[String(_dobIdx)]) result[String(_dobIdx)] = [];
             result[String(_dobIdx)].push({
-              label: 'dob-date-multi',
+              label: 'dob-date-multi', matchedText: _dv,
               x: Math.max(0, _s3L - 0.004),
               y: _dobLine[_dv].tp,
               width: Math.min(1, _s3R - _s3L + 0.008),
