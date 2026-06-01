@@ -8,21 +8,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Dump redactCaseWorker logs
-        run: |
-          START=$(( $(date +%s) - 7200 ))000
-          echo "=== redactCaseWorker logs ==="
-          aws logs filter-log-events \
-            --log-group-name /aws/lambda/chartreview-pro-prod-redactCaseWorker \
-            --start-time $START \
-            --query "events[*].message" \
-            --output json \
-            --region us-east-1 2>&1 | python3 -c "
-import sys, json
-lines = json.load(sys.stdin)
-for l in lines:
-    print(l.strip())
-" | tail -300 || echo "FAILED"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
+        run: |
+          START=$(( $(date +%s) - 7200 ))000
+          aws logs filter-log-events \
+            --log-group-name /aws/lambda/chartreview-pro-prod-redactCaseWorker \
+            --start-time $START \
+            --query "events[*].message" \
+            --output json > /tmp/cw_logs.json 2>&1 || true
+          wc -c /tmp/cw_logs.json
+          cat /tmp/cw_logs.json | tr ',' '\n' | grep -v '^\[' | grep -v '^\]' | sed 's/^"//;s/"$//' | sed 's/\\n/\n/g' | tail -300
