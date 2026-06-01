@@ -855,7 +855,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
 
     if (!result[String(_pgIdx4)]) result[String(_pgIdx4)] = [];
     result[String(_pgIdx4)].push({
-      label: 'addr-line:', matchedText: _addrPhrase, + _lineTxt.substring(0, 40),
+      label: 'addr-line:' + _lineTxt.substring(0, 40), matchedText: _addrPhrase,
       x: Math.max(0, _lMinL - 0.005),
       y: _lMinT,
       width: Math.min(1, (_lMaxR - _lMinL) + 0.01),
