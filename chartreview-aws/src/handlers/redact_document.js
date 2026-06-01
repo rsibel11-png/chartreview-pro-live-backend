@@ -75,7 +75,7 @@ function buildRedactionLogCsv(filename, piiByPage, summary) {
   lines.push('Generated: ' + new Date().toISOString());
   lines.push('');
   // Column headers
-  lines.push('Page,Rule,Matched Text,X,Y,Width,Height');
+  lines.push('Page,Source,Rule,Matched Text,X,Y,Width,Height');
   // Detail rows
   var totalBoxes = 0;
   var ruleCounts = {};
@@ -85,13 +85,30 @@ function buildRedactionLogCsv(filename, piiByPage, summary) {
     var boxes = piiByPage[String(pg)] || [];
     for (var bi = 0; bi < boxes.length; bi++) {
       var box = boxes[bi];
-      var rule = (box.label || box.rule || 'unknown').replace(/,/g, ';');
-      var text = (box.label || '').replace(/^[^:]+:/, '').replace(/,/g, ';').replace(/\n/g, ' ');
-      var x    = typeof box.x === 'number' ? box.x.toFixed(4) : '';
-      var y    = typeof box.y === 'number' ? box.y.toFixed(4) : '';
-      var w    = typeof box.width === 'number' ? box.width.toFixed(4) : '';
-      var ht   = typeof box.height === 'number' ? box.height.toFixed(4) : '';
-      lines.push((pg+1) + ',' + rule + ',' + text + ',' + x + ',' + y + ',' + w + ',' + ht);
+      var _rawLabel = (box.label || box.rule || 'unknown');
+      var _source, _rule, _text;
+      if (_rawLabel.startsWith('textract|')) {
+        // new format: 'textract|source|matched-value'
+        var _parts = _rawLabel.split('|');
+        _source = (_parts[1] || 'extracted-text').replace(/,/g, ';');
+        _rule   = 'textract';
+        _text   = (_parts[2] || '').replace(/,/g, ';').replace(/\n/g, ' ');
+      } else if (_rawLabel.startsWith('textract:')) {
+        // legacy format: 'textract:matched-value'
+        _source = 'extracted-text';
+        _rule   = 'textract';
+        _text   = _rawLabel.replace(/^textract:/, '').replace(/,/g, ';');
+      } else {
+        // non-textract labels: handwriting, dob-date, addr-line:, patient_name_label_gap, etc.
+        _source = 'geometry';
+        _rule   = _rawLabel.split(':')[0].replace(/,/g, ';');
+        _text   = _rawLabel.indexOf(':') !== -1 ? _rawLabel.replace(/^[^:]+:/, '').replace(/,/g, ';') : '';
+      }
+      var x  = typeof box.x === 'number' ? box.x.toFixed(4) : '';
+      var y  = typeof box.y === 'number' ? box.y.toFixed(4) : '';
+      var w  = typeof box.width === 'number' ? box.width.toFixed(4) : '';
+      var ht = typeof box.height === 'number' ? box.height.toFixed(4) : '';
+      lines.push((pg+1) + ',' + _source + ',' + _rule + ',' + _text + ',' + x + ',' + y + ',' + w + ',' + ht);
       totalBoxes++;
       ruleCounts[rule] = (ruleCounts[rule] || 0) + 1;
     }
@@ -486,7 +503,8 @@ function normalizeForMatch(str) {
   return (str || '').toLowerCase().replace(/[\s\-,\.\(\)]/g, '');
 }
 
-function findBoxesFromBlocks(wordBlocks, piiValues) {
+function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
+  // piiSourceMap: { normalizedValue -> source } — used to stamp audit label on each box
   // Build a map of page -> list of word blocks
   var pageMap = {};
   for (var i = 0; i < wordBlocks.length; i++) {
@@ -716,7 +734,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues) {
             var maxB = Math.max.apply(null, slice.map(function(w) { return w.tp + w.h; }));
             if (!result[String(pageIdx)]) result[String(pageIdx)] = [];
             result[String(pageIdx)].push({
-              label: 'textract:' + pii.substring(0, 30),
+              label: 'textract|' + (piiSourceMap && piiSourceMap[piiNorm] ? piiSourceMap[piiNorm] : 'extracted') + '|' + pii.substring(0, 40),
               x: Math.max(0, minL - 0.005),
               y: minT,
               width: Math.min(1, (maxR - minL) + 0.01),
@@ -1677,6 +1695,13 @@ module.exports.redactDocumentWorker = async function(event) {
       .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }))
       .concat(_folderPiiExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }))
       .concat(_3partExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }));
+    // Build source map: normalizedValue -> source label for CSV audit trail
+    var piiSourceMap = {};
+    knownPiiValuesBase.forEach(function(v) { if (v) piiSourceMap[normalizeForMatch(v)] = 'extracted-text'; });
+    discoveredAddrTokens.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'addr-discovery'; });
+    userPiiExpanded.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'user-supplied'; });
+    _folderPiiExtras.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'folder-pii'; });
+    _3partExtras.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'name-expansion'; });
     console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
@@ -1740,7 +1765,7 @@ module.exports.redactDocumentWorker = async function(event) {
       if (facilityStreetNums.has(trimmed)) return false;
       return true;
     });
-    allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues);
+    allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
       var textractCount = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
       console.log('[REDACT] Textract path found ' + textractCount + ' box(es) across ' + Object.keys(allPii).length + ' page(s)');
 
@@ -1955,6 +1980,11 @@ module.exports.redactCaseWorker = async function(event) {
       var knownPiiValues = knownPiiValuesBase
         .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
         .concat(caseUserPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
+      // Build source map for CSV audit trail
+      var piiSourceMap = {};
+      knownPiiValuesBase.forEach(function(v) { if (v) piiSourceMap[normalizeForMatch(v)] = 'extracted-text'; });
+      discoveredAddrTokens.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'addr-discovery'; });
+      caseUserPiiExpanded.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'user-supplied'; });
       console.log('[ADDR] Added ' + discoveredAddrTokens.length + ' addr + ' + caseDocUserPii.length + ' user-supplied tokens to PII set');
       var wordBlocks     = await loadTextractBlocks(fileKey);
       var allPii         = {};
@@ -1987,7 +2017,7 @@ module.exports.redactCaseWorker = async function(event) {
       });
 
       if (wordBlocks && wordBlocks.length > 0) {
-        allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues);
+        allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
       } else {
         var masterDocV = await PDFDocument.load(pdfBytes);
         var totalPagesV = masterDocV.getPageCount();
