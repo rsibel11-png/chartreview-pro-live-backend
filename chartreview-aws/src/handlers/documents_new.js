@@ -168,6 +168,16 @@ const getDownloadUrlHandler = async (event) => {
     if (!result.Item) return response(404, { error: 'Document not found' });
     if (result.Item.org_id && result.Item.org_id !== orgId) return response(403, { error: 'Access denied' });
 
+    // Allow explicit key override for CSV/log downloads (must belong to same org path)
+    const overrideKey = event.queryStringParameters && event.queryStringParameters.key;
+    if (overrideKey) {
+      // Security: key must start with orgs/{orgId}/ to prevent access to other orgs
+      if (!overrideKey.startsWith(`orgs/${orgId}/`)) return response(403, { error: 'Access denied' });
+      const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: overrideKey });
+      const download_url = await getSignedUrl(s3, cmd, { expiresIn: 3600 });
+      return response(200, { download_url });
+    }
+
     let fileKey = result.Item.file_key;
 
     // If no file_key at all, try GSI to find a part
