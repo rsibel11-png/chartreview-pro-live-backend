@@ -152,8 +152,6 @@ function extractKnownPiiValues(extractedText) {
     // Patient name — explicit label on same line
     /^(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+)$/mg,
     // Certification / lien / legal doc inline references
-    /[Rr]ecords\s+(?:pertaining\s+to|of|for)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]{3,40})/g,
-    /[Rr]egarding\s+([A-Za-z][A-Za-z\-,'\. ]{3,40})/g,
     /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
     /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi,
