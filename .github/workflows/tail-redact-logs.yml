@@ -7,15 +7,34 @@ jobs:
   tail:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch last 90 min of redactDocumentWorker logs
+      - name: List matching log groups
         run: |
-          START=$(( $(date +%s) - 5400 ))000
+          echo "=== Log groups matching redact ==="
+          aws logs describe-log-groups --log-group-name-prefix /aws/lambda/chartreview-pro-prod-redact --query "logGroups[*].logGroupName" --output text --region us-east-1 2>&1
+          echo ""
+          echo "=== ALL chartreview Lambda log groups ==="
+          aws logs describe-log-groups --log-group-name-prefix /aws/lambda/chartreview-pro-prod --query "logGroups[*].logGroupName" --output text --region us-east-1 2>&1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Dump recent redactDocumentWorker logs (no filter)
+        run: |
+          START=$(( $(date +%s) - 7200 ))000
+          echo "=== redactDocumentWorker raw logs ==="
           aws logs filter-log-events \
             --log-group-name /aws/lambda/chartreview-pro-prod-redactDocumentWorker \
             --start-time $START \
-            --query "events[*].message" \
             --output text \
-            --region us-east-1 2>&1 | tail -200
+            --region us-east-1 2>&1 | tail -300 || echo "FAILED or empty"
+          echo ""
+          echo "=== redactDocumentStart raw logs ==="
+          aws logs filter-log-events \
+            --log-group-name /aws/lambda/chartreview-pro-prod-redactDocumentStart \
+            --start-time $START \
+            --output text \
+            --region us-east-1 2>&1 | tail -100 || echo "FAILED or empty"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
