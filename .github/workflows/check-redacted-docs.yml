@@ -1,0 +1,32 @@
+name: Check Redacted Docs DynamoDB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query recent redacted docs
+        run: |
+          aws dynamodb scan \
+            --table-name chartreview-documents-prod \
+            --filter-expression "is_redacted = :t" \
+            --expression-attribute-values '{":t":{"BOOL":true}}' \
+            --projection-expression "aws_document_id, original_filename, redaction_log_key, redaction_log_url, created_at, folder_name" \
+            --region us-east-1 \
+            --output json | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = sorted(data.get('Items',[]), key=lambda x: x.get('created_at',{}).get('S',''), reverse=True)
+for item in items[:10]:
+  fn = item.get('original_filename',{}).get('S','?')
+  lk = item.get('redaction_log_key',{}).get('S','NO LOG KEY')
+  ca = item.get('created_at',{}).get('S','?')
+  fn2 = item.get('folder_name',{}).get('S','?')
+  print(f'{ca[:19]} | {fn2:20} | {fn:40} | {lk}')
+"
+        env:
+          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
