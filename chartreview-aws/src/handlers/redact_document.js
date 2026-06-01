@@ -1763,9 +1763,9 @@ module.exports.redactDocumentWorker = async function(event) {
       var _mrnM = (extractedText || '').match(/MRN[:\s]+([A-Z0-9]+)/i);
       if (_dobM) _piiSummary.dob = _dobM[1];
       if (_mrnM) _piiSummary.mrn = _mrnM[1];
-      var _logBytes = await buildRedactionLogDocx(origFilename, piiByPage, _piiSummary);
-      var _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.docx']).join('/');
-      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBytes, ContentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+      var _logBytes = await buildRedactionLogCsv(origFilename, allPii, _piiSummary);
+      var _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.csv']).join('/');
+      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBytes, ContentType: 'text/csv' }));
       var _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
       console.log('[REDACTION-LOG] DOCX uploaded to', _logKey);
     } catch (_logErr) {
