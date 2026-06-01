@@ -2005,9 +2005,9 @@ module.exports.redactCaseWorker = async function(event) {
     var _caseLogKey = null; var _caseLogUrl = null;
     try {
       var _casePiiSummary = {
-        patientName: (folderPii && folderPii.patient_name) || folder_name || '',
-        dob:         (folderPii && folderPii.dob)          || '',
-        mrn:         (folderPii && folderPii.mrn)          || '',
+        patientName: folder_name || '',
+        dob:         '',
+        mrn:         '',
         folder:      folder_name || '',
       };
       var _caseLogBytes = buildRedactionLogCsv(mergedName, mergedPiiByPage, _casePiiSummary);
@@ -2035,6 +2035,8 @@ module.exports.redactCaseWorker = async function(event) {
         redacted_from:     original_document_id || doc_records.map(function(d) { return d.aws_document_id; }).join(','),
         redaction_count:   totalRedactions,
         redacted_pages:    totalPages,
+        redaction_log_key: _caseLogKey  || null,
+        redaction_log_url: _caseLogUrl  || null,
         status:            'processed',
         is_clinical:       false,
         created_at:        new Date().toISOString(),
