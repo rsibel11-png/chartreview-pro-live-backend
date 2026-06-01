@@ -62,6 +62,52 @@ async function updateJob(job_id, patch) {
   }));
 }
 
+// ── Redaction log CSV builder ─────────────────────────────────────────────────
+function buildRedactionLogCsv(filename, piiByPage, summary) {
+  var lines = [];
+  // Header
+  lines.push('ChartReview Pro — Redaction Log');
+  lines.push('File: ' + (filename || ''));
+  lines.push('Patient: ' + (summary && summary.patientName || ''));
+  lines.push('DOB: ' + (summary && summary.dob || ''));
+  lines.push('MRN: ' + (summary && summary.mrn || ''));
+  lines.push('Folder: ' + (summary && summary.folder || ''));
+  lines.push('Generated: ' + new Date().toISOString());
+  lines.push('');
+  // Column headers
+  lines.push('Page,Rule,Matched Text,X,Y,Width,Height');
+  // Detail rows
+  var totalBoxes = 0;
+  var ruleCounts = {};
+  var pages = Object.keys(piiByPage || {}).map(Number).sort(function(a,b){return a-b;});
+  for (var pi = 0; pi < pages.length; pi++) {
+    var pg = pages[pi];
+    var boxes = piiByPage[String(pg)] || [];
+    for (var bi = 0; bi < boxes.length; bi++) {
+      var box = boxes[bi];
+      var rule = (box.rule || 'unknown').replace(/,/g, ';');
+      var text = ((box.text || box.matchedText || '')).replace(/,/g, ';').replace(/\n/g, ' ');
+      var x    = typeof box.x === 'number' ? box.x.toFixed(4) : '';
+      var y    = typeof box.y === 'number' ? box.y.toFixed(4) : '';
+      var w    = typeof box.width === 'number' ? box.width.toFixed(4) : '';
+      var ht   = typeof box.height === 'number' ? box.height.toFixed(4) : '';
+      lines.push((pg+1) + ',' + rule + ',' + text + ',' + x + ',' + y + ',' + w + ',' + ht);
+      totalBoxes++;
+      ruleCounts[rule] = (ruleCounts[rule] || 0) + 1;
+    }
+  }
+  // Summary
+  lines.push('');
+  lines.push('Summary');
+  lines.push('Total Redactions,' + totalBoxes);
+  lines.push('Pages Affected,' + pages.length);
+  var ruleNames = Object.keys(ruleCounts);
+  for (var ri = 0; ri < ruleNames.length; ri++) {
+    lines.push(ruleNames[ri] + ',' + ruleCounts[ruleNames[ri]]);
+  }
+  return Buffer.from(lines.join('\r\n'), 'utf8');
+}
+
 // ── STEP 1: Regex scan — extract all known PII values from stored text ────────
 
 // ── DOB variant expansion (module-scope so all workers can use it) ────────────
@@ -1763,7 +1809,7 @@ module.exports.redactDocumentWorker = async function(event) {
       var _mrnM = (extractedText || '').match(/MRN[:\s]+([A-Z0-9]+)/i);
       if (_dobM) _piiSummary.dob = _dobM[1];
       if (_mrnM) _piiSummary.mrn = _mrnM[1];
-      var _logBytes = await buildRedactionLogCsv(origFilename, allPii, _piiSummary);
+      var _logBytes = buildRedactionLogCsv(origFilename, allPii, _piiSummary);
       var _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.csv']).join('/');
       await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBytes, ContentType: 'text/csv' }));
       var _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
