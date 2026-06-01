@@ -1803,6 +1803,7 @@ module.exports.redactDocumentWorker = async function(event) {
     }));
 
     // ── Generate + upload redaction log DOCX ──────────────────────────────────
+    var _logKey = null; var _logUrl = null;
     try {
       var _piiSummary = { patientName: knownPiiValues[0] || '', dob: '', mrn: '', folder: doc.folder_name || '' };
       // Try to pull DOB and MRN from extractedText
@@ -1810,14 +1811,16 @@ module.exports.redactDocumentWorker = async function(event) {
       var _mrnM = (extractedText || '').match(/MRN[:\s]+([A-Z0-9]+)/i);
       if (_dobM) _piiSummary.dob = _dobM[1];
       if (_mrnM) _piiSummary.mrn = _mrnM[1];
+      var _allPiiPageCount = Object.keys(allPii || {}).length;
+      var _allPiiBoxCount  = Object.values(allPii || {}).reduce(function(s,b){return s+(b?b.length:0);},0);
+      console.log('[REDACTION-LOG] Single-doc CSV: pages=' + _allPiiPageCount + ' boxes=' + _allPiiBoxCount + ' file=' + origFilename);
       var _logBytes = buildRedactionLogCsv(origFilename, allPii, _piiSummary);
-      var _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.csv']).join('/');
+      _logKey   = keyParts.concat([baseName + '_REDACTION_LOG.csv']).join('/');
       await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _logKey, Body: _logBytes, ContentType: 'text/csv' }));
-      var _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
-      console.log('[REDACTION-LOG] DOCX uploaded to', _logKey);
+      _logUrl   = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _logKey }), { expiresIn: 604800 });
+      console.log('[REDACTION-LOG] CSV uploaded to', _logKey);
     } catch (_logErr) {
-      console.warn('[REDACTION-LOG] Failed to generate log DOCX:', _logErr.message);
-      var _logKey = null; var _logUrl = null;
+      console.error('[REDACTION-LOG] Failed to generate log CSV:', _logErr.message, _logErr.stack);
     }
     // ── End redaction log ──────────────────────────────────────────────────────
 
