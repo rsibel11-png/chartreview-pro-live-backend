@@ -15,24 +15,27 @@ on:
 jobs:
   backfill:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: chartreview-aws
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install deps
-        run: npm ci --omit=dev
-      - name: Run backfill
+      - name: Scan redacted docs for log key
         run: |
-          node src/backfill_pii.js
+          aws dynamodb scan \
+            --table-name chartreview-documents-prod \
+            --filter-expression "is_redacted = :t" \
+            --expression-attribute-values '{":t":{"BOOL":true}}' \
+            --projection-expression "aws_document_id,original_filename,redaction_log_key,created_at,folder_name" \
+            --region us-east-1 \
+            --output json | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items=sorted(data.get('Items',[]),key=lambda x:x.get('created_at',{}).get('S',''),reverse=True)
+for item in items[:20]:
+    fn=item.get('original_filename',{}).get('S','?')
+    lk=item.get('redaction_log_key',{}).get('S','NO_LOG_KEY')
+    ca=item.get('created_at',{}).get('S','?')[:19]
+    fo=item.get('folder_name',{}).get('S','?')
+    print(f'{ca} | {fo[:20]:20} | {fn[:42]:42} | {lk}')
+"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
-          ORG_ID: ${{ github.event.inputs.org_id }}
-          FOLDER_NAME: ${{ github.event.inputs.folder }}
