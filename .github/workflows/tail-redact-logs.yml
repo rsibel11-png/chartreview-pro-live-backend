@@ -1,4 +1,4 @@
-name: Tail Redact Worker Logs
+name: Tail Summary Worker Logs
 
 on:
   workflow_dispatch:
@@ -7,17 +7,23 @@ jobs:
   tail:
     runs-on: ubuntu-latest
     steps:
-      - name: Dump redactCaseWorker logs
+      - name: Dump generateSummaryWorker logs
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
         run: |
-          START=$(( $(date +%s) - 7200 ))000
+          START=$(( $(date +%s) - 3600 ))000
+          echo "=== generateSummaryWorker (coordinator) ==="
           aws logs filter-log-events \
-            --log-group-name /aws/lambda/chartreview-pro-prod-redactCaseWorker \
+            --log-group-name /aws/lambda/chartreview-pro-prod-generateSummaryWorker \
             --start-time $START \
             --query "events[*].message" \
-            --output json > /tmp/cw_logs.json 2>&1 || true
-          wc -c /tmp/cw_logs.json
-          cat /tmp/cw_logs.json | tr ',' '\n' | grep -v '^\[' | grep -v '^\]' | sed 's/^"//;s/"$//' | sed 's/\\n/\n/g' | tail -300
+            --output json 2>&1 | tr '[' '\n' | tr ']' '\n' | sed 's/^"//;s/"$//' | sed 's/\\n/\n/g' | grep -v "^$" | tail -200
+          echo ""
+          echo "=== generateSummaryChunkWorker ==="
+          aws logs filter-log-events \
+            --log-group-name /aws/lambda/chartreview-pro-prod-generateSummaryChunkWorker \
+            --start-time $START \
+            --query "events[*].message" \
+            --output json 2>&1 | tr '[' '\n' | tr ']' '\n' | sed 's/^"//;s/"$//' | sed 's/\\n/\n/g' | grep -v "^$" | tail -200
