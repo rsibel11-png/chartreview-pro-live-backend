@@ -326,6 +326,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Update generateSummary env vars
+        run: |
+          for fn in \
+            chartreview-pro-prod-generateSummaryWorker \
+            chartreview-pro-prod-generateSummaryChunkWorker \
+            chartreview-pro-prod-generateSummaryStart \
+            chartreview-pro-prod-verifySummaryWorker; do
+            aws lambda update-function-configuration \
+              --function-name $fn \
+              --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,SUMMARIES_TABLE=chartreview-summaries-prod,JOBS_TABLE=chartreview-jobs-prod,BEDROCK_USAGE_TABLE=chartreview-bedrock-usage,GENERATE_CHUNK_WORKER_FUNCTION_NAME=chartreview-pro-prod-generateSummaryChunkWorker,VERIFY_WORKER_FUNCTION_NAME=chartreview-pro-prod-verifySummaryWorker,VI_WORKER_FUNCTION_NAME=chartreview-pro-prod-buildVisitIndexWorker,GENERATE_WORKER_FUNCTION_NAME=chartreview-pro-prod-generateSummaryWorker}" \
+              --region us-east-1 || echo "WARNING: failed to update $fn env vars"
+          done
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Update redactDocumentStart env vars
         run: |
           aws lambda update-function-configuration             --function-name chartreview-pro-prod-redactDocumentStart             --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,REDACT_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactDocumentWorker,REDACT_CASE_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactCaseWorker,MODEL_ID=us.anthropic.claude-sonnet-4-6}"             --region us-east-1
