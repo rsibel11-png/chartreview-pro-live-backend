@@ -851,7 +851,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
       for (var start = 0; start < pageWords.length; start++) {
         for (var len = 1; len <= 8 && start + len <= pageWords.length; len++) {
           var slice = pageWords.slice(start, start + len);
-          var rawConcat = slice.map(function(w) { return w.t; }).join(''); var concat = normalizeForMatch(rawConcat);
+          // Strip Epic EHR superscript annotations like [JS.1T], [WC.2M], [JS.2T] from token text
+          // before matching — these are embedded in Textract output and break PII matches.
+          var rawConcat = slice.map(function(w) { return (w.t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, ''); }).join(''); var concat = normalizeForMatch(rawConcat);
           if (piiNorm.length > 0 && concat === piiNorm) {
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
@@ -1092,18 +1094,17 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
               height: 0.15,
             });
           } else {
-            // Box covers both ABOVE the label and the line itself.
-            // On digital forms, the signature is above the label — on scanned forms it's
-            // ON the line (same Y). We cover both by extending 0.05 below labelBottom too.
-            var boxHeight = Math.max(0.05, labelH * 6.0);
+            // Box goes ABOVE the label — signature content sits above the line on both
+            // digital and scanned forms. Use at least 0.10 page height to cover the full
+            // cursive stroke (Textract label height on scans can be ~0.008, making 6x only 0.048).
+            var boxHeight = Math.max(0.10, labelH * 8.0);
             var boxTop = Math.max(0, labelTop - boxHeight);
-            var boxBottom = Math.min(1, labelBottom + 0.05); // cover signature ON the line
             result[String(pageIdx2)].push({
               label: 'sig:' + sigConcat.substring(0, 30),
               x: Math.max(0, labelLeft - 0.01),
               y: boxTop,
               width: Math.min(1, 0.92 - labelLeft + 0.01),
-              height: boxBottom - boxTop,
+              height: labelTop - boxTop,
             });
           }
           break; // don't double-match longer slices for same start word
