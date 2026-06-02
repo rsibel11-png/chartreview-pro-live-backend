@@ -1069,7 +1069,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
           var labelBottom = Math.max.apply(null, sigSlice.map(function(w) { return w.tp + w.h; }));
 
           // Skip sig labels in the top 10% of page — those are document headers, not form fields
-          if (labelTop < 0.10) continue;
+          if (labelTop < 0.10) continue; // skip header zone
           if (!result[String(pageIdx2)]) result[String(pageIdx2)] = [];
           if (isAddressField) {
             // Box goes BELOW the label: from bottom of label down 0.15 page
