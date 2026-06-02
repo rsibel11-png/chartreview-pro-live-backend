@@ -191,7 +191,7 @@ const slicePdfPages = async (fileKey, pages) => {
   }
 
   const newDoc = await PDFDocument.create();
-  const copied = await newDoc.copyPagesFrom(srcDoc, indices);
+  const copied = await newDoc.copyPages(srcDoc, indices);
   copied.forEach(page => newDoc.addPage(page));
 
   const slicedBytes = await newDoc.save();
@@ -1865,11 +1865,11 @@ For each encounter return:
 INCLUDE: ED notes, consultation reports, operative reports, radiology reports, office visits, H&P notes, discharge summaries, C-4/Workers Comp forms.
 EXCLUDE: nursing flowsheets, MAR, anesthesia records, coding summaries, consent forms, lab printouts, appointment reminders, PPRs, PACU records, pre-op checklists.`;
 
-const callBedrockVI = async (fileKey) => {
+const callBedrockVI = async (fileKey, regionOrder) => {
   const pdfBytes = await fetchPdfBytes(fileKey);
   const b64 = pdfBytes.toString('base64');
 
-  const client = getBedrockClient();
+  const orderedRegions = regionOrder || await getRegionOrder();
   const body = JSON.stringify({
     anthropic_version: 'bedrock-2023-05-31',
     max_tokens: 4096,
@@ -1889,15 +1889,25 @@ const callBedrockVI = async (fileKey) => {
     }],
   });
 
-  const resp = await client.send(new InvokeModelCommand({
-    modelId:     MODEL_ID,
-    contentType: 'application/json',
-    accept:      'application/json',
-    body,
-  }));
-  const parsed = JSON.parse(Buffer.from(resp.body).toString());
-  const toolUse = parsed.content && parsed.content.find(b => b.type === 'tool_use');
-  return toolUse ? toolUse.input : { visits: [] };
+  for (const { region, models } of orderedRegions) {
+    for (const modelId of models) {
+      try {
+        const client = getBedrockClient(region);
+        const resp = await client.send(new InvokeModelCommand({
+          modelId,
+          contentType: 'application/json',
+          accept:      'application/json',
+          body,
+        }));
+        const parsed = JSON.parse(Buffer.from(resp.body).toString());
+        const toolUse = parsed.content && parsed.content.find(b => b.type === 'tool_use');
+        return toolUse ? toolUse.input : { visits: [] };
+      } catch (err) {
+        console.warn(`callBedrockVI: region=${region} model=${modelId} failed — ${err.message}`);
+      }
+    }
+  }
+  throw new Error('callBedrockVI: all regions/models exhausted');
 };
 
 // ── SERVICE DT regex correction ───────────────────────────────────────────────
