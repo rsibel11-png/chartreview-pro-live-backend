@@ -1018,9 +1018,8 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
     'physiciansignature', 'providersignature',
     'employeesorguardiansignature',
     // C-4 / structured form field labels (value written in box above label)
-    'firstname', 'lastname', 'middleinitial',
+    // NOTE: firstname/lastname/middleinitial/birthdate/dateofbirth removed — captured by dedicated passes
     'firstnamemi', 'firstnamemilastname',
-    'birthdate', 'dateofbirth',
     'homeaddress', 'homeaddressnumberandstreet',
     'employeesname', 'employeename',
     'claimantsname', 'claimantname',
