@@ -75,7 +75,7 @@ function buildRedactionLogCsv(filename, piiByPage, summary) {
   lines.push('Generated: ' + new Date().toISOString());
   lines.push('');
   // Column headers
-  lines.push('Page,Source,Rule,Matched Text,X,Y,Width,Height');
+  lines.push('Page,Rule,Matched Text,X,Y,Width,Height');
   // Detail rows
   var totalBoxes = 0;
   var ruleCounts = {};
@@ -86,29 +86,26 @@ function buildRedactionLogCsv(filename, piiByPage, summary) {
     for (var bi = 0; bi < boxes.length; bi++) {
       var box = boxes[bi];
       var _rawLabel = (box.label || box.rule || 'unknown');
-      var _source, _rule, _text;
+      var _rule, _text;
       if (_rawLabel.startsWith('textract|')) {
-        // new format: 'textract|source|matched-value'
+        // format: 'textract|rule-name|matched-text'  e.g. 'textract|patient-name|Kimberly'
         var _parts = _rawLabel.split('|');
-        _source = (_parts[1] || 'extracted-text').replace(/,/g, ';');
-        _rule   = 'textract';
-        _text   = (_parts[2] || '').replace(/,/g, ';').replace(/\n/g, ' ');
+        _rule = (_parts[1] || 'textract-match').replace(/,/g, ';');
+        _text = (_parts[2] || '').replace(/,/g, ';').replace(/\n/g, ' ');
       } else if (_rawLabel.startsWith('textract:')) {
-        // legacy format: 'textract:matched-value'
-        _source = 'extracted-text';
-        _rule   = 'textract';
-        _text   = _rawLabel.replace(/^textract:/, '').replace(/,/g, ';');
+        // legacy format: 'textract:matched-value' (no rule name available)
+        _rule = 'textract-match';
+        _text = _rawLabel.replace(/^textract:/, '').replace(/,/g, ';');
       } else {
-        // non-textract labels: handwriting, dob-date, addr-line:, patient_name_label_gap, etc.
-        _source = 'geometry';
-        _rule   = _rawLabel.split(':')[0].replace(/,/g, ';');
-        _text   = _rawLabel.indexOf(':') !== -1 ? _rawLabel.replace(/^[^:]+:/, '').replace(/,/g, ';') : '';
+        // geometry rules: handwriting, dob-date, addr-line:VALUE, patient_name_label_gap, phone, etc.
+        _rule = _rawLabel.split(':')[0].replace(/,/g, ';');
+        _text = _rawLabel.indexOf(':') !== -1 ? _rawLabel.replace(/^[^:]+:/, '').replace(/,/g, ';') : '';
       }
       var x  = typeof box.x === 'number' ? box.x.toFixed(4) : '';
       var y  = typeof box.y === 'number' ? box.y.toFixed(4) : '';
       var w  = typeof box.width === 'number' ? box.width.toFixed(4) : '';
       var ht = typeof box.height === 'number' ? box.height.toFixed(4) : '';
-      lines.push((pg+1) + ',' + _source + ',' + _rule + ',' + _text + ',' + x + ',' + y + ',' + w + ',' + ht);
+      lines.push((pg+1) + ',' + _rule + ',' + _text + ',' + x + ',' + y + ',' + w + ',' + ht);
       totalBoxes++;
       ruleCounts[_rule] = (ruleCounts[_rule] || 0) + 1;
     }
@@ -329,6 +326,86 @@ function extractKnownPiiValues(extractedText) {
     }
   });
   return Array.from(expanded);
+}
+
+
+// ── extractKnownPiiValuesTagged: same as extractKnownPiiValues but returns
+// [{value, rule}] so the CSV can show exactly which rule triggered each redaction.
+function extractKnownPiiValuesTagged(extractedText) {
+  if (!extractedText || typeof extractedText !== 'string') return [];
+  var tagged = [];
+  var seen = new Set();
+
+  var namedPatterns = [
+    { name: 'patient-name',        rx: /^(?:PATIENT|Patient)\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+)$/mg },
+    { name: 'patient-name',        rx: /^(?:PATIENT(?:'S)?\s*NAME?|PT\.?\s*NAME)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi },
+    { name: 'patient-name',        rx: /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi },
+    { name: 'patient-name',        rx: /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi },
+    { name: 'patient-name',        rx: /Patient['\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]+)/gi },
+    { name: 'full-name-header',    rx: /([A-Za-z][A-Za-z'\-\.]{2,},\s+[A-Za-z][A-Za-z'\-\.]{2,}\s+[A-Za-z][A-Za-z'\-\.]{2,})(?=\s*(?:MRN|DOB|Legal|\d))/mgi },
+    { name: 'dob',                 rx: /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date|Date\s*of\s*Birth)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi },
+    { name: 'dob',                 rx: /\bBirthdate\s*[:\|]?\s*-?([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi },
+    { name: 'ssn',                 rx: /(\d{3}-\d{2}-\d{4})/g },
+    { name: 'ssn',                 rx: /(?:SSN|S\.S\.N\.|SOCIAL\s*SECURITY)\s*[:\|]?\s*(\d{9})/gi },
+    { name: 'mrn',                 rx: /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|]|PRN\s*[:\|]?|Patient\s*Record\s*(?:No\.?|#)|Record\s*(?:No\.?|#))\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
+    { name: 'drivers-license',     rx: /(?:DL\s*(?:NO\.?|#|NUMBER)|LICENSE\s*(?:NO\.?|#|NUMBER)|DRIVERS?\s*(?:LIC(?:ENSE)?)?\s*(?:NO\.?|#)?|4[dD]\s*DL\s*NO\.?)\s*[:\|]?\s*([A-Z0-9]+)/gi },
+    { name: 'drivers-license-dd',  rx: /\b(?:5\s*DD|DD)\s+([0-9A-Z]{10,})/gi },
+    { name: 'encounter-id',        rx: /(?:MARKET\s*URN|VISIT\s*(?:NO\.?|#|ID)|ENCOUNTER\s*(?:NO\.?|#|ID)|URN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
+    { name: 'account-no',          rx: /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct\s*#|ACCOUNT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
+    { name: 'unit-no',             rx: /(?:UNIT\s*(?:NO\.?|NUMBER|#)|Unit\s*(?:No\.?|#)|Unit\s*#|UNIT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
+    { name: 'episode-id',          rx: /(?:Episode\s*ID|FIN#?)\s*[:\|]\s*([A-Z0-9\-]+)/gi },
+    { name: 'insurance-id',        rx: /(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#|Member\s*ID#?)\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
+    { name: 'phone',               rx: /(?:PHONE#?|CELL|MOBILE|TEL(?:EPHONE)?|Home\s*Phone|Work\s*Phone|Patient\s*[Pp]hone|Patient\s*PH|Phone\s*Number|Phone\s*#|PH\s*#?|Fax)\s*[:\|]?\s*([\d\(\)\-\.\s]{10,})/gi },
+    { name: 'phone',               rx: /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g },
+    { name: 'phone',               rx: /\b(\d{3}-\d{3}-\d{4})\b/g },
+    { name: 'address',             rx: /\b(?:HOME\s*)?ADDRESS\s*[:|]\s*(.+)/gi },
+    { name: 'address',             rx: /\bStreet\s*[:|]\s*(.+)/gi },
+    { name: 'address-city',        rx: /\bCity\s*[:|]\s*([A-Za-z][A-Za-z\s]+)/gi },
+    { name: 'address-zip',         rx: /\bState\s*[\/\\]?\s*Zip\s*[:|]\s*(.+)/gi },
+    { name: 'spouse-name',         rx: /(?:Spouse|SPOUSE)\s*[:\|]\s*(.+)/gi },
+    { name: 'next-of-kin',         rx: /(?:Next\s*of\s*Kin|NOK)\s*[:\|]\s*(.+)/gi },
+    { name: 'patient-name',        rx: /(?:First\s*Name|Last\s*Name)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]{1,30})(?![\s\|]*(?:MI|Middle|Last|First|Birth|Claim|Sex))/gi },
+    { name: 'guardian-name',       rx: /(?:Guardian\s*Name|GUARDIAN)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]+)/gi },
+    { name: 'emergency-contact',   rx: /(?:Emergency\s*Contact|EMERGENCY\s*CONTACT)\s*[:\|]?\s*([A-Za-z][A-Za-z\-,'\. ]+)/gi },
+    { name: 'poa-name',            rx: /(?:POA|Power\s*of\s*Attorney)\s*[:\|]\s*(.+)/gi },
+    { name: 'guarantor-name',      rx: /(?:Responsible\s*Party|Guarantor)\s*[:\|]\s*(.+)/gi },
+    { name: 'patient-name-footer', rx: /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]+?)(?:\s+#[:\|]?\s*([A-Z0-9\-]+))?\s*$/mgi },
+    { name: 'patient-name-footer', rx: /PATIENT\s*NAME\s*[:\|]\s*([A-Z][A-Z\-,'\. ]{3,})/mgi },
+    { name: 'family-member-name',  rx: /(?:spouse|husband|wife|son|daughter|child|parent|mother|father|brother|sister|sibling|next\s*of\s*kin|medical\s*poa|power\s*of\s*attorney)\s*\(([A-Za-z][A-Za-z\-,'\. \s]{2,40})\)/gi },
+    { name: 'email',               rx: /(?:EMAIL|E-MAIL)\s*[:\|]\s*([\w\.\+\-]+@[\w\-]+\.[\w\.]+)/gi },
+  ];
+
+  namedPatterns.forEach(function(def) {
+    def.rx.lastIndex = 0;
+    var match;
+    while ((match = def.rx.exec(extractedText)) !== null) {
+      var groups = [];
+      for (var g = 1; g < match.length; g++) { if (match[g]) groups.push(match[g].trim()); }
+      if (groups.length === 2 && /^\d{3}$/.test(groups[0]) && /^\d{3}[-\s]\d{4}$/.test(groups[1])) {
+        groups = ['(' + groups[0] + ') ' + groups[1]];
+      }
+      groups.forEach(function(val) {
+        if (!val || val.length < 2) return;
+        var norm = val.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!seen.has(norm)) {
+          seen.add(norm);
+          tagged.push({ value: val, rule: def.name });
+          // Also tag expanded tokens (split on hyphen, comma)
+          if (val.indexOf('-') !== -1) {
+            val.split('-').forEach(function(p) {
+              var t = p.trim(); if (t.length >= 3) { var tn = t.toLowerCase().replace(/[^a-z0-9]/g,''); if (!seen.has(tn)) { seen.add(tn); tagged.push({ value: t, rule: def.name + '-token' }); } }
+            });
+          }
+          if (val.indexOf(',') !== -1) {
+            val.split(',').forEach(function(p) {
+              var t = p.trim().split(' ')[0]; if (t.length >= 3) { var tn = t.toLowerCase().replace(/[^a-z0-9]/g,''); if (!seen.has(tn)) { seen.add(tn); tagged.push({ value: t, rule: def.name + '-token' }); } }
+            });
+          }
+        }
+      });
+    }
+  });
+  return tagged;
 }
 
 
@@ -1695,9 +1772,10 @@ module.exports.redactDocumentWorker = async function(event) {
       .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }))
       .concat(_folderPiiExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }))
       .concat(_3partExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }));
-    // Build source map: normalizedValue -> source label for CSV audit trail
+    // Build source map: normalizedValue -> specific rule name for CSV audit trail
     var piiSourceMap = {};
-    knownPiiValuesBase.forEach(function(v) { if (v) piiSourceMap[normalizeForMatch(v)] = 'extracted-text'; });
+    var _taggedPii = extractKnownPiiValuesTagged(extractedText || '');
+    _taggedPii.forEach(function(t) { if (t.value) piiSourceMap[normalizeForMatch(t.value)] = t.rule; });
     discoveredAddrTokens.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'addr-discovery'; });
     userPiiExpanded.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'user-supplied'; });
     _folderPiiExtras.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'folder-pii'; });
@@ -1980,9 +2058,10 @@ module.exports.redactCaseWorker = async function(event) {
       var knownPiiValues = knownPiiValuesBase
         .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
         .concat(caseUserPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
-      // Build source map for CSV audit trail
+      // Build source map for CSV audit trail — uses tagged rules for specificity
       var piiSourceMap = {};
-      knownPiiValuesBase.forEach(function(v) { if (v) piiSourceMap[normalizeForMatch(v)] = 'extracted-text'; });
+      var _caseTaggedPii = extractKnownPiiValuesTagged(extractedText || '');
+      _caseTaggedPii.forEach(function(t) { if (t.value) piiSourceMap[normalizeForMatch(t.value)] = t.rule; });
       discoveredAddrTokens.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'addr-discovery'; });
       caseUserPiiExpanded.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'user-supplied'; });
       console.log('[ADDR] Added ' + discoveredAddrTokens.length + ' addr + ' + caseDocUserPii.length + ' user-supplied tokens to PII set');
