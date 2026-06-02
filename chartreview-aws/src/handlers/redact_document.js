@@ -710,10 +710,14 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
         var pgIdx2 = parseInt(pgNum, 10) - 1;
         if (!result[pgIdx2]) result[pgIdx2] = [];
         var pad = 0.005;
+        // Extend handwriting boxes to the right margin — cursive signatures often
+        // extend beyond the Textract-detected ink strokes, so we cover from the
+        // detected left edge all the way to x=0.88 to capture the full stroke.
+        var hwRight = Math.max(maxR, Math.min(0.88, minL + 0.60));
         result[pgIdx2].push({
           x:      Math.max(0, minL - pad),
           y:      Math.max(0, minT - pad),
-          width:  Math.min(1, maxR - minL + pad * 2),
+          width:  Math.min(1, hwRight - minL + pad),
           height: Math.min(1, maxB - minT + pad * 2),
           label:  'handwriting',
         });
