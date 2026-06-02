@@ -441,7 +441,7 @@ function discoverPatientAddress(extractedText) {
   // Facility keyword guard — if a street appears after one of these, skip it
   var FACILITY_RE = /hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent|orthopedic|physical\s*therapy|imaging|radiology|university|college|institute|umc\s*rad|umc\s*radiology|testing\s*performed|lab.*abbreviation|valid\s*date/i;
   // Known facility street names that should never be treated as patient address
-  var FACILITY_STREET_RE = /charleston\s*blvd|flamingo|desert\s*inn|mariah\s*drive|mount\s*mariah|eastern\s*ave|harrison\s*ave|pinto\s*lane|hope\s*place/i;
+  var FACILITY_STREET_RE = /charleston\s*blvd|flamingo|desert\s*inn|mariah\s*drive|mount\s*mariah|eastern\s*ave|harrison\s*ave|pinto\s*lane|hope\s*place|third\s*st|s\.\s*third/i;
 
   // Suite/floor indicator — facility addresses have these, patient ones usually don't
   var SUITE_RE = /\b(?:STE|SUITE|FLOOR|FL\.|#)\s*\d/i;
@@ -572,6 +572,50 @@ function discoverPatientAddress(extractedText) {
   }
   return result;
 }
+
+// ── Discover facility/provider phone numbers to EXCLUDE from redaction ────────
+// Scans extracted text for phone numbers that appear near facility/provider
+// keywords. These are public numbers (departments, clinics, providers) and
+// should NOT be redacted.
+function discoverFacilityPhones(extractedText) {
+  if (!extractedText || typeof extractedText !== 'string') return new Set();
+  var excluded = new Set();
+  var lines = extractedText.split(/\r?\n/);
+
+  var PHONE_RE = /\b(\d{3}-\d{3}-\d{4})\b|\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g;
+
+  // Keywords that strongly indicate a facility/provider context
+  var FACILITY_CTX_RE = /hospital|medical\s*cent|clinic|health\s*cent|health\s*system|university|college|department|dept\.?|trauma|resuscitation|radiology|imaging|physical\s*therapy|primary\s*care|urgent\s*care|emergency\s*dept|umc|unlv|volunteers?\s*in\s*medicine|obstetrical|guadalupe|first\s*med|nevada\s*health|m\.?d\.?|d\.?o\.?|r\.?n\.?|hotline|resource|national|suicide|trafficking|protective|substance\s*abuse|mental\s*health|follow.?up\s*with|testing\s*performed|location|blvd|hope\s*place|charleston|pinto\s*lane|mount\s*mariah|eastern\s*ave|harrison\s*ave|www\.|umcsn|umconline/i;
+
+  // Patient-context keywords — phone near these IS the patient's number
+  var PATIENT_CTX_RE = /patient\s*phone|home\s*phone|mobile|cell(?:\s*phone)?|patient.*address|demographics|date\s*of\s*birth|legal\s*sex|email\s*:|kmpoindexter/i;
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    PHONE_RE.lastIndex = 0;
+    var m;
+    while ((m = PHONE_RE.exec(line)) !== null) {
+      var rawPhone = m[1] || (m[2] + m[3]);
+      var norm = rawPhone.replace(/[^\d]/g, '');
+      if (norm.length !== 10) continue;
+      // Check context: current line + 3 lines above + 1 below
+      var ctx = lines.slice(Math.max(0, i - 3), i + 2).join(' ');
+      var isFacility = FACILITY_CTX_RE.test(ctx);
+      var isPatient  = PATIENT_CTX_RE.test(ctx);
+      if (isFacility && !isPatient) {
+        excluded.add(norm.slice(0,3) + '-' + norm.slice(3,6) + '-' + norm.slice(6));
+        excluded.add('(' + norm.slice(0,3) + ') ' + norm.slice(3,6) + '-' + norm.slice(6));
+        excluded.add('(' + norm.slice(0,3) + ') ' + norm.slice(3,6) + ' ' + norm.slice(6));
+        excluded.add(norm);
+      }
+    }
+  }
+  if (excluded.size > 0) {
+    console.log('[PHONE-EXCLUDE] Facility phones excluded:', JSON.stringify(Array.from(excluded)));
+  }
+  return excluded;
+}
+
 
 // ── STEP 2A: Textract-coordinate-based redaction ──────────────────────────────
 // Returns piiByPage map using exact Textract bounding boxes — no LLM needed
@@ -1767,7 +1811,9 @@ module.exports.redactDocumentWorker = async function(event) {
       console.log('[FOLDER-PII] skipped:', _fpErr.message);
     }
     // ── End folder PII ──────────────────────────────────────────────────────
-    const knownPiiValues = knownPiiValuesBase
+    var _facilityPhones = discoverFacilityPhones(extractedText || '');
+    var _filterFacPhone = function(v) { if (!v) return true; var n = String(v).replace(/[^\d]/g,''); return !(n.length === 10 && _facilityPhones.has(n.slice(0,3)+'-'+n.slice(3,6)+'-'+n.slice(6))); };
+    const knownPiiValues = knownPiiValuesBase.filter(_filterFacPhone)
       .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
       .concat(userPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }))
       .concat(_folderPiiExtras.filter(function(v) { return v && knownPiiValuesBase.indexOf(v) === -1; }))
@@ -2055,7 +2101,9 @@ module.exports.redactCaseWorker = async function(event) {
           caseUserPiiExpanded.push(v);
         }
       });
-      var knownPiiValues = knownPiiValuesBase
+      var _caseFacPhones = discoverFacilityPhones(extractedText || '');
+      var _caseFilterFac = function(v) { if (!v) return true; var n = String(v).replace(/[^\d]/g,''); return !(n.length === 10 && _caseFacPhones.has(n.slice(0,3)+'-'+n.slice(3,6)+'-'+n.slice(6))); };
+      var knownPiiValues = knownPiiValuesBase.filter(_caseFilterFac)
         .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
         .concat(caseUserPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
       // Build source map for CSV audit trail — uses tagged rules for specificity
