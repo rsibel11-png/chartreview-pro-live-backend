@@ -1055,6 +1055,13 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
         }
 
         if (isSigLabel) {
+          // Fix: "Patient Signature Page" is a document title, not a form label.
+          // If the token immediately after the match normalizes to "page", skip it.
+          var nextToken = pageWords2[sw + sl];
+          if (nextToken && nextToken.t.toLowerCase().replace(/[\s\-,\.\(\)\/]/g, '') === 'page') {
+            break; // title, not a label — skip entire start word
+          }
+
           // Get the vertical position of this label
           var labelTop = Math.min.apply(null, sigSlice.map(function(w) { return w.tp; }));
           var labelLeft = Math.min.apply(null, sigSlice.map(function(w) { return w.l; }));
@@ -1080,8 +1087,10 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
               height: 0.15,
             });
           } else {
-            // Box goes ABOVE the label: from N*labelH above the label up to the label
-            var boxHeight = labelH * 6.0;
+            // Box goes ABOVE the label (signature content sits on/above the line).
+            // Use at least 0.05 page height to cover cursive signatures on scanned forms —
+            // Textract label height on scans can be as small as 0.008, making 6x too narrow.
+            var boxHeight = Math.max(0.05, labelH * 6.0);
             var boxTop = Math.max(0, labelTop - boxHeight);
             result[String(pageIdx2)].push({
               label: 'sig:' + sigConcat.substring(0, 30),
