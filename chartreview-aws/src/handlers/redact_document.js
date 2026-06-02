@@ -1018,8 +1018,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
     'physiciansignature', 'providersignature',
     'employeesorguardiansignature',
     // C-4 / structured form field labels (value written in box above label)
-    // NOTE: 'firstname','lastname','dateofbirth','birthdate' removed — fire on narrative text
+    'firstname', 'lastname', 'middleinitial',
     'firstnamemi', 'firstnamemilastname',
+    'birthdate', 'dateofbirth',
     'homeaddress', 'homeaddressnumberandstreet',
     'employeesname', 'employeename',
     'claimantsname', 'claimantname',
@@ -1069,13 +1070,6 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
 
           // Skip sig labels in the top 10% of page — those are document headers, not form fields
           if (labelTop < 0.10) continue; // skip header zone
-          // Skip sig labels in the right half of the page — those are inline narrative text
-          // not form column headers (C-4 form labels appear near the left or center)
-          if (labelLeft > 0.55) continue;
-          // Skip sig labels that are very narrow (< 0.06 page width) — single inline words
-          var labelWidth = Math.max.apply(null, sigSlice.map(function(w) { return w.l + w.w; })) -
-                           Math.min.apply(null, sigSlice.map(function(w) { return w.l; }));
-          if (labelWidth < 0.06 && sigConcat.length < 12) continue;
           if (!result[String(pageIdx2)]) result[String(pageIdx2)] = [];
           if (isAddressField) {
             // Box goes BELOW the label: from bottom of label down 0.15 page
