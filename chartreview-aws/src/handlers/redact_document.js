@@ -1092,17 +1092,18 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
               height: 0.15,
             });
           } else {
-            // Box goes ABOVE the label (signature content sits on/above the line).
-            // Use at least 0.05 page height to cover cursive signatures on scanned forms —
-            // Textract label height on scans can be as small as 0.008, making 6x too narrow.
+            // Box covers both ABOVE the label and the line itself.
+            // On digital forms, the signature is above the label — on scanned forms it's
+            // ON the line (same Y). We cover both by extending 0.05 below labelBottom too.
             var boxHeight = Math.max(0.05, labelH * 6.0);
             var boxTop = Math.max(0, labelTop - boxHeight);
+            var boxBottom = Math.min(1, labelBottom + 0.05); // cover signature ON the line
             result[String(pageIdx2)].push({
               label: 'sig:' + sigConcat.substring(0, 30),
               x: Math.max(0, labelLeft - 0.01),
               y: boxTop,
               width: Math.min(1, 0.92 - labelLeft + 0.01),
-              height: labelTop - boxTop,
+              height: boxBottom - boxTop,
             });
           }
           break; // don't double-match longer slices for same start word
@@ -1770,8 +1771,9 @@ module.exports.redactDocumentWorker = async function(event) {
       if (_m3) {
         var _fwd3 = _m3[2].trim() + ' ' + _m3[3].trim() + ' ' + _m3[1].trim(); // FIRST MID LAST
         var _fwd2 = _m3[2].trim() + ' ' + _m3[1].trim();                        // FIRST LAST
+        var _mid2 = _m3[3].trim() + ' ' + _m3[1].trim();                        // MIDDLE LAST (e.g. "Maria Moore")
         var _rev2 = _m3[1].trim() + ', ' + _m3[2].trim();                       // LAST, FIRST
-        [_fwd3, _fwd2, _rev2].forEach(function(_v) {
+        [_fwd3, _fwd2, _mid2, _rev2].forEach(function(_v) {
           if (_3partExtras.indexOf(_v) === -1 && knownPiiValuesBase.indexOf(_v) === -1) {
             _3partExtras.push(_v);
           }
