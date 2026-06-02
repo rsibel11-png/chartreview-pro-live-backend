@@ -190,7 +190,7 @@ function extractKnownPiiValues(extractedText) {
     /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|]|PRN\s*[:\|]?|Patient\s*Record\s*(?:No\.?|#)|Record\s*(?:No\.?|#))\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
 
     // Driver's License number + Document Discriminator
-    /(?:DL\s*(?:NO\.?|#|NUMBER)|LICENSE\s*(?:NO\.?|#|NUMBER)|DRIVERS?\s*(?:LIC(?:ENSE)?)?\s*(?:NO\.?|#)?|4[dD]\s*DL\s*NO\.?)\s*[:\|]?\s*([A-Z0-9]+)/gi,
+    /(?:DL\s*(?:NO\.?|#|NUMBER)|LICENSE\s*(?:NO\.?|#|NUMBER)|DRIVERS?\s+LIC(?:ENSE)?\s*(?:NO\.?|#)?|4[dD]\s*DL\s*NO\.?)\s*[:\|]?\s*([A-Z0-9]+)/gi,
     /\b(?:5\s*DD|DD)\s+([0-9A-Z]{10,})/gi,
 
     // Market URN / Encounter ID
@@ -348,7 +348,7 @@ function extractKnownPiiValuesTagged(extractedText) {
     { name: 'ssn',                 rx: /(\d{3}-\d{2}-\d{4})/g },
     { name: 'ssn',                 rx: /(?:SSN|S\.S\.N\.|SOCIAL\s*SECURITY)\s*[:\|]?\s*(\d{9})/gi },
     { name: 'mrn',                 rx: /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|]|PRN\s*[:\|]?|Patient\s*Record\s*(?:No\.?|#)|Record\s*(?:No\.?|#))\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
-    { name: 'drivers-license',     rx: /(?:DL\s*(?:NO\.?|#|NUMBER)|LICENSE\s*(?:NO\.?|#|NUMBER)|DRIVERS?\s*(?:LIC(?:ENSE)?)?\s*(?:NO\.?|#)?|4[dD]\s*DL\s*NO\.?)\s*[:\|]?\s*([A-Z0-9]+)/gi },
+    { name: 'drivers-license',     rx: /(?:DL\s*(?:NO\.?|#|NUMBER)|LICENSE\s*(?:NO\.?|#|NUMBER)|DRIVERS?\s+LIC(?:ENSE)?\s*(?:NO\.?|#)?|4[dD]\s*DL\s*NO\.?)\s*[:\|]?\s*([A-Z0-9]+)/gi },
     { name: 'drivers-license-dd',  rx: /\b(?:5\s*DD|DD)\s+([0-9A-Z]{10,})/gi },
     { name: 'encounter-id',        rx: /(?:MARKET\s*URN|VISIT\s*(?:NO\.?|#|ID)|ENCOUNTER\s*(?:NO\.?|#|ID)|URN\s*[:\|])\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
     { name: 'account-no',          rx: /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct\s*#|ACCOUNT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
