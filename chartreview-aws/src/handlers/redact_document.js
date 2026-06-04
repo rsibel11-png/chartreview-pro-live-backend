@@ -1097,14 +1097,16 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
             // Box goes ABOVE the label — signature content sits above the line on both
             // digital and scanned forms. Use at least 0.10 page height to cover the full
             // cursive stroke (Textract label height on scans can be ~0.008, making 6x only 0.048).
-            var boxHeight = Math.max(0.10, labelH * 8.0);
+            // Signature sits ABOVE the label line. Box goes from boxTop up to labelBottom
+            // to cover the full cursive stroke. 0.15 page height handles large cursive.
+            var boxHeight = Math.max(0.15, labelH * 10.0);
             var boxTop = Math.max(0, labelTop - boxHeight);
             result[String(pageIdx2)].push({
               label: 'sig:' + sigConcat.substring(0, 30),
               x: Math.max(0, labelLeft - 0.01),
               y: boxTop,
               width: Math.min(1, 0.92 - labelLeft + 0.01),
-              height: labelTop - boxTop,
+              height: labelBottom - boxTop,
             });
           }
           break; // don't double-match longer slices for same start word
@@ -1749,7 +1751,14 @@ module.exports.redactDocumentWorker = async function(event) {
     const pdfBytes = await getS3Bytes(fileKey);
 
     // Extract known PII values from stored Textract text to anchor Claude's redaction
-    const extractedText  = await fetchExtractedText(doc_id);
+    const extractedTextRaw  = await fetchExtractedText(doc_id);
+    // Strip Epic EHR superscript annotation markers (e.g. [JS.2T], [WC.1M]) from the
+    // stored Textract text BEFORE PII extraction. These markers are embedded directly
+    // in the Textract output text and break regex matches — e.g. "12/20/1961[JS.2T]"
+    // never matches the DOB pattern, and "Moore, Kimberly Maria[JS.2T]" fails name capture.
+    const extractedText = extractedTextRaw
+      ? extractedTextRaw.replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, '')
+      : extractedTextRaw;
     const knownPiiValuesBase = extractKnownPiiValues(extractedText);
     const discoveredAddrTokens = discoverPatientAddress(extractedText);
     const userSuppliedPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
