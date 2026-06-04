@@ -1756,9 +1756,39 @@ module.exports.redactDocumentWorker = async function(event) {
     // stored Textract text BEFORE PII extraction. These markers are embedded directly
     // in the Textract output text and break regex matches — e.g. "12/20/1961[JS.2T]"
     // never matches the DOB pattern, and "Moore, Kimberly Maria[JS.2T]" fails name capture.
-    const extractedText = extractedTextRaw
-      ? extractedTextRaw.replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, '')
-      : extractedTextRaw;
+    // Strip Epic EHR superscript markers AND collapse the gaps they leave.
+    // Textract stores each superscript as a SEPARATE LINE block, so the raw text looks like:
+    //   "DOB:\n[JS.1T]\n12/20/1961\n[JS.2T]"
+    // After stripping markers: "DOB:\n\n12/20/1961\n"  ← label and value on different lines!
+    // So we must also: (1) remove lines that became empty after stripping,
+    // and (2) re-join a trailing colon line with the next content line.
+    const extractedText = (function(raw) {
+      if (!raw) return raw;
+      // Step 1: strip all Epic annotation markers [JS.1T], [WC.2M], [JS.4M] etc.
+      var stripped = raw.replace(/\[[A-Z]{1,4}\.[0-9][A-Z]?\]/g, '');
+      // Step 2: remove lines that are now empty or whitespace-only
+      var lines = stripped.split(/\r?\n/);
+      var cleaned = [];
+      for (var _li = 0; _li < lines.length; _li++) {
+        var line = lines[_li].trimEnd();
+        if (line.trim() === '') continue; // drop blank lines left by stripped superscripts
+        cleaned.push(line);
+      }
+      // Step 3: re-join "LABEL:" lines that got separated from their values
+      // e.g. ["DOB:", "12/20/1961"] → ["DOB: 12/20/1961"]
+      var rejoined = [];
+      for (var _ri = 0; _ri < cleaned.length; _ri++) {
+        var cur = cleaned[_ri];
+        if (/[:\|]\s*$/.test(cur) && _ri + 1 < cleaned.length) {
+          // This line ends with a colon/pipe — join with next line
+          rejoined.push(cur + ' ' + cleaned[_ri + 1]);
+          _ri++; // skip next line since we consumed it
+        } else {
+          rejoined.push(cur);
+        }
+      }
+      return rejoined.join('\n');
+    })(extractedTextRaw);
     const knownPiiValuesBase = extractKnownPiiValues(extractedText);
     const discoveredAddrTokens = discoverPatientAddress(extractedText);
     const userSuppliedPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
