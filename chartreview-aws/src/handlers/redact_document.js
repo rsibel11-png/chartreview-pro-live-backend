@@ -1073,6 +1073,19 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
           var labelTop = Math.min.apply(null, sigSlice.map(function(w) { return w.tp; }));
           var labelLeft = Math.min.apply(null, sigSlice.map(function(w) { return w.l; }));
 
+          // DEBUG: log all blocks on this page near the label so we can see HW detection
+          var _nearLabel = pageWords2.filter(function(w) {
+            return Math.abs(w.tp - labelTop) < 0.20; // blocks within 20% page height of label
+          });
+          console.log('[SIG-DEBUG] Found sig label "' + sigConcat + '" on page ' + pageNum2 +
+            ' labelTop=' + labelTop.toFixed(4) + ' labelLeft=' + labelLeft.toFixed(4));
+          console.log('[SIG-DEBUG] Blocks near label (+/-0.20):');
+          _nearLabel.forEach(function(w) {
+            console.log('  hw=' + (w.hw ? '1' : '0') + ' tp=' + w.tp.toFixed(4) +
+              ' bt=' + (w.tp + w.h).toFixed(4) + ' l=' + w.l.toFixed(4) +
+              ' w=' + w.w.toFixed(4) + ' txt="' + (w.t || '').substring(0, 30) + '"');
+          });
+
           // Redact the area above the label: from ~1.5x label height above it,
           // spanning from near-left to ~0.65 page width
           var labelH = Math.max.apply(null, sigSlice.map(function(w) { return w.h; }));
