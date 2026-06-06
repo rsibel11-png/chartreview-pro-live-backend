@@ -1896,8 +1896,12 @@ module.exports.redactDocumentWorker = async function(event) {
             var _rev = _nm2[2].trim() + ', ' + _nm2[1].trim();
             if (_folderPiiExtras.indexOf(_rev) === -1) _folderPiiExtras.push(_rev);
           }
-          // 3-part phrases using middleName — NEVER add middle name as standalone token
+          // 3-part phrases using middleName — also add middle name as standalone if >= 4 chars
+          // Needed for HPI body text where name tokens are split across markers
           if (_storedMid) {
+            if (_storedMid.length >= 4 && _folderPiiExtras.indexOf(_storedMid) === -1) {
+              _folderPiiExtras.push(_storedMid);
+            }
             if (_nm1) {
               var _fp1 = _nm1[2].trim() + ' ' + _storedMid + ' ' + _nm1[1].trim();
               var _fp2 = _nm1[1].trim() + ', ' + _nm1[2].trim() + ' ' + _storedMid;
