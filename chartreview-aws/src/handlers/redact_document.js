@@ -1921,6 +1921,61 @@ module.exports.redactDocumentWorker = async function(event) {
     } catch (_fpErr) {
       console.log('[FOLDER-PII] skipped:', _fpErr.message);
     }
+    // ── Supplement middle name from extractedText when store has none ────────
+    // processWorker stored "MOORE, KIMBERLY" (no middle name captured).
+    // Mine the middle name by scanning extracted text lines that contain both
+    // the known last and first name — Epic repeats the full name on every page
+    // header: e.g. "Moore, Kimberly Maria" or "Kimberly Maria Moore".
+    try {
+      if (!_storedMid && _storedName && extractedText) {
+        var _knownLast  = '';
+        var _knownFirst = '';
+        if (_nm1) { _knownLast = _nm1[1].trim().toLowerCase(); _knownFirst = _nm1[2].trim().toLowerCase(); }
+        else if (_nm2) { _knownFirst = _nm2[1].trim().toLowerCase(); _knownLast = _nm2[2].trim().toLowerCase(); }
+        if (_knownLast && _knownFirst) {
+          var _etLines = extractedText.split(/?
+/);
+          var _minedMid = null;
+          for (var _eli = 0; _eli < _etLines.length && !_minedMid; _eli++) {
+            var _el = _etLines[_eli];
+            var _eln = _el.toLowerCase().replace(/[^a-z\s]/g, ' ');
+            if (_eln.indexOf(_knownLast) === -1 || _eln.indexOf(_knownFirst) === -1) continue;
+            // Line contains both last and first — tokenize and find the extra word
+            var _eltoks = _eln.trim().split(/\s+/).filter(function(t) { return t.length >= 2; });
+            _eltoks.forEach(function(tok) {
+              if (_minedMid) return;
+              if (tok === _knownLast || tok === _knownFirst) return;
+              // Must be pure alpha (not a label like "MRN", "DOB", date, etc.)
+              if (!/^[a-z]{2,}$/.test(tok)) return;
+              // Must not be a common non-name word
+              if (/^(and|the|for|with|date|visit|unit|room|page|legal|sex|adm|d\/c|mrn|dob|csn|scan|on|of|in|at|by|to)$/.test(tok)) return;
+              _minedMid = tok.charAt(0).toUpperCase() + tok.slice(1);
+            });
+          }
+          if (_minedMid) {
+            console.log('[FOLDER-PII] mined middle name from text:', _minedMid);
+            // Standalone middle name
+            if (_folderPiiExtras.indexOf(_minedMid) === -1) _folderPiiExtras.push(_minedMid);
+            // Middle initial
+            var _minedInit = _minedMid[0].toUpperCase();
+            if (_folderPiiExtras.indexOf(_minedInit) === -1) _folderPiiExtras.push(_minedInit);
+            // 3-part phrases
+            if (_nm1) {
+              var _mp1 = _nm1[2].trim() + ' ' + _minedMid + ' ' + _nm1[1].trim();
+              var _mp2 = _nm1[1].trim() + ', ' + _nm1[2].trim() + ' ' + _minedMid;
+              if (_folderPiiExtras.indexOf(_mp1) === -1) _folderPiiExtras.push(_mp1);
+              if (_folderPiiExtras.indexOf(_mp2) === -1) _folderPiiExtras.push(_mp2);
+            }
+            if (_nm2) {
+              var _mp3 = _nm2[1].trim() + ' ' + _minedMid + ' ' + _nm2[2].trim();
+              if (_folderPiiExtras.indexOf(_mp3) === -1) _folderPiiExtras.push(_mp3);
+            }
+          }
+        }
+      }
+    } catch (_midMineErr) {
+      console.log('[FOLDER-PII] mid-mine skipped:', _midMineErr.message);
+    }
     // ── End folder PII ──────────────────────────────────────────────────────
     var _facilityPhones = discoverFacilityPhones(extractedText || '');
     var _filterFacPhone = function(v) { if (!v) return true; var n = String(v).replace(/[^\d]/g,''); return !(n.length === 10 && _facilityPhones.has(n.slice(0,3)+'-'+n.slice(3,6)+'-'+n.slice(6))); };
