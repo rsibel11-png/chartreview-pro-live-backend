@@ -280,9 +280,7 @@ function extractKnownPiiValues(extractedText) {
         if (/^(patient|patients|address|homeaddress|name|patientname|ptname|claimant|client|guardian|guarantor|subscriber|insured|dob|dateofbirth|birthdate|ssn|socialsecurity|mrn|medicalrecord|phone|telephone|cell|mobile|fax|email|spouse|nextofkin|nok|poa|emergencycontact|firstname|lastname|middleinitial|street|city|state|zip|zipcode)s?$/.test(_vl)) continue;
         // Skip common document navigation / medical form words
         if (/^(page|pages|date|time|form|type|code|codes|unit|room|bed|ward|floor|wing|note|notes|visit|visits|total|balance|amount|paid|status|level|none|null|same|info|information|record|records|report|order|orders|plan|plans|initial|final|follow|continued|continued|signature|initials|signed|print|printed|copy|original|draft|revised|version|section|part|item|items|number|numbers|detail|details|summary|description|comment|comments)s?$/.test(_vl)) continue;
-        // Skip 1-4 char values that are clearly not PII (short words, abbreviations)
-        // but allow MRN/account numbers (which can be short alphanumeric)
-        if (_vl.length <= 4 && /^[a-z]+$/.test(_vl) && !/^(jose|juan|ana|luis|rosa|adam|alan|alan|alan|alan)$/.test(_vl)) continue;
+        // (char-length filter removed — short names like "Ana", "Kim" are valid PII)
         // Skip values extracted under provider/physician labels — those are staff names not patient PII
         var _prefix = (match[0] || '').slice(0, -(val.length)).toLowerCase();
         if (/(?:rendering|treating|attending|referring|ordering|prescrib|provider|physician|surgeon|clinician|practitioner|therapist|radiologist|specialist)/.test(_prefix)) continue;
@@ -872,7 +870,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
       var pageWords = pageMap[pageNum];
       var pageIdx = pageNum - 1; // convert to 0-based
 
-      // Sliding window: try 1 to 6 consecutive words — exact match only, min 6 chars
+      // Sliding window: try 1 to 8 consecutive words — exact match, no minimum char length
       for (var start = 0; start < pageWords.length; start++) {
         for (var len = 1; len <= 8 && start + len <= pageWords.length; len++) {
           var slice = pageWords.slice(start, start + len);
@@ -1903,7 +1901,7 @@ module.exports.redactDocumentWorker = async function(event) {
           // 3-part phrases using middleName — also add middle name as standalone if >= 4 chars
           // Needed for HPI body text where name tokens are split across markers
           if (_storedMid) {
-            if (_storedMid.length >= 4 && _folderPiiExtras.indexOf(_storedMid) === -1) {
+            if (_folderPiiExtras.indexOf(_storedMid) === -1) {
               _folderPiiExtras.push(_storedMid);
             }
             if (_nm1) {
