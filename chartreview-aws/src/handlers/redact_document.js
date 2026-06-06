@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-06-05 — Fix #791: strip Epic [JS.xT] superscripts from DOB date/label tokens before regex tests
+// Updated: 2026-06-06 — Fix #792: strip trailing punctuation (comma) from date tokens before DATE_VALUE_RE test
 
 'use strict';
 
@@ -1373,7 +1373,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
 
       // Redact all date-shaped tokens on this line
       for (var _dv = 0; _dv < _dobLine.length; _dv++) {
-        var _dvTok = (_dobLine[_dv].t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, '').trim();
+        var _dvTok = (_dobLine[_dv].t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, '').trim().replace(/[.,;:]+$/, '');
         if (DATE_VALUE_RE.test(_dvTok)) {
           if (!result[String(_dobIdx)]) result[String(_dobIdx)] = [];
           result[String(_dobIdx)].push({
@@ -1387,7 +1387,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
         // Also catch multi-token dates split across adjacent tokens on same line
         if (_dv + 2 < _dobLine.length) {
           var _s3 = _dobLine.slice(_dv, _dv + 5);
-          var _s3c = _s3.map(function(w){ return (w.t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, ''); }).join('');
+          var _s3c = _s3.map(function(w){ return (w.t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, ''); }).join('').replace(/[.,;:]+$/, '');
           if (DATE_VALUE_RE.test(_s3c)) {
             var _s3L = Math.min.apply(null, _s3.map(function(w){ return w.l; }));
             var _s3R = Math.max.apply(null, _s3.map(function(w){ return w.l + w.w; }));
