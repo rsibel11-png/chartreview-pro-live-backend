@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-06-06 — Fix #793: strip superscript/attribution marker blocks before pageMap build
+// Updated: 2026-06-06 — Fix #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
 
 'use strict';
 
@@ -627,26 +627,34 @@ function normalizeForMatch(str) {
 function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
   // piiSourceMap: { normalizedValue -> source } — used to stamp audit label on each box
   // Build a map of page -> list of word blocks
-  // Fix #793: strip Epic EHR attribution/superscript marker blocks before any processing.
-  // These appear as standalone blocks like [JS.1T], [WC.¹ᵀ] or appended like "12/20/1961[JS.2"
-  // They break sliding window matching and DOB line reconstruction.
-  var SUPERSCRIPT_ONLY_RE = /^\[(?:[A-Z]{1,3}|[A-Z]{1,3}\.[\d¹²³⁴⁵⁶⁷⁸⁹⁰]+)[A-Za-zᵀᴹ]*\]$/;
-  var wordBlocks = wordBlocks.filter(function(b) {
-    var t = (b.t || '').trim();
-    // Drop blocks that are purely a superscript marker
-    if (SUPERSCRIPT_ONLY_RE.test(t)) return false;
-    // Drop blocks whose text is ONLY marker content after stripping
-    var stripped = t.replace(/\[[A-Z]{1,3}[\s\S]*?\]/g, '').trim();
-    if (stripped.length === 0) return false;
-    return true;
-  });
+  // Fix #793: strip Epic EHR attribution/superscript markers before any processing.
+  // Textract reads these markers in many forms due to Unicode superscript rendering:
+  //   Standard:  [JS.1T], [JS.2T], [WC.1M], [JS.3M]
+  //   Unicode:   [WC.¹ᵀ], [Jˢ.2T], pain⁽⁽ᶜ.¹ᵀ⁾, acute[JS.⁴M]
+  //   Truncated: 12/20/1961[JS.2  (bracket opened, not closed)
+  // Strategy: strip all superscript/modifier Unicode chars + bracket-delimited markers,
+  // then drop any token that becomes empty.
+  function _stripEpicMarkers(t) {
+    if (!t) return '';
+    // 1. Remove bracket-delimited markers (closed or unclosed): [JS.1T], [WC.¹ᵀ], [JS.2
+    t = t.replace(/\[(?:[A-Za-z\u02B0-\u02FF\u1D00-\u1DBF\u2070-\u209F]{1,4})[^\]]{0,20}\]?/g, '');
+    // 2. Remove superscript parenthesis groups: ⁽⁽ᶜ.¹ᵀ⁾  ⁽JS.1T⁾
+    t = t.replace(/[\u207D\u207E\u208D\u208E][\s\S]{0,20}?[\u207D\u207E\u208D\u208E]?/g, '');
+    // 3. Remove remaining superscript/modifier letter Unicode chars
+    // Ranges: superscript digits ¹²³ (U+00B9,U+00B2,U+00B3), superscript parens,
+    // modifier letters (U+02B0-U+02FF), Latin modifier letters (U+1D00-U+1DBF)
+    // Keep ²³ — valid in medical units (kg/m²). They only appear in markers via brackets (caught in step 1).
+    t = t.replace(/[\u00B9\u02B0-\u02FF\u1D00-\u1DBF\u2070-\u209F]/g, '');
+    return t.trim();
+  }
+
+  wordBlocks = wordBlocks.map(function(b) {
+    return { t: _stripEpicMarkers(b.t), p: b.p, l: b.l, tp: b.tp, w: b.w, h: b.h, hw: b.hw };
+  }).filter(function(b) { return b.t.length > 0; });
 
   var pageMap = {};
   for (var i = 0; i < wordBlocks.length; i++) {
     var b = wordBlocks[i];
-    // Also strip inline appended markers from token text before storing
-    b = { t: (b.t || '').replace(/\[[A-Z]{1,3}[^\]]*\]?/g, '').trim(), p: b.p, l: b.l, tp: b.tp, w: b.w, h: b.h, hw: b.hw };
-    if (!b.t) continue;
     var pg = b.p || 1;
     if (!pageMap[pg]) pageMap[pg] = [];
     pageMap[pg].push(b);
