@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-05-26 — Expand PII extraction: bare phone/SSN, Street/City, account# variants
+// Updated: 2026-06-05 — Fix #791: strip Epic [JS.xT] superscripts from DOB date/label tokens before regex tests
 
 'use strict';
 
@@ -1360,7 +1360,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
       // Check if this line contains a DOB label
       var _hasDobLabel = false;
       for (var _dlw = 0; _dlw < _dobLine.length; _dlw++) {
-        var _tok = normalizeForMatch(_dobLine[_dlw].t);
+        var _tok = normalizeForMatch((_dobLine[_dlw].t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, ''));
         if (DOB_LABEL_RE.test(_tok) || _tok === 'dob' || _tok.startsWith('dob')) {
           _hasDobLabel = true; break;
         }
@@ -1373,7 +1373,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
 
       // Redact all date-shaped tokens on this line
       for (var _dv = 0; _dv < _dobLine.length; _dv++) {
-        var _dvTok = (_dobLine[_dv].t || '').trim();
+        var _dvTok = (_dobLine[_dv].t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, '').trim();
         if (DATE_VALUE_RE.test(_dvTok)) {
           if (!result[String(_dobIdx)]) result[String(_dobIdx)] = [];
           result[String(_dobIdx)].push({
@@ -1387,7 +1387,7 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
         // Also catch multi-token dates split across adjacent tokens on same line
         if (_dv + 2 < _dobLine.length) {
           var _s3 = _dobLine.slice(_dv, _dv + 5);
-          var _s3c = _s3.map(function(w){ return w.t; }).join('');
+          var _s3c = _s3.map(function(w){ return (w.t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, ''); }).join('');
           if (DATE_VALUE_RE.test(_s3c)) {
             var _s3L = Math.min.apply(null, _s3.map(function(w){ return w.l; }));
             var _s3R = Math.max.apply(null, _s3.map(function(w){ return w.l + w.w; }));
