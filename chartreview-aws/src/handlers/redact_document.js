@@ -1132,29 +1132,33 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
               height: 0.15,
             });
           } else {
-            // Dynamic sig box: find the topmost HANDWRITING block on this page that
-            // sits ABOVE the label. Use its top edge as boxTop — same approach as
-            // extending the width to match the signature line geometry.
-            // Fall back to a fixed 0.15-page-height offset if no HW block found.
-            var hwAbove = pageWords2.filter(function(w) {
-              return w.hw && (w.tp + w.h) <= labelTop + 0.01; // HW block whose bottom <= labelTop
+            // Dynamic sig box: find handwriting blocks near this label.
+            // Signatures can sit ABOVE (C-4 style) or ON/BESIDE the label (discharge form style).
+            // Search within ±0.08 page height of the label.
+            var hwNear = pageWords2.filter(function(w) {
+              return w.hw && w.tp >= labelTop - 0.08 && w.tp <= labelTop + 0.10;
             });
-            var dynamicBoxTop;
-            if (hwAbove.length > 0) {
-              // Top of the highest handwriting block above this label
-              dynamicBoxTop = Math.min.apply(null, hwAbove.map(function(w) { return w.tp; }));
-              // Add small upward padding (5px worth = ~0.007 page height)
-              dynamicBoxTop = Math.max(0, dynamicBoxTop - 0.007);
+            var dynamicBoxTop, dynamicBoxBottom;
+            if (hwNear.length > 0) {
+              // Use topmost HW block as box top (with small upward padding)
+              dynamicBoxTop = Math.min.apply(null, hwNear.map(function(w) { return w.tp; }));
+              dynamicBoxTop = Math.max(0, dynamicBoxTop - 0.008);
+              // Use bottommost HW block as box bottom (with small downward padding)
+              dynamicBoxBottom = Math.max.apply(null, hwNear.map(function(w) { return w.tp + w.h; }));
+              dynamicBoxBottom = Math.min(1.0, dynamicBoxBottom + 0.008);
+              // Box top must not exceed the label top
+              dynamicBoxTop = Math.min(dynamicBoxTop, labelTop);
             } else {
-              // No HW block detected — fall back to fixed offset
-              dynamicBoxTop = Math.max(0, labelTop - Math.max(0.15, labelH * 10.0));
+              // No HW block detected — fall back to fixed offset above label
+              dynamicBoxTop = Math.max(0, labelTop - Math.max(0.12, labelH * 8.0));
+              dynamicBoxBottom = labelBottom + 0.02;
             }
             result[String(pageIdx2)].push({
               label: 'sig:' + sigConcat.substring(0, 30),
               x: Math.max(0, labelLeft - 0.01),
               y: dynamicBoxTop,
               width: Math.min(1, 0.92 - labelLeft + 0.01),
-              height: labelBottom - dynamicBoxTop,
+              height: dynamicBoxBottom - dynamicBoxTop,
             });
           }
           break; // don't double-match longer slices for same start word
