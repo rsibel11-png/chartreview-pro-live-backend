@@ -1933,8 +1933,8 @@ module.exports.redactDocumentWorker = async function(event) {
         if (_nm1) { _knownLast = _nm1[1].trim().toLowerCase(); _knownFirst = _nm1[2].trim().toLowerCase(); }
         else if (_nm2) { _knownFirst = _nm2[1].trim().toLowerCase(); _knownLast = _nm2[2].trim().toLowerCase(); }
         if (_knownLast && _knownFirst) {
-          var _etLines = extractedText.split(/?
-/);
+          var _etLines = extractedText.split('\n');
+
           var _minedMid = null;
           for (var _eli = 0; _eli < _etLines.length && !_minedMid; _eli++) {
             var _el = _etLines[_eli];
