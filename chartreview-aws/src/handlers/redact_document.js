@@ -1138,18 +1138,18 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
             });
             var dynamicBoxTop, dynamicBoxBottom;
             if (hwNear.length > 0) {
-              // Use topmost HW block as box top (with small upward padding)
-              dynamicBoxTop = Math.min.apply(null, hwNear.map(function(w) { return w.tp; }));
-              dynamicBoxTop = Math.max(0, dynamicBoxTop - 0.008);
+              // HW blocks found near the label.
+              // Extend upward by 0.08 to catch signature strokes that Textract may have
+              // missed above the label (common on scanned discharge forms where patient
+              // signs ABOVE the printed line and Textract only picks up the date).
+              dynamicBoxTop = Math.max(0, labelTop - 0.08);
               // Use bottommost HW block as box bottom (with small downward padding)
               dynamicBoxBottom = Math.max.apply(null, hwNear.map(function(w) { return w.tp + w.h; }));
               dynamicBoxBottom = Math.min(1.0, dynamicBoxBottom + 0.008);
-              // Box top must not exceed the label top
-              dynamicBoxTop = Math.min(dynamicBoxTop, labelTop);
             } else {
-              // No HW block detected — fall back to fixed offset above label
-              dynamicBoxTop = Math.max(0, labelTop - Math.max(0.12, labelH * 8.0));
-              dynamicBoxBottom = labelBottom + 0.02;
+              // No HW block detected — extend 0.08 above and 0.02 below label
+              dynamicBoxTop = Math.max(0, labelTop - 0.08);
+              dynamicBoxBottom = Math.min(1.0, labelBottom + 0.02);
             }
             result[String(pageIdx2)].push({
               label: 'sig:' + sigConcat.substring(0, 30),
