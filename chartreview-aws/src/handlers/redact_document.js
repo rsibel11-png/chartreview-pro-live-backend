@@ -1942,15 +1942,35 @@ module.exports.redactDocumentWorker = async function(event) {
             if (_eln.indexOf(_knownLast) === -1 || _eln.indexOf(_knownFirst) === -1) continue;
             // Line contains both last and first — tokenize and find the extra word
             var _eltoks = _eln.trim().split(/\s+/).filter(function(t) { return t.length >= 2; });
-            _eltoks.forEach(function(tok) {
-              if (_minedMid) return;
-              if (tok === _knownLast || tok === _knownFirst) return;
-              // Must be pure alpha (not a label like "MRN", "DOB", date, etc.)
-              if (!/^[a-z]{2,}$/.test(tok)) return;
-              // Must not be a common non-name word
-              if (/^(and|the|for|with|date|visit|unit|room|page|legal|sex|adm|d\/c|mrn|dob|csn|scan|on|of|in|at|by|to)$/.test(tok)) return;
-              _minedMid = tok.charAt(0).toUpperCase() + tok.slice(1);
-            });
+            // Find the index of the known first and last name tokens
+            var _firstIdx = _eltoks.indexOf(_knownFirst);
+            var _lastIdx  = _eltoks.indexOf(_knownLast);
+            // Look for a candidate token BETWEEN first and last name (or immediately after first)
+            // that is a pure alpha word >= 3 chars and not a known facility abbreviation
+            var _stopWords = {and:1,the:1,for:1,with:1,date:1,visit:1,unit:1,room:1,page:1,
+              legal:1,sex:1,adm:1,mrn:1,dob:1,csn:1,scan:1,on:1,of:1,in:1,at:1,by:1,to:1,
+              umc:1,mro:1,ehr:1,emr:1,md:1,rn:1,np:1,pa:1,dr:1,ed:1,er:1,icu:1,or:1};
+            if (_firstIdx >= 0 && _lastIdx >= 0) {
+              var _lo = Math.min(_firstIdx, _lastIdx);
+              var _hi = Math.max(_firstIdx, _lastIdx);
+              // Token between first and last name
+              for (var _ti = _lo + 1; _ti < _hi && !_minedMid; _ti++) {
+                var _tc = _eltoks[_ti];
+                if (_tc.length >= 3 && /^[a-z]+$/.test(_tc) && !_stopWords[_tc]) {
+                  _minedMid = _tc.charAt(0).toUpperCase() + _tc.slice(1);
+                }
+              }
+              // If nothing between, check the token immediately after first or last
+              if (!_minedMid) {
+                var _checkIdx = _hi + 1;
+                if (_checkIdx < _eltoks.length) {
+                  var _tc2 = _eltoks[_checkIdx];
+                  if (_tc2.length >= 3 && /^[a-z]+$/.test(_tc2) && !_stopWords[_tc2]) {
+                    _minedMid = _tc2.charAt(0).toUpperCase() + _tc2.slice(1);
+                  }
+                }
+              }
+            }
           }
           if (_minedMid) {
             console.log('[FOLDER-PII] mined middle name from text:', _minedMid);
