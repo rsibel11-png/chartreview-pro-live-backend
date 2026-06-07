@@ -876,7 +876,15 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
           var slice = pageWords.slice(start, start + len);
           // Strip Epic EHR superscript annotations like [JS.1T], [WC.2M], [JS.2T] from token text
           // before matching — these are embedded in Textract output and break PII matches.
-          var rawConcat = slice.map(function(w) { return (w.t || '').replace(/\[[A-Z]{1,3}\.\d[A-Z]?\]/g, ''); }).join(''); var concat = normalizeForMatch(rawConcat);
+          var rawConcat = slice.map(function(w) {
+            var _t = (w.t || '');
+            // Strip bracket-enclosed Epic markers: [JS.1T], [WC.2M], etc.
+            _t = _t.replace(/\[[A-Za-z]{1,3}\.\d[A-Za-z]?\]/g, '');
+            // Strip fused Epic suffixes Textract merges directly onto tokens:
+            // e.g. "0001506950US.2TI" → "0001506950", "Moore[Js.2T]" already handled above
+            _t = _t.replace(/[A-Z]{1,3}\.[0-9][A-Za-z]{0,2}I?$/g, '').trim();
+            return _t;
+          }).join(''); var concat = normalizeForMatch(rawConcat);
           if (piiNorm.length > 0 && concat === piiNorm) {
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
