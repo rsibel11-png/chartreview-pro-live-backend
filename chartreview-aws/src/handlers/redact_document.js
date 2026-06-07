@@ -2087,6 +2087,8 @@ module.exports.redactDocumentWorker = async function(event) {
       'reviewed', 'review', 'concentra', 'encounter', 'prescribed', 'dispensed',
       'treatment', 'diagnosis', 'patient', 'history', 'medical', 'clinical',
       'significant', 'tobacco', 'alcohol', 'assessment', 'physical', 'exam',
+      'office', 'outpatient', 'inpatient', 'visit', 'established', 'est',
+      'outpatientvisit', 'officeoutpatientvisit', 'officevisit',
     ]);
     var filteredPiiValues = knownPiiValues.filter(function(v) {
       var trimmed = (v || '').trim();
