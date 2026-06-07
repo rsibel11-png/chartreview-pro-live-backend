@@ -2080,6 +2080,14 @@ module.exports.redactDocumentWorker = async function(event) {
       return nums;
     })();
 
+    // Clinical / document boilerplate words that should NEVER be redacted
+    // regardless of how they ended up in piiValues (e.g. false-positive extraction)
+    var _clinicalBoilerplate = new Set([
+      'medications', 'medication', 'allergies', 'allergy', 'surgeries', 'surgery',
+      'reviewed', 'review', 'concentra', 'encounter', 'prescribed', 'dispensed',
+      'treatment', 'diagnosis', 'patient', 'history', 'medical', 'clinical',
+      'significant', 'tobacco', 'alcohol', 'assessment', 'physical', 'exam',
+    ]);
     var filteredPiiValues = knownPiiValues.filter(function(v) {
       var trimmed = (v || '').trim();
       // Pure 4-digit value that looks like a military time (0000-2359) — skip
@@ -2091,6 +2099,8 @@ module.exports.redactDocumentWorker = async function(event) {
       if (/^\d{1,3}$/.test(trimmed)) return false;
       // Facility street numbers extracted dynamically from document headers — skip
       if (facilityStreetNums.has(trimmed)) return false;
+      // Clinical boilerplate words — never redact these regardless of source
+      if (_clinicalBoilerplate.has(trimmed.toLowerCase())) return false;
       return true;
     });
     allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
@@ -2528,6 +2538,7 @@ module.exports.redactCaseWorker = async function(event) {
         if (/^\d{4}$/.test(trimmed)) { var n = parseInt(trimmed, 10); if (n >= 0 && n <= 2359 && (n % 100) < 60) return false; }
         if (/^\d{1,3}$/.test(trimmed)) return false;
         if (facilityStreetNums.has(trimmed)) return false;
+        if (_clinicalBoilerplate.has(trimmed.toLowerCase())) return false;
         return true;
       });
 
