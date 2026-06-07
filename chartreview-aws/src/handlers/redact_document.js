@@ -2517,6 +2517,10 @@ module.exports.redactCaseWorker = async function(event) {
         var _mrnCheck = filteredPiiValues.filter(function(v) { return v && v.indexOf('0001506950') >= 0; });
         console.log('[PII-PREFLIGHT] filteredPiiValues count:', filteredPiiValues.length, '| MRN 0001506950 in list:', _mrnCheck.length > 0, '| MRN entries:', JSON.stringify(_mrnCheck));
         allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
+        var _p31boxes = allPii['31'] || allPii['32'] || [];
+        console.log('[ALLPII-PAGE32] key 31 boxes:', (allPii['31']||[]).length, '| key 32 boxes:', (allPii['32']||[]).length);
+        console.log('[ALLPII-PAGE32] page31 MRN boxes:', JSON.stringify((allPii['31']||[]).filter(function(b){ return b.label && b.label.indexOf('506950') >= 0; })));
+        console.log('[ALLPII-KEYS] total pages with boxes:', Object.keys(allPii).length, '| keys:', Object.keys(allPii).sort(function(a,b){return parseInt(a)-parseInt(b);}).join(','));
       } else {
         var masterDocV = await PDFDocument.load(pdfBytes);
         var totalPagesV = masterDocV.getPageCount();
