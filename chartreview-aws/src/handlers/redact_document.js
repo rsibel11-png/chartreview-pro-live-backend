@@ -2101,6 +2101,8 @@ module.exports.redactDocumentWorker = async function(event) {
       if (facilityStreetNums.has(trimmed)) return false;
       // Clinical boilerplate words — never redact these regardless of source
       if (_clinicalBoilerplate.has(trimmed.toLowerCase())) return false;
+      // CPT/E&M/procedure codes (4-5 pure digits like 99214, 99213, etc.)
+      if (/^\d{4,5}$/.test(trimmed)) return false;
       return true;
     });
     allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
@@ -2539,6 +2541,8 @@ module.exports.redactCaseWorker = async function(event) {
         if (/^\d{1,3}$/.test(trimmed)) return false;
         if (facilityStreetNums.has(trimmed)) return false;
         if (_clinicalBoilerplate.has(trimmed.toLowerCase())) return false;
+        // CPT/E&M/procedure codes (4-5 pure digits like 99214, 99213, etc.)
+        if (/^\d{4,5}$/.test(trimmed)) return false;
         return true;
       });
 
