@@ -2289,9 +2289,88 @@ module.exports.redactCaseWorker = async function(event) {
       });
       var _caseFacPhones = discoverFacilityPhones(extractedText || '');
       var _caseFilterFac = function(v) { if (!v) return true; var n = String(v).replace(/[^\d]/g,''); return !(n.length === 10 && _caseFacPhones.has(n.slice(0,3)+'-'+n.slice(3,6)+'-'+n.slice(6))); };
+
+      // ── CASE: fetch folder-level PII (name, middle name) from DynamoDB ─────
+      var _caseFolderExtras = [];
+      try {
+        var _caseFolderName = (event.folder_name || '').trim();
+        var _caseOrgId      = (org_id || '').trim();
+        if (_caseFolderName && _caseOrgId) {
+          var _casePiiRec = await dynamo.send(new GetCommand({
+            TableName: 'chartreview-folder-pii-prod',
+            Key: { org_folder: _caseOrgId + '#' + _caseFolderName }
+          }));
+          if (_casePiiRec.Item) {
+            var _caseStoredName = (_casePiiRec.Item.patientName || '').trim();
+            var _caseStoredMid  = (_casePiiRec.Item.middleName  || '').trim();
+            console.log('[CASE-FOLDER-PII] loaded:', _caseStoredName, '| mid:', _caseStoredMid || '(empty)');
+            var _cNm1 = _caseStoredName ? _caseStoredName.match(/^([A-Za-z][A-Za-z'\-]+),\s*([A-Za-z][A-Za-z'\-]+)$/) : null;
+            var _cNm2 = _caseStoredName ? _caseStoredName.match(/^([A-Za-z][A-Za-z'\-]+)\s+([A-Za-z][A-Za-z'\-]+)$/) : null;
+            if (_caseStoredName) {
+              _caseFolderExtras.push(_caseStoredName);
+              if (_cNm1) {
+                _caseFolderExtras.push(_cNm1[1].trim());
+                _caseFolderExtras.push(_cNm1[2].trim());
+                _caseFolderExtras.push(_cNm1[2].trim() + ' ' + _cNm1[1].trim());
+              }
+              if (_cNm2) {
+                _caseFolderExtras.push(_cNm2[1].trim());
+                _caseFolderExtras.push(_cNm2[2].trim());
+                _caseFolderExtras.push(_cNm2[2].trim() + ' ' + _cNm2[1].trim());
+              }
+            }
+            var _cMidToUse = _caseStoredMid;
+            if (!_cMidToUse && _caseStoredName && extractedText) {
+              var _cKnownLast  = _cNm1 ? _cNm1[1].trim().toLowerCase() : (_cNm2 ? _cNm2[2].trim().toLowerCase() : '');
+              var _cKnownFirst = _cNm1 ? _cNm1[2].trim().toLowerCase() : (_cNm2 ? _cNm2[1].trim().toLowerCase() : '');
+              if (_cKnownLast && _cKnownFirst) {
+                var _cLines = extractedText.split('\n');
+                var _cStopWords = {and:1,the:1,for:1,with:1,date:1,visit:1,unit:1,room:1,page:1,legal:1,sex:1,adm:1,mrn:1,dob:1,csn:1,scan:1,on:1,of:1,in:1,at:1,by:1,to:1,umc:1,mro:1,ehr:1,emr:1,md:1,rn:1,np:1,pa:1,dr:1,ed:1,er:1,icu:1,or:1};
+                for (var _cli = 0; _cli < _cLines.length && !_cMidToUse; _cli++) {
+                  var _cln = _cLines[_cli].toLowerCase().replace(/[^a-z\s]/g, ' ');
+                  if (_cln.indexOf(_cKnownLast) === -1 || _cln.indexOf(_cKnownFirst) === -1) continue;
+                  var _ctoks = _cln.trim().split(/\s+/).filter(function(t) { return t.length >= 2; });
+                  var _cFiIdx = _ctoks.indexOf(_cKnownFirst);
+                  var _cLaIdx = _ctoks.indexOf(_cKnownLast);
+                  if (_cFiIdx >= 0 && _cLaIdx >= 0) {
+                    var _cLo = Math.min(_cFiIdx, _cLaIdx);
+                    var _cHi = Math.max(_cFiIdx, _cLaIdx);
+                    for (var _cti = _cLo + 1; _cti < _cHi && !_cMidToUse; _cti++) {
+                      var _ctc = _ctoks[_cti];
+                      if (_ctc.length >= 3 && /^[a-z]+$/.test(_ctc) && !_cStopWords[_ctc]) {
+                        _cMidToUse = _ctc.charAt(0).toUpperCase() + _ctc.slice(1);
+                      }
+                    }
+                  }
+                }
+                if (_cMidToUse) { console.log('[CASE-FOLDER-PII] mined middle name:', _cMidToUse); }
+              }
+            }
+            if (_cMidToUse) {
+              _caseFolderExtras.push(_cMidToUse);
+              _caseFolderExtras.push(_cMidToUse[0].toUpperCase());
+              if (_cNm1) {
+                _caseFolderExtras.push(_cNm1[2].trim() + ' ' + _cMidToUse + ' ' + _cNm1[1].trim());
+                _caseFolderExtras.push(_cNm1[1].trim() + ', ' + _cNm1[2].trim() + ' ' + _cMidToUse);
+              }
+              if (_cNm2) { _caseFolderExtras.push(_cNm2[1].trim() + ' ' + _cMidToUse + ' ' + _cNm2[2].trim()); }
+            }
+            console.log('[CASE-FOLDER-PII] extras:', JSON.stringify(_caseFolderExtras));
+          } else {
+            console.log('[CASE-FOLDER-PII] no record for key:', _caseOrgId + '#' + _caseFolderName);
+          }
+        } else {
+          console.log('[CASE-FOLDER-PII] skipped — folder_name:', _caseFolderName, 'org_id:', _caseOrgId);
+        }
+      } catch (_cFpErr) {
+        console.log('[CASE-FOLDER-PII] error:', _cFpErr.message);
+      }
+      // ── End CASE folder PII ─────────────────────────────────────────────────
+
       var knownPiiValues = knownPiiValuesBase.filter(_caseFilterFac)
         .concat(discoveredAddrTokens.filter(function(v) { return knownPiiValuesBase.indexOf(v) === -1; }))
-        .concat(caseUserPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }));
+        .concat(caseUserPiiExpanded.filter(function(v) { return v && v.trim().length >= 1; }))
+        .concat(_caseFolderExtras.filter(function(v) { return v && v.trim().length >= 1 && knownPiiValuesBase.indexOf(v) === -1; }));
       // Build source map for CSV audit trail — uses tagged rules for specificity
       var piiSourceMap = {};
       var _caseTaggedPii = extractKnownPiiValuesTagged(extractedText || '');
