@@ -187,7 +187,7 @@ function extractKnownPiiValues(extractedText) {
     /(?:SSN|S\.S\.N\.|SOCIAL\s*SECURITY)\s*[:\|]?\s*(\d{9})/gi,
 
     // MRN / PRN / Patient Record Number — must follow label
-    /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|]|PRN\s*[:\|]?|Patient\s*Record\s*(?:No\.?|#)|Record\s*(?:No\.?|#))\s*[:\|]?\s*([A-Z0-9\-]+)/gi,
+    /(?:MRN#?|MR\s*#|MED(?:ICAL)?\s*REC(?:ORD)?\s*(?:NO\.?|#)?|CHART\s*#|MRN\s*[:\|]|PRN\s*[:\|]?|Patient\s*Record\s*(?:No\.?|#)|Record\s*(?:No\.?|#))\s*[:\|]?\s*([A-Z0-9\-]*\d[A-Z0-9\-]*)/gi,
 
     // Driver's License number + Document Discriminator
     /(?:DL\s*(?:NO\.?|#|NUMBER)|LICENSE\s*(?:NO\.?|#|NUMBER)|DRIVERS?\s+LIC(?:ENSE)?\s*(?:NO\.?|#)?|4[dD]\s*DL\s*NO\.?)\s*[:\|]?\s*([A-Z0-9]+)/gi,
@@ -2303,7 +2303,9 @@ module.exports.redactCaseWorker = async function(event) {
           if (_casePiiRec.Item) {
             var _caseStoredName = (_casePiiRec.Item.patientName || '').trim();
             var _caseStoredMid  = (_casePiiRec.Item.middleName  || '').trim();
-            console.log('[CASE-FOLDER-PII] loaded:', _caseStoredName, '| mid:', _caseStoredMid || '(empty)');
+            var _caseStoredMrn  = (_casePiiRec.Item.mrn || _casePiiRec.Item.MRN || '').trim().replace(/[,;]+$/, '');
+            console.log('[CASE-FOLDER-PII] loaded:', _caseStoredName, '| mid:', _caseStoredMid || '(empty)', '| mrn:', _caseStoredMrn || '(empty)');
+            if (_caseStoredMrn) { _caseFolderExtras.push(_caseStoredMrn); }
             var _cNm1 = _caseStoredName ? _caseStoredName.match(/^([A-Za-z][A-Za-z'\-]+),\s*([A-Za-z][A-Za-z'\-]+)$/) : null;
             var _cNm2 = _caseStoredName ? _caseStoredName.match(/^([A-Za-z][A-Za-z'\-]+)\s+([A-Za-z][A-Za-z'\-]+)$/) : null;
             if (_caseStoredName) {
