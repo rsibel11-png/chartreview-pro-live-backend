@@ -2304,8 +2304,28 @@ module.exports.redactCaseWorker = async function(event) {
             var _caseStoredName = (_casePiiRec.Item.patientName || '').trim();
             var _caseStoredMid  = (_casePiiRec.Item.middleName  || '').trim();
             var _caseStoredMrn  = (_casePiiRec.Item.mrn || _casePiiRec.Item.MRN || '').trim().replace(/[,;]+$/, '');
-            console.log('[CASE-FOLDER-PII] loaded:', _caseStoredName, '| mid:', _caseStoredMid || '(empty)', '| mrn:', _caseStoredMrn || '(empty)');
-            if (_caseStoredMrn) { _caseFolderExtras.push(_caseStoredMrn); }
+            var _caseStoredMrn2 = (_casePiiRec.Item.mrn2 || _casePiiRec.Item.hospitalMrn || '').trim().replace(/[,;]+$/, '');
+            var _caseStoredDob  = (_casePiiRec.Item.dob || '').trim().replace(/[,;]+$/, '');
+            var _caseStoredPhone = (_casePiiRec.Item.phone || '').trim();
+            var _caseStoredSsn  = (_casePiiRec.Item.ssn || '').trim();
+            console.log('[CASE-FOLDER-PII] loaded:', _caseStoredName, '| mid:', _caseStoredMid || '(empty)', '| mrn:', _caseStoredMrn || '(empty)', '| dob:', _caseStoredDob || '(empty)');
+            if (_caseStoredMrn)  { _caseFolderExtras.push(_caseStoredMrn); }
+            if (_caseStoredMrn2) { _caseFolderExtras.push(_caseStoredMrn2); }
+            if (_caseStoredDob) {
+              expandDob(_caseStoredDob).forEach(function(ev) { _caseFolderExtras.push(ev); });
+            }
+            if (_caseStoredPhone) {
+              var _cPhNum = _caseStoredPhone.replace(/[^\d]/g, '');
+              if (_cPhNum.length >= 7) {
+                _caseFolderExtras.push(_caseStoredPhone);
+                _caseFolderExtras.push(_cPhNum);
+                if (_cPhNum.length === 10) {
+                  _caseFolderExtras.push(_cPhNum.slice(0,3)+'-'+_cPhNum.slice(3,6)+'-'+_cPhNum.slice(6));
+                  _caseFolderExtras.push('('+_cPhNum.slice(0,3)+')-'+_cPhNum.slice(3,6)+'-'+_cPhNum.slice(6));
+                  _caseFolderExtras.push('('+_cPhNum.slice(0,3)+')'+_cPhNum.slice(3,6)+'-'+_cPhNum.slice(6));
+                }
+              }
+            }
             var _cNm1 = _caseStoredName ? _caseStoredName.match(/^([A-Za-z][A-Za-z'\-]+),\s*([A-Za-z][A-Za-z'\-]+)$/) : null;
             var _cNm2 = _caseStoredName ? _caseStoredName.match(/^([A-Za-z][A-Za-z'\-]+)\s+([A-Za-z][A-Za-z'\-]+)$/) : null;
             if (_caseStoredName) {
