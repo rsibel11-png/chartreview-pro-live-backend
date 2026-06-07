@@ -2267,6 +2267,8 @@ module.exports.redactCaseWorker = async function(event) {
   var folder_name          = (event.folder_name || (Array.isArray(event.doc_records) && event.doc_records[0] && (event.doc_records[0].folder || event.doc_records[0].folder_name)) || '').trim() || null;
   var patient_id           = event.patient_id;
 
+  console.log('[CASE-WORKER-INIT] job_id:', job_id, '| org_id:', org_id, '| folder_name:', folder_name, '| doc_records count:', Array.isArray(doc_records) ? doc_records.length : 'n/a', '| first doc.folder:', (Array.isArray(doc_records) && doc_records[0]) ? doc_records[0].folder : 'n/a', '| first doc.folder_name:', (Array.isArray(doc_records) && doc_records[0]) ? doc_records[0].folder_name : 'n/a');
+
   try {
     await updateJob(job_id, { progress_message: 'Redacting ' + doc_records.length + ' part(s) in parallel...', updated_at: new Date().toISOString() });
 
