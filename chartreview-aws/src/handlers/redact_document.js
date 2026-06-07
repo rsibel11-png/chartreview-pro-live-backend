@@ -1615,11 +1615,21 @@ async function applyRedactions(pdfBytes, piiByPage) {
       var px, py, pw, ph;
 
       if (rotation === 0) {
-        // Standard: visual space == raw space, just flip Y for pdf-lib
-        px = bx * rawW;
-        py = rawH - (by + bh) * rawH;
+        // Standard: visual space == raw space, just flip Y for pdf-lib.
+        // Handwriting boxes (label === 'handwriting') have Textract bounding boxes
+        // that sit slightly below the visible ink stroke. Shift those boxes upward
+        // by 1×bh so the box covers the actual signature. Print blocks are unchanged.
         pw = bw * rawW;
-        ph = bh * rawH;
+        if (box.label === 'handwriting') {
+          var _yShift = bh * rawH;
+          ph = (bh * rawH) + _yShift;
+          px = bx * rawW;
+          py = rawH - (by + bh) * rawH + _yShift;
+        } else {
+          ph = bh * rawH;
+          px = bx * rawW;
+          py = rawH - (by + bh) * rawH;
+        }
 
       } else if (rotation === 90) {
         // Visual page is rawH wide × rawW tall (axes swapped).
