@@ -175,7 +175,7 @@ function extractKnownPiiValues(extractedText) {
     // Captures the FULL phrase — never splits out middle name standalone
     // 3-part LAST, FIRST MIDDLE — requires end-of-line or MRN/DOB to follow
     // Excludes lines where the 3rd component is a title (MD, DO, RN, etc.)
-    /([A-Za-z][A-Za-z'\-\.]{2,},\s+[A-Za-z][A-Za-z'\-\.]{2,}\s+[A-Za-z][A-Za-z'\-\.]{2,})(?=\s*(?:MRN|DOB|Legal|\d))/mgi,
+    /^([A-Za-z][A-Za-z'\-\.]{2,},\s+[A-Za-z][A-Za-z'\-\.]{2,}\s+[A-Za-z][A-Za-z'\-\.]{2,})(?=\s*(?:MRN|DOB|Legal|\d))/mg,
 
     // Date of birth — must follow label (captures MM/DD/YYYY and variants)
     /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date|Date\s*of\s*Birth)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi,
@@ -340,7 +340,7 @@ function extractKnownPiiValuesTagged(extractedText) {
     { name: 'patient-name',        rx: /^Patient\s*Name\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi },
     { name: 'patient-name',        rx: /^(?:CLAIMANT|CLIENT)\s*[:\|]\s*([A-Za-z][A-Za-z\-,'\. ]+)$/mgi },
     { name: 'patient-name',        rx: /Patient['\u2019]?s?\s*Nam[e]?\s*[:\|]?\s{0,5}([A-Z][A-Z\-,'\. ]+)/gi },
-    { name: 'full-name-header',    rx: /([A-Za-z][A-Za-z'\-\.]{2,},\s+[A-Za-z][A-Za-z'\-\.]{2,}\s+[A-Za-z][A-Za-z'\-\.]{2,})(?=\s*(?:MRN|DOB|Legal|\d))/mgi },
+    { name: 'full-name-header',    rx: /^([A-Za-z][A-Za-z'\-\.]{2,},\s+[A-Za-z][A-Za-z'\-\.]{2,}\s+[A-Za-z][A-Za-z'\-\.]{2,})(?=\s*(?:MRN|DOB|Legal|\d))/mg },
     { name: 'dob',                 rx: /(?:DOB|D\.O\.B\.|DATE\s*OF\s*BIRTH|BIRTH\s*(?:DATE|DT)|BIRTHDATE|Birth\s*Date|Date\s*of\s*Birth)\s*[:\|]\s*([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi },
     { name: 'dob',                 rx: /\bBirthdate\s*[:\|]?\s*-?([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})/gi },
     { name: 'ssn',                 rx: /(\d{3}-\d{2}-\d{4})/g },
