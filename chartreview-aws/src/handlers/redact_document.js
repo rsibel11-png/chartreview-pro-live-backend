@@ -2264,7 +2264,7 @@ module.exports.redactCaseWorker = async function(event) {
   var doc_records          = event.doc_records;
   var original_document_id = event.original_document_id;
   var org_id               = event.org_id;
-  var folder_name          = event.folder_name;
+  var folder_name          = (event.folder_name || (Array.isArray(event.doc_records) && event.doc_records[0] && (event.doc_records[0].folder || event.doc_records[0].folder_name)) || '').trim() || null;
   var patient_id           = event.patient_id;
 
   try {
@@ -2293,7 +2293,7 @@ module.exports.redactCaseWorker = async function(event) {
       // ── CASE: fetch folder-level PII (name, middle name) from DynamoDB ─────
       var _caseFolderExtras = [];
       try {
-        var _caseFolderName = (folder_name || event.folder_name || '').trim();
+        var _caseFolderName = (folder_name || (doc.folder || doc.folder_name) || '').trim();
         var _caseOrgId      = (org_id || '').trim();
         if (_caseFolderName && _caseOrgId) {
           var _casePiiRec = await dynamo.send(new GetCommand({
