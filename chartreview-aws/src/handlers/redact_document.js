@@ -2293,7 +2293,7 @@ module.exports.redactCaseWorker = async function(event) {
       // ── CASE: fetch folder-level PII (name, middle name) from DynamoDB ─────
       var _caseFolderExtras = [];
       try {
-        var _caseFolderName = (event.folder_name || '').trim();
+        var _caseFolderName = (folder_name || event.folder_name || '').trim();
         var _caseOrgId      = (org_id || '').trim();
         if (_caseFolderName && _caseOrgId) {
           var _casePiiRec = await dynamo.send(new GetCommand({
