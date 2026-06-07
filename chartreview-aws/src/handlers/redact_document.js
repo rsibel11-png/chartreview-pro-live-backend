@@ -2222,7 +2222,7 @@ const _redactCaseStart = async function(event) {
     docRecords.push(docRes.Item);
   }
   var org_id = docRecords[0].org_id || body.org_id || null;
-  var folder_name = docRecords[0].folder_name || null;
+  var folder_name = (docRecords[0].folder || docRecords[0].folder_name || '').trim() || null;
   var patient_id = docRecords[0].patient_id || null;
   docRecords.sort(function(a, b) {
     var aName = (a.original_filename || a.file_name || '').toLowerCase();
