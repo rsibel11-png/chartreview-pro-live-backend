@@ -2289,6 +2289,87 @@ module.exports.redactCaseWorker = async function(event) {
           caseUserPiiExpanded.push(v);
         }
       });
+
+      // ── DOC WORKER: fetch folder-level PII from DynamoDB ──────────────────
+      var _docFolderExtras = [];
+      try {
+        var _docFolderName = (doc.folder || doc.folder_name || event.folder_name || '').trim() || null;
+        var _docOrgId      = (doc.org_id || event.org_id || '').trim();
+        console.log('[DOC-FOLDER-PII] folder_name:', _docFolderName, '| org_id:', _docOrgId);
+        if (_docFolderName && _docOrgId) {
+          var _docPiiRec = await dynamo.send(new GetCommand({
+            TableName: 'chartreview-folder-pii-prod',
+            Key: { org_folder: _docOrgId + '#' + _docFolderName }
+          }));
+          if (_docPiiRec.Item) {
+            var _docStoredName = (_docPiiRec.Item.patientName || '').trim();
+            var _docStoredMid  = (_docPiiRec.Item.middleName  || '').trim();
+            var _docStoredMrn  = (_docPiiRec.Item.mrn || _docPiiRec.Item.MRN || '').trim().replace(/[,;]+$/, '');
+            var _docStoredMrn2 = (_docPiiRec.Item.hospitalMrn || _docPiiRec.Item.mrn2 || '').trim().replace(/[,;]+$/, '');
+            var _docStoredDob  = (_docPiiRec.Item.dob || '').trim().replace(/[,;]+$/, '');
+            var _docStoredPhone = (_docPiiRec.Item.phone || '').trim();
+            console.log('[DOC-FOLDER-PII] loaded:', _docStoredName, '| mid:', _docStoredMid || '(empty)', '| mrn:', _docStoredMrn || '(empty)', '| mrn2:', _docStoredMrn2 || '(empty)', '| dob:', _docStoredDob || '(empty)');
+            if (_docStoredMrn)  { _docFolderExtras.push(_docStoredMrn); }
+            if (_docStoredMrn2) { _docFolderExtras.push(_docStoredMrn2); }
+            if (_docStoredDob) { expandDob(_docStoredDob).forEach(function(ev) { _docFolderExtras.push(ev); }); }
+            if (_docStoredPhone) {
+              var _dPhNum = _docStoredPhone.replace(/[^\d]/g, '');
+              if (_dPhNum.length >= 7) {
+                _docFolderExtras.push(_docStoredPhone);
+                _docFolderExtras.push(_dPhNum);
+                if (_dPhNum.length === 10) {
+                  _docFolderExtras.push(_dPhNum.slice(0,3)+'-'+_dPhNum.slice(3,6)+'-'+_dPhNum.slice(6));
+                  _docFolderExtras.push('('+_dPhNum.slice(0,3)+')-'+_dPhNum.slice(3,6)+'-'+_dPhNum.slice(6));
+                  _docFolderExtras.push('('+_dPhNum.slice(0,3)+')'+_dPhNum.slice(3,6)+'-'+_dPhNum.slice(6));
+                }
+              }
+            }
+            if (_docStoredName) {
+              _docFolderExtras.push(_docStoredName);
+              var _dNm1 = _docStoredName.match(/^([A-Za-z][A-Za-z'\-]+),\s*([A-Za-z][A-Za-z'\-]+)$/);
+              var _dNm2 = _docStoredName.match(/^([A-Za-z][A-Za-z'\-]+)\s+([A-Za-z][A-Za-z'\-]+)$/);
+              if (_dNm1) { _docFolderExtras.push(_dNm1[1].trim()); _docFolderExtras.push(_dNm1[2].trim()); _docFolderExtras.push(_dNm1[2].trim()+' '+_dNm1[1].trim()); }
+              if (_dNm2) { _docFolderExtras.push(_dNm2[1].trim()); _docFolderExtras.push(_dNm2[2].trim()); _docFolderExtras.push(_dNm2[2].trim()+' '+_dNm2[1].trim()); }
+            }
+            var _dMidToUse = _docStoredMid;
+            if (!_dMidToUse && _docStoredName && extractedText) {
+              var _dKnownLast  = _dNm1 ? _dNm1[1].trim().toLowerCase() : (_dNm2 ? _dNm2[2].trim().toLowerCase() : '');
+              var _dKnownFirst = _dNm1 ? _dNm1[2].trim().toLowerCase() : (_dNm2 ? _dNm2[1].trim().toLowerCase() : '');
+              if (_dKnownLast && _dKnownFirst) {
+                var _dStopWords = {and:1,the:1,for:1,with:1,date:1,visit:1,unit:1,room:1,page:1,legal:1,sex:1,adm:1,mrn:1,dob:1,csn:1,scan:1,on:1,of:1,in:1,at:1,by:1,to:1,md:1,rn:1,np:1,pa:1,dr:1};
+                var _dLines = extractedText.split('\n');
+                for (var _dli = 0; _dli < _dLines.length && !_dMidToUse; _dli++) {
+                  var _dln = _dLines[_dli].toLowerCase().replace(/[^a-z\s]/g, ' ');
+                  if (_dln.indexOf(_dKnownLast) >= 0 && _dln.indexOf(_dKnownFirst) >= 0) {
+                    var _dToks = _dln.trim().split(/\s+/).filter(function(t){ return t.length >= 3 && !_dStopWords[t]; });
+                    for (var _dti = 0; _dti < _dToks.length; _dti++) {
+                      if (_dToks[_dti] !== _dKnownLast && _dToks[_dti] !== _dKnownFirst && _dToks[_dti].length >= 3 && /^[a-z]+$/.test(_dToks[_dti])) {
+                        _dMidToUse = _dToks[_dti].charAt(0).toUpperCase() + _dToks[_dti].slice(1);
+                        console.log('[DOC-FOLDER-PII] mined middle name:', _dMidToUse);
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            if (_dMidToUse) {
+              _docFolderExtras.push(_dMidToUse);
+              _docFolderExtras.push(_dMidToUse.charAt(0) + '.');
+              if (_docStoredName) {
+                var _dN1 = _docStoredName.match(/^([A-Za-z][A-Za-z'\-]+),\s*([A-Za-z][A-Za-z'\-]+)$/);
+                var _dN2 = _docStoredName.match(/^([A-Za-z][A-Za-z'\-]+)\s+([A-Za-z][A-Za-z'\-]+)$/);
+                if (_dN1) { _docFolderExtras.push(_dN1[2].trim()+' '+_dMidToUse+' '+_dN1[1].trim()); }
+                if (_dN2) { _docFolderExtras.push(_dN2[1].trim()+' '+_dMidToUse+' '+_dN2[2].trim()); }
+              }
+            }
+            console.log('[DOC-FOLDER-PII] extras count:', _docFolderExtras.length);
+          } else {
+            console.log('[DOC-FOLDER-PII] no record for key:', _docOrgId + '#' + _docFolderName);
+          }
+        }
+      } catch(e) { console.log('[DOC-FOLDER-PII] error:', e.message); }
+
       var _caseFacPhones = discoverFacilityPhones(extractedText || '');
       var _caseFilterFac = function(v) { if (!v) return true; var n = String(v).replace(/[^\d]/g,''); return !(n.length === 10 && _caseFacPhones.has(n.slice(0,3)+'-'+n.slice(3,6)+'-'+n.slice(6))); };
 
