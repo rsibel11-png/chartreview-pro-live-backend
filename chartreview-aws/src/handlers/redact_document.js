@@ -2514,6 +2514,8 @@ module.exports.redactCaseWorker = async function(event) {
       });
 
       if (wordBlocks && wordBlocks.length > 0) {
+        var _mrnCheck = filteredPiiValues.filter(function(v) { return v && v.indexOf('0001506950') >= 0; });
+        console.log('[PII-PREFLIGHT] filteredPiiValues count:', filteredPiiValues.length, '| MRN 0001506950 in list:', _mrnCheck.length > 0, '| MRN entries:', JSON.stringify(_mrnCheck));
         allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
       } else {
         var masterDocV = await PDFDocument.load(pdfBytes);
