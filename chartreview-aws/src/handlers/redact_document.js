@@ -1950,8 +1950,9 @@ module.exports.redactDocumentWorker = async function(event) {
         var _fwd3 = _m3[2].trim() + ' ' + _m3[3].trim() + ' ' + _m3[1].trim(); // FIRST MID LAST
         var _fwd2 = _m3[2].trim() + ' ' + _m3[1].trim();                        // FIRST LAST
         var _mid2 = _m3[3].trim() + ' ' + _m3[1].trim();                        // MIDDLE LAST (e.g. "Maria Moore")
-        var _rev2 = _m3[1].trim() + ', ' + _m3[2].trim();                       // LAST, FIRST
-        [_fwd3, _fwd2, _mid2, _rev2].forEach(function(_v) {
+        var _rev2 = _m3[1].trim() + ', ' + _m3[2].trim();                       // LAST, FIRST (with comma)
+        var _rev3 = _m3[1].trim() + ' ' + _m3[2].trim();                        // LAST FIRST (no comma) — catches Textract-fused "LAST,FIRST" tokens
+        [_fwd3, _fwd2, _mid2, _rev2, _rev3].forEach(function(_v) {
           if (_3partExtras.indexOf(_v) === -1 && knownPiiValuesBase.indexOf(_v) === -1) {
             _3partExtras.push(_v);
           }
@@ -1978,8 +1979,11 @@ module.exports.redactDocumentWorker = async function(event) {
           // Reversed form
           var _nm1 = _storedName.match(/^([A-Z][A-Z'\-\.]+),\s*([A-Z][A-Z'\-\. ]+)$/i);
           if (_nm1) {
-            var _fwd = _nm1[2].trim() + ' ' + _nm1[1].trim();
+            var _fwd = _nm1[2].trim() + ' ' + _nm1[1].trim(); // FIRST LAST
             if (_folderPiiExtras.indexOf(_fwd) === -1) _folderPiiExtras.push(_fwd);
+            // LAST FIRST (no comma) — matches Textract-fused "RODRIGUEZ,CLAUDIA" token after normalization
+            var _revNoComma = _nm1[1].trim() + ' ' + _nm1[2].trim();
+            if (_folderPiiExtras.indexOf(_revNoComma) === -1) _folderPiiExtras.push(_revNoComma);
           }
           var _nm2 = _storedName.match(/^([A-Z][A-Z'\-\.]+)\s+([A-Z][A-Z'\-\.]+)$/i);
           if (_nm2) {
