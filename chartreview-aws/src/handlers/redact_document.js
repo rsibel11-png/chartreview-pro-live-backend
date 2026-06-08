@@ -439,7 +439,7 @@ function discoverPatientAddress(extractedText) {
   // Facility keyword guard — if a street appears after one of these, skip it
   var FACILITY_RE = /hospital|medical\s*cent|med\s*ctr|clinic|health\s*system|surgery\s*cent|orthopedic|physical\s*therapy|imaging|radiology|university|college|institute|umc\s*rad|umc\s*radiology|testing\s*performed|lab.*abbreviation|valid\s*date/i;
   // Known facility street names that should never be treated as patient address
-  var FACILITY_STREET_RE = /charleston\s*blvd|flamingo|desert\s*inn|mariah\s*drive|mount\s*mariah|eastern\s*ave|harrison\s*ave|pinto\s*lane|hope\s*place|third\s*st|s\.\s*third/i;
+  var FACILITY_STREET_RE = /polaris|charleston\s*blvd|flamingo|desert\s*inn|mariah\s*drive|mount\s*mariah|eastern\s*ave|harrison\s*ave|pinto\s*lane|hope\s*place|third\s*st|s\.\s*third/i;
 
   // Suite/floor indicator — facility addresses have these, patient ones usually don't
   var SUITE_RE = /\b(?:STE|SUITE|FLOOR|FL\.|#)\s*\d/i;
@@ -472,7 +472,7 @@ function discoverPatientAddress(extractedText) {
         // Skip if this line is itself a facility address
         if (isFacilityLine(candidate)) break;
         // Skip if it has a suite/floor indicator (facility)
-        if (SUITE_RE.test(candidate)) continue;
+        if (SUITE_RE.test(candidate)) break;  // facility address (has suite/floor) — stop scanning
 
         // Check for street address line
         var streetMatch = candidate.match(STREET_RE);
