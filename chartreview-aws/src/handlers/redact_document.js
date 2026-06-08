@@ -373,7 +373,7 @@ function extractKnownPiiValuesTagged(extractedText) {
     { name: 'account-no',          rx: /(?:ACCOUNT\s*(?:NO\.?|NUMBER|#)|ACCT\s*(?:NO\.?|#)|Acct\s*#|ACCOUNT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
     { name: 'unit-no',             rx: /(?:UNIT\s*(?:NO\.?|NUMBER|#)|Unit\s*(?:No\.?|#)|Unit\s*#|UNIT#)\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
     { name: 'episode-id',          rx: /(?:Episode\s*ID|FIN#?)\s*[:\|]\s*([A-Z0-9\-]+)/gi },
-    { name: 'insurance-id',        rx: /(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#|Member\s*ID#?)\s*[:\|]?\s*([A-Z0-9\-]+)/gi },
+    { name: 'insurance-id',        rx: /(?:Plan\s*#|Plan\s*No\.?|GROUP\s*#|Group\s*No\.?|MEMBER\s*(?:ID|#)|Member\s*ID|POLICY\s*(?:NO\.?|#)|CLM#?|Claim\s*#|Member\s*ID#?)\s*[:\|]?\s*([A-Z0-9\-]*\d[A-Z0-9\-]*)/gi },
     { name: 'phone',               rx: /(?:PHONE#?|CELL|MOBILE|TEL(?:EPHONE)?|Home\s*Phone|Work\s*Phone|Patient\s*[Pp]hone|Patient\s*PH|Phone\s*Number|Phone\s*#|PH\s*#?|Fax)\s*[:\|]?\s*([\d\(\)\-\.\s]{10,})/gi },
     { name: 'phone',               rx: /\((\d{3})\)\s*(\d{3}[-\s]\d{4})/g },
     { name: 'phone',               rx: /\b(\d{3}-\d{3}-\d{4})\b/g },
