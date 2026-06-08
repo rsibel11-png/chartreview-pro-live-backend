@@ -523,10 +523,12 @@ function discoverPatientAddress(extractedText) {
             if (cszMatch) {
               var zip = cszMatch[3];
               discovered.add(zip);
-              // City name — split and add words >= 3 chars (skip state abbrev)
-              var city = cszMatch[1].replace(/,/g, '').trim();
-              // Add city as whole phrase only — no word splitting
-              if (city.length >= 3) discovered.add(city);
+              // City: NOT added here. Cities are already in piiValues via the
+              // user-supplied address string and matched by the sliding window as
+              // a complete consecutive-token phrase (e.g. "North" + "Las" + "Vegas").
+              // Adding cities here causes any city found near ANY address block —
+              // including employer/facility addresses — to enter piiValues as a
+              // standalone phrase, producing matches everywhere that city appears.
             } else {
               // Maybe the zip is on the same street line or embedded
               var zipMatch = candidate.match(ZIP_RE);
