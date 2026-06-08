@@ -71,6 +71,16 @@ function _tokenizeAddress(v) {
   return res;
 }
 
+// Clinical boilerplate words — module-level so redactCaseWorker can access them
+var _clinicalBoilerplate = new Set([
+  'medications', 'medication', 'allergies', 'allergy', 'surgeries', 'surgery',
+  'reviewed', 'review', 'concentra', 'encounter', 'prescribed', 'dispensed',
+  'treatment', 'diagnosis', 'patient', 'history', 'medical', 'clinical',
+  'significant', 'tobacco', 'alcohol', 'assessment', 'physical', 'exam',
+  'office', 'outpatient', 'inpatient', 'visit', 'established', 'est',
+  'outpatientvisit', 'officeoutpatientvisit', 'officevisit',
+]);
+
 
 async function getS3Bytes(key) {
   const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
