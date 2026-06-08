@@ -269,6 +269,9 @@ function extractKnownPiiValues(extractedText) {
         if (/^[a-z\s,\.]{15,}$/.test(val)) continue;
         // Skip bare 2-letter state abbreviations
         if (/^[A-Z]{2}$/.test(val)) continue;
+        // Skip bare geographic fragment words — OCR-split city names like "Las", "North", "San"
+        // These only redact correctly as part of multi-word city phrases, never standalone
+        if (/^(Las|Los|San|Santa|Saint|North|South|East|West|New|Fort|Mount|Port|Lake|Bay|Rio|Del|Van|El|La|Le)$/i.test(val.trim())) continue;
         // Skip pure digit strings < 4 digits (ROM values, vitals, age, room#)
         if (/^\d{1,3}$/.test(val)) continue;
         // Skip PII field label words — these are extraction triggers, not values to redact.
@@ -405,6 +408,8 @@ function extractKnownPiiValuesTagged(extractedText) {
       }
       groups.forEach(function(val) {
         if (!val || val.length < 2) return;
+        // Skip bare geographic fragment words (OCR-split city names like "Las", "North", "San")
+        if (/^(Las|Los|San|Santa|Saint|North|South|East|West|New|Fort|Mount|Port|Lake|Bay|Rio|Del|Van|El|La|Le)$/i.test(val.trim())) return;
         var norm = val.toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!seen.has(norm)) {
           seen.add(norm);
