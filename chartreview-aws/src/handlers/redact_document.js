@@ -2030,7 +2030,7 @@ module.exports.redactDocumentWorker = async function(event) {
     userPiiExpanded.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'user-supplied'; });
     _folderPiiExtras.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'folder-pii'; });
     _3partExtras.forEach(function(v) { if (v && !piiSourceMap[normalizeForMatch(v)]) piiSourceMap[normalizeForMatch(v)] = 'name-expansion'; });
-    console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 25)));
+    console.log('Known PII values (' + knownPiiValues.length + ') [' + discoveredAddrTokens.length + ' addr, ' + userSuppliedPii.length + ' user-supplied]:', JSON.stringify(knownPiiValues.slice(0, 200)));
 
     const masterDoc  = await PDFDocument.load(pdfBytes);
     const totalPages = masterDoc.getPageCount();
