@@ -300,6 +300,10 @@ function extractKnownPiiValues(extractedText) {
   });
 
   // Expand hyphenated compound names: MORA-MALDONADO -> also add MORA and MALDONADO separately
+  // SCOPE GUARD: only expand short identifier-like values (names, IDs).
+  // Long strings (narrative fragments, sentences) must NOT be expanded —
+  // doing so causes clinical words like "medications", "treatment" to be
+  // extracted as PII tokens via comma/hyphen splitting of narrative text.
   var expanded = new Set(found);
   found.forEach(function(val) {
     if (!val) return;
@@ -308,19 +312,31 @@ function extractKnownPiiValues(extractedText) {
       expandDob(val.trim()).forEach(function(v) { if (v.length >= 4) expanded.add(v); });
       return;
     }
-    if (val && val.indexOf('-') !== -1) {
+    // Hyphen expansion: ONLY for short values (< 50 chars, < 4 spaces = max 4 words)
+    // This handles "MORA-MALDONADO", "606-02-0439", "FXT-0691" but NOT narrative sentences
+    if (val && val.indexOf('-') !== -1 && val.length <= 50 && (val.match(/ /g) || []).length < 4) {
       var parts = val.split('-');
       parts.forEach(function(p) {
         var trimmed = p.trim().replace(/[,\.\s]/g, '');
         if (trimmed.length >= 3) expanded.add(p.trim().split(',')[0].trim());
       });
     }
-    // Also split on comma (MORA-MALDONADO,VILMA -> VILMA separately)
+    // Comma expansion: ONLY for values that look like "LAST, FIRST" name patterns
+    // (1-2 words before comma, 1-2 words after) — NOT long comma-separated sentences
+    // This handles "RODRIGUEZ, CLAUDIA" but NOT "treatment plan, medications, follow up"
     if (val && val.indexOf(',') !== -1) {
-      val.split(',').forEach(function(p) {
-        var trimmed = p.trim();
-        if (trimmed.length >= 3) expanded.add(trimmed.split(' ')[0]);
-      });
+      var commaParts = val.split(',');
+      // Only expand if <= 3 comma-separated segments and total length <= 60 chars
+      if (commaParts.length <= 3 && val.length <= 60) {
+        commaParts.forEach(function(p) {
+          var trimmed = p.trim();
+          // Only add if the segment looks like a name token (no internal spaces > 1 word = not a phrase)
+          var firstWord = trimmed.split(' ')[0];
+          if (firstWord.length >= 3 && /^[A-Za-z]/.test(firstWord) && (trimmed.match(/ /g) || []).length <= 1) {
+            expanded.add(firstWord);
+          }
+        });
+      }
     }
   });
   return Array.from(expanded);
@@ -535,7 +551,9 @@ function discoverPatientAddress(extractedText) {
     var prevL = lines[ii - 1] ? lines[ii - 1].trim() : '';
     var streetM = prevL.match(STREET_RE);
     if (!streetM) continue;
-    // Facility guard — check 4 lines above
+    // Facility guard — check the street line itself AND 4 lines above
+    // The street line itself may contain "Ste 100" (facility suite) — check it directly
+    if (isFacilityLine(prevL) || SUITE_RE.test(prevL)) continue;
     var isFacility = false;
     for (var bk = Math.max(0, ii - 5); bk < ii - 1; bk++) {
       if (isFacilityLine(lines[bk]) || SUITE_RE.test(lines[bk])) { isFacility = true; break; }
@@ -548,13 +566,13 @@ function discoverPatientAddress(extractedText) {
     var zip2 = cszM[3];
     if (parseInt(sNum, 10) > 99) discovered.add(sNum);
     if (zip2) discovered.add(zip2);
-    var SFXS2 = ['AVE', 'AVENUE', 'ST', 'STREET', 'BLVD', 'BOULEVARD', 'DR', 'DRIVE', 'RD', 'ROAD', 'LN', 'LANE', 'CT', 'COURT', 'WAY', 'PL', 'PLACE', 'CIR', 'CIRCLE', 'PKWY', 'PARKWAY', 'HWY', 'HIGHWAY', 'TER', 'TERRACE', 'TRAIL', 'TRL', 'LOOP', 'RUN', 'PATH', 'PASS'];
+    // Pass 2: no suffix explosion — just add the exact matched address phrase.
+    // Suffix variants are only generated in Pass 1 where a patient label confirms context.
+    // Generating 30 variants from an unlabeled street/city block risks capturing
+    // facility addresses (e.g. "5850 Polaris Ste 100") that slipped through the guard.
     var sWords = sName.replace(/\b(?:AVE?|ST(?:REET)?|BLVD|BOULEVARD|DR(?:IVE)?|RD|ROAD|WAY|LN|LANE|CT|COURT|PL(?:ACE)?|CIR(?:CLE)?|PKWY|PARKWAY|HWY)\b/gi, '').trim();
     if (sWords.length >= 2) {
-      SFXS2.forEach(function(sfx) {
-        discovered.add(sNum + ' ' + sWords + ' ' + sfx);
-      });
-      discovered.add(sNum + ' ' + sWords);
+      discovered.add(sNum + ' ' + sWords); // exact phrase only, no suffix variants
     }
   }
 
