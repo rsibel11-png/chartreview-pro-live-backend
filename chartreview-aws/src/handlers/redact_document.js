@@ -29,6 +29,17 @@ const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-p
 
 const respond = function(statusCode, body) {
 
+  return {
+    statusCode,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-api-key,x-org-id',
+    },
+    body: JSON.stringify(body),
+  };
+};
+
 // ── ADDRESS TOKENIZER HELPERS (module-level for use by all handlers) ──────────
 var _SFXS = new Set(['ave','avenue','st','street','blvd','boulevard','dr','drive','rd','road','ln','lane','ct','court','way','pl','place','cir','circle','pkwy','parkway','hwy','highway','loop','ter','terrace','trl','trail']);
 var _STATES = new Set(['al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in','ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv','nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa','wv','wi','wy','dc']);
@@ -60,16 +71,6 @@ function _tokenizeAddress(v) {
   return res;
 }
 
-  return {
-    statusCode,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-api-key,x-org-id',
-    },
-    body: JSON.stringify(body),
-  };
-};
 
 async function getS3Bytes(key) {
   const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
