@@ -697,8 +697,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
 
   // ── HANDWRITING PASS: redact ALL handwritten tokens unconditionally ─────────
   var HW_LINE_GAP  = 0.015;
-  var HW_VERT_TOL  = 0.012;
+  var HW_VERT_TOL  = 0.008;   // tightened: prevent adjacent form rows merging into one box
   var HW_MIN_CHARS = 2;
+  var HW_MAX_HEIGHT = 0.045;  // max height per group: ~3 lines. Prevents form-field blocks from merging.
 
   var pageNums2 = Object.keys(pageMap);
   for (var pni = 0; pni < pageNums2.length; pni++) {
@@ -773,11 +774,14 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
         // the real ink height, not an inflated estimate.
         var hwRight  = Math.max(maxR, Math.min(0.88, minL + 0.60));
         var hwHeight = maxB - minT; // exact Textract stroke height
+        // Cap height: never let a handwriting group exceed HW_MAX_HEIGHT.
+        // This prevents multi-row form fields from merging into one giant black box.
+        var hwHeightCapped = Math.min(hwHeight, HW_MAX_HEIGHT);
         result[pgIdx2].push({
           x:      Math.max(0, minL - pad),
           y:      Math.max(0, minT - pad),
           width:  Math.min(1, hwRight - minL + pad),
-          height: Math.min(1, hwHeight + pad * 2),
+          height: Math.min(1, hwHeightCapped + pad * 2),
           label:  'handwriting',
         });
       }
