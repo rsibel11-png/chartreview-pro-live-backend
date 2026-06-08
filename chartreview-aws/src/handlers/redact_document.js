@@ -500,39 +500,44 @@ function discoverPatientAddress(extractedText) {
         if (streetMatch) {
           var streetNum  = streetMatch[1];
           var streetName = streetMatch[2].trim();
-          // Don't add very common street numbers that appear everywhere (0-99)
-          // Skip known facility street names even if address number > 99
-        if (FACILITY_STREET_RE.test(candidate)) break;
-        if (parseInt(streetNum, 10) > 99) {
-            discovered.add(streetNum);
-          }
-          // Add meaningful street name components (skip single words < 4 chars)
-          // Add number+name+suffix variants — complete address phrase only, no bare words
-          var SFXS = ['AVE', 'AVENUE', 'ST', 'STREET', 'BLVD', 'BOULEVARD', 'DR', 'DRIVE', 'RD', 'ROAD', 'LN', 'LANE', 'CT', 'COURT', 'WAY', 'PL', 'PLACE', 'CIR', 'CIRCLE', 'PKWY', 'PARKWAY', 'HWY', 'HIGHWAY', 'TER', 'TERRACE', 'TRAIL', 'TRL', 'LOOP', 'RUN', 'PATH', 'PASS'];
-          var streetWords = streetName.replace(/\b(?:AVE?|ST(?:REET)?|BLVD|BOULEVARD|DR(?:IVE)?|RD|ROAD|WAY|LN|LANE|CT|COURT|PL(?:ACE)?|CIR(?:CLE)?|PKWY|PARKWAY|HWY)\b/gi, '').trim();
-          if (streetWords.length >= 2) {
-            SFXS.forEach(function(sfx) {
-              discovered.add(streetNum + ' ' + streetWords + ' ' + sfx);
-            });
-            discovered.add(streetNum + ' ' + streetWords); // fallback: no suffix
-          }
-          // Look at next line for city/state/zip
+          if (FACILITY_STREET_RE.test(candidate)) break;
+          // Build street suffix variants as full phrases (number + name + suffix).
+          // The street NUMBER is NOT added standalone — bare numbers like "2424"
+          // are too ambiguous (appear in dates, codes, measurements).
+          // It is only meaningful as part of a complete address phrase.
+          var SFXS = ['AVE', 'AVENUE', 'ST', 'STREET', 'BLVD', 'BOULEVARD', 'DR', 'DRIVE', 'RD', 'ROAD', 'LN', 'LANE', 'CT', 'COURT', 'WAY', 'PL', 'PLACE', 'CIR', 'CIRCLE', 'PKWY', 'PARKWAY', 'HWY', 'HIGHWAY', 'LOOP', 'TER', 'TERRACE', 'TRL', 'TRAIL'];
+          var streetWords = streetName.replace(/\b(?:AVE?|ST(?:REET)?|BLVD|BOULEVARD|DR(?:IVE)?|RD|ROAD|WAY|LN|LANE|CT|COURT|PL(?:ACE)?|CIR(?:CLE)?|PKWY|PARKWAY|HWY|LOOP|TER(?:RACE)?|TRL|TRAIL)\b/gi, '').replace(/\s+/g, ' ').trim();
+          // Look ahead for city/state/zip on the next line
+          var cityStr = '';
+          var zipStr = '';
           if (j + 1 < lines.length) {
             var nextLine = lines[j + 1].trim();
             var cszMatch = nextLine.match(CSZ_RE);
             if (cszMatch) {
-              var zip = cszMatch[3];
-              discovered.add(zip);
-              // City: NOT added here. Cities are already in piiValues via the
-              // user-supplied address string and matched by the sliding window as
-              // a complete consecutive-token phrase (e.g. "North" + "Las" + "Vegas").
-              // Adding cities here causes any city found near ANY address block —
-              // including employer/facility addresses — to enter piiValues as a
-              // standalone phrase, producing matches everywhere that city appears.
+              zipStr = cszMatch[3];
+              cityStr = cszMatch[1].replace(/,/g, '').trim();
+              discovered.add(zipStr);
+              // Add zip alone — it's specific enough (5 digits, patient-specific)
+              // Add city+zip as a phrase (e.g. "NORTH LAS VEGAS NV 89030")
+              if (cityStr.length >= 3) discovered.add(cityStr + ' ' + cszMatch[2] + ' ' + zipStr);
             } else {
-              // Maybe the zip is on the same street line or embedded
               var zipMatch = candidate.match(ZIP_RE);
-              if (zipMatch) discovered.add(zipMatch[1]);
+              if (zipMatch) { zipStr = zipMatch[1]; discovered.add(zipStr); }
+            }
+          }
+          // Add street phrases WITH suffix variants
+          if (streetWords.length >= 2) {
+            SFXS.forEach(function(sfx) {
+              discovered.add(streetNum + ' ' + streetWords + ' ' + sfx);
+              // Also add with city appended if we found one — ties street to city
+              if (cityStr.length >= 3) {
+                discovered.add(streetNum + ' ' + streetWords + ' ' + sfx + ' ' + cityStr);
+              }
+            });
+            discovered.add(streetNum + ' ' + streetWords); // fallback: no suffix
+            if (cityStr.length >= 3) {
+              // Full address phrase: number + street words + city (no suffix)
+              discovered.add(streetNum + ' ' + streetWords + ' ' + cityStr);
             }
           }
           break; // Found address for this label block — move on
