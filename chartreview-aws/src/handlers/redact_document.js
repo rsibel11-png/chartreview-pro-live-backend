@@ -1895,12 +1895,77 @@ module.exports.redactDocumentWorker = async function(event) {
     const userSuppliedPii = Array.isArray(event.user_supplied_pii) ? event.user_supplied_pii : [];
     // Expand DOB variants from user-supplied values
     var userPiiExpanded = [];
+    // Geographic/suffix words to skip when generating solo address tokens.
+    // These are too common to be patient-identifying on their own.
+    var ADDR_SKIP_WORDS = new Set([
+      'ave','avenue','st','street','blvd','boulevard','dr','drive','rd','road',
+      'ln','lane','ct','court','way','pl','place','cir','circle','pkwy','parkway',
+      'hwy','highway','loop','ter','terrace','trl','trail',
+      'north','south','east','west','ne','nw','se','sw',
+      'las','vegas','los','angeles','san','santa','new','fort','mount',
+      'nv','ca','az','tx','fl','ny','nevada','california','arizona','texas',
+    ]);
+    var ADDR_STREET_SUFFIXES = new Set([
+      'ave','avenue','st','street','blvd','boulevard','dr','drive','rd','road',
+      'ln','lane','ct','court','way','pl','place','cir','circle','pkwy','parkway',
+      'hwy','highway','loop','ter','terrace','trl','trail',
+    ]);
+    // Tokenize a user-supplied address into meaningful PII components.
+    // Rules:
+    //   - Full address string always included
+    //   - Solo tokens: street number, zip, unique name words (not in ADDR_SKIP_WORDS)
+    //   - Sub-phrases with unique word: must start with number or unique word, end with unique word or zip
+    //   - All-skip 3+ token city names (e.g. "North Las Vegas"): included if starts with directional, not a suffix
+    //   - "Las Vegas" (2 all-skip tokens): NOT included — too common, sliding window handles via full city phrase
+    function _tokenizeAddress(v) {
+      var res = [v];
+      if (!/\d/.test(v) || !/[A-Za-z]/.test(v) || v.trim().length <= 10) return res;
+      var toks = v.trim().split(/[\s,]+/).filter(function(t) { return t.length > 0; });
+      // Solo tokens
+      toks.forEach(function(tok) {
+        var tL = tok.toLowerCase().replace(/[^a-z0-9]/g,'');
+        if (/^\d{5}$/.test(tL)) { res.push(tok); return; }
+        if (/^\d{2,5}$/.test(tL)) { res.push(tok); return; }
+        if (tL.length < 3 || ADDR_SKIP_WORDS.has(tL)) return;
+        if (res.indexOf(tok) === -1) res.push(tok);
+      });
+      // Sub-phrases (2–5 tokens)
+      for (var wi = 0; wi < toks.length; wi++) {
+        for (var wl = 2; wl <= Math.min(5, toks.length - wi); wl++) {
+          var sl = toks.slice(wi, wi + wl);
+          var fL = sl[0].toLowerCase().replace(/[^a-z0-9]/g,'');
+          var eL = sl[sl.length-1].toLowerCase().replace(/[^a-z0-9]/g,'');
+          var fNum = /^\d+$/.test(fL);
+          var eZip = /^\d{5}$/.test(eL);
+          var allSkip = sl.every(function(t) {
+            var tL = t.toLowerCase().replace(/[^a-z0-9]/g,'');
+            return ADDR_SKIP_WORDS.has(tL) || /^\d+$/.test(tL);
+          });
+          if (allSkip) {
+            // City name: 3+ all-skip tokens, starting with directional (not a suffix)
+            if (wl >= 3 && !ADDR_STREET_SUFFIXES.has(fL) && !eZip) {
+              var sub = sl.join(' ');
+              if (res.indexOf(sub) === -1) res.push(sub);
+            }
+            continue;
+          }
+          var fSkip = !fNum && (ADDR_SKIP_WORDS.has(fL) || fL.length < 3);
+          var eSkip = !eZip && (ADDR_SKIP_WORDS.has(eL) || eL.length < 3);
+          if (fSkip || eSkip) continue;
+          var sub = sl.join(' ');
+          if (res.indexOf(sub) === -1) res.push(sub);
+        }
+      }
+      return res;
+    }
     userSuppliedPii.forEach(function(v) {
       if (!v) return;
       if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(v.trim())) {
         expandDob(v.trim()).forEach(function(ev) { userPiiExpanded.push(ev); });
       } else {
-        userPiiExpanded.push(v);
+        _tokenizeAddress(v).forEach(function(tok) {
+          if (userPiiExpanded.indexOf(tok) === -1) userPiiExpanded.push(tok);
+        });
       }
     });
     // ── 3-PART NAME PERMUTATIONS from extractKnownPiiValues ───────────────────
@@ -2351,7 +2416,9 @@ module.exports.redactCaseWorker = async function(event) {
         if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(v.trim())) {
           expandDob(v.trim()).forEach(function(ev) { caseUserPiiExpanded.push(ev); });
         } else {
-          caseUserPiiExpanded.push(v);
+          _tokenizeAddress(v).forEach(function(tok) {
+            if (caseUserPiiExpanded.indexOf(tok) === -1) caseUserPiiExpanded.push(tok);
+          });
         }
       });
 
