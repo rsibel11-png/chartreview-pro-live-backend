@@ -1104,7 +1104,9 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
     'employeesname', 'employeename',
     'claimantsname', 'claimantname',
     'socialsecuritynumber', 'socialsecurityno',
-    'dateofinjury', 'dateofaccident',
+    // 'dateofinjury', 'dateofaccident' REMOVED — date fields, not signature boxes.
+    // On OT eval / Concentra forms these labels appear in clinical narrative context
+    // and produce huge false-positive geometry boxes covering entire page sections.
     'employersname', 'employername',
     'supervisorname', 'supervisortowhoinjuryreported',
     // Witness and occupational form fields
