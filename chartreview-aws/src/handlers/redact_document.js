@@ -990,6 +990,12 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
     if (/\d+\s*(mg|ml|mm|cm|lbs?|kg|bpm|mmhg|mcg)/i.test(t)) return true;
     if (t.length > 90) return true;
     if (/\b(and|the|with|for|was|has|had|are|were|not|from|that|will|have|been|pain|left|right|hand|wrist|fracture|therapy|treatment|injury|motion|strength|follow|continue|improve)\b/i.test(t)) return true;
+    // CPT/billing code lines: 5-digit code + description with slash or clinical keyword
+    // e.g. "99214 OFFICE/OUTPATIENT VISIT EST" — 5-digit number here is a CPT code, NOT a street number
+    if (/^\d{4,5}\s+[A-Z].*\//.test(t)) return true;
+    if (/^\d{4,5}\s+(?:OFFICE|OUTPATIENT|INPATIENT|VISIT|ESTABLISHED|NEW\s+PATIENT)/i.test(t)) return true;
+    // ICD-10 code table lines: "M25.522  Pain in left elbow"
+    if (/^[A-Z]\d{2}\.\d/.test(t)) return true;
     // Billing line indicators
     if (/\$|00\.00|\bPAID\b|\bBALANCE\b|\bCHARGE\b/i.test(t)) return true;
     return false;
