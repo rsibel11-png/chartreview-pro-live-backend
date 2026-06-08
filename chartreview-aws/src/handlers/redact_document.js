@@ -1897,65 +1897,37 @@ module.exports.redactDocumentWorker = async function(event) {
     var userPiiExpanded = [];
     // Geographic/suffix words to skip when generating solo address tokens.
     // These are too common to be patient-identifying on their own.
-    var ADDR_SKIP_WORDS = new Set([
-      'ave','avenue','st','street','blvd','boulevard','dr','drive','rd','road',
-      'ln','lane','ct','court','way','pl','place','cir','circle','pkwy','parkway',
-      'hwy','highway','loop','ter','terrace','trl','trail',
-      'north','south','east','west','ne','nw','se','sw',
-      'las','vegas','los','angeles','san','santa','new','fort','mount',
-      'nv','ca','az','tx','fl','ny','nevada','california','arizona','texas',
-    ]);
-    var ADDR_STREET_SUFFIXES = new Set([
-      'ave','avenue','st','street','blvd','boulevard','dr','drive','rd','road',
-      'ln','lane','ct','court','way','pl','place','cir','circle','pkwy','parkway',
-      'hwy','highway','loop','ter','terrace','trl','trail',
-    ]);
-    // Tokenize a user-supplied address into meaningful PII components.
-    // Rules:
-    //   - Full address string always included
-    //   - Solo tokens: street number, zip, unique name words (not in ADDR_SKIP_WORDS)
-    //   - Sub-phrases with unique word: must start with number or unique word, end with unique word or zip
-    //   - All-skip 3+ token city names (e.g. "North Las Vegas"): included if starts with directional, not a suffix
-    //   - "Las Vegas" (2 all-skip tokens): NOT included — too common, sliding window handles via full city phrase
+    // ── ADDRESS TOKENIZER ─────────────────────────────────────────────────────
+    // Parses: num | street (unique words + suffix) | city (words after suffix) | zip
+    // Generates: (a) full phrase, (b) n-1 without zip, (c) solo unique tokens
+    // State abbrev excluded. Generic words (Las, Vegas, North, Street) never solo.
+    var _SFXS = new Set(['ave','avenue','st','street','blvd','boulevard','dr','drive','rd','road','ln','lane','ct','court','way','pl','place','cir','circle','pkwy','parkway','hwy','highway','loop','ter','terrace','trl','trail']);
+    var _STATES = new Set(['al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in','ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv','nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa','wv','wi','wy','dc']);
+    var _GEOWORDS = new Set(['north','south','east','west','ne','nw','se','sw','las','vegas','los','angeles','san','santa','new','fort','mount','ave','avenue','st','street','blvd','boulevard','dr','drive','rd','road','ln','lane','ct','court','way','pl','place','cir','circle','pkwy','parkway','hwy','highway','loop','ter','terrace','trl','trail']);
+    function _atl(t) { return t.toLowerCase().replace(/[^a-z0-9]/g,''); }
+    function _isu(t) { var tl=_atl(t); return tl.length>=3 && !_GEOWORDS.has(tl) && !_STATES.has(tl) && !/^\d+$/.test(tl); }
+    function _parseAddr(v) {
+      var toks=v.trim().split(/[\s,]+/).filter(function(t){return t.length>0;}), i=0, end=toks.length;
+      var num=null,zip=null,state=null;
+      if(i<toks.length&&/^\d{2,5}$/.test(_atl(toks[i]))) num=toks[i++];
+      if(end>i&&/^\d{5}$/.test(_atl(toks[end-1]))) zip=toks[--end];
+      if(end>i&&_STATES.has(_atl(toks[end-1]))&&_atl(toks[end-1]).length===2) state=toks[--end];
+      var mid=toks.slice(i,end), lsfx=-1;
+      for(var j=mid.length-1;j>=0;j--){if(_SFXS.has(_atl(mid[j]))){lsfx=j;break;}}
+      var street,city;
+      if(lsfx===-1){var luq=-1; for(var j=mid.length-1;j>=0;j--){if(_isu(mid[j])){luq=j;break;}} street=luq>=0?mid.slice(0,luq+1):mid; city=luq>=0?mid.slice(luq+1):[];}
+      else{street=mid.slice(0,lsfx+1); city=mid.slice(lsfx+1);}
+      return {num:num,street:street,city:city,state:state,zip:zip};
+    }
     function _tokenizeAddress(v) {
-      var res = [v];
-      if (!/\d/.test(v) || !/[A-Za-z]/.test(v) || v.trim().length <= 10) return res;
-      var toks = v.trim().split(/[\s,]+/).filter(function(t) { return t.length > 0; });
-      // Solo tokens
-      toks.forEach(function(tok) {
-        var tL = tok.toLowerCase().replace(/[^a-z0-9]/g,'');
-        if (/^\d{5}$/.test(tL)) { res.push(tok); return; }
-        if (/^\d{2,5}$/.test(tL)) { res.push(tok); return; }
-        if (tL.length < 3 || ADDR_SKIP_WORDS.has(tL)) return;
-        if (res.indexOf(tok) === -1) res.push(tok);
-      });
-      // Sub-phrases (2–5 tokens)
-      for (var wi = 0; wi < toks.length; wi++) {
-        for (var wl = 2; wl <= Math.min(5, toks.length - wi); wl++) {
-          var sl = toks.slice(wi, wi + wl);
-          var fL = sl[0].toLowerCase().replace(/[^a-z0-9]/g,'');
-          var eL = sl[sl.length-1].toLowerCase().replace(/[^a-z0-9]/g,'');
-          var fNum = /^\d+$/.test(fL);
-          var eZip = /^\d{5}$/.test(eL);
-          var allSkip = sl.every(function(t) {
-            var tL = t.toLowerCase().replace(/[^a-z0-9]/g,'');
-            return ADDR_SKIP_WORDS.has(tL) || /^\d+$/.test(tL);
-          });
-          if (allSkip) {
-            // City name: 3+ all-skip tokens, starting with directional (not a suffix)
-            if (wl >= 3 && !ADDR_STREET_SUFFIXES.has(fL) && !eZip) {
-              var sub = sl.join(' ');
-              if (res.indexOf(sub) === -1) res.push(sub);
-            }
-            continue;
-          }
-          var fSkip = !fNum && (ADDR_SKIP_WORDS.has(fL) || fL.length < 3);
-          var eSkip = !eZip && (ADDR_SKIP_WORDS.has(eL) || eL.length < 3);
-          if (fSkip || eSkip) continue;
-          var sub = sl.join(' ');
-          if (res.indexOf(sub) === -1) res.push(sub);
-        }
-      }
+      if(!v||!/\d/.test(v)||!/[A-Za-z]/.test(v)||v.trim().length<=6) return [v];
+      var p=_parseAddr(v);
+      var flat=(p.num?[p.num]:[]).concat(p.street).concat(p.city).concat(p.zip?[p.zip]:[]);
+      var res=[flat.join(' ')];
+      if(p.zip&&flat.length>1){var nz=flat.slice(0,-1).join(' '); if(res.indexOf(nz)===-1)res.push(nz);}
+      if(p.num&&res.indexOf(p.num)===-1)res.push(p.num);
+      if(p.zip&&res.indexOf(p.zip)===-1)res.push(p.zip);
+      p.street.concat(p.city).forEach(function(t){if(_isu(t)&&res.indexOf(t)===-1)res.push(t);});
       return res;
     }
     userSuppliedPii.forEach(function(v) {
