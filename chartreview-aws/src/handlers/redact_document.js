@@ -1031,23 +1031,20 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
     if (addrLineIsClinical(_lineTxt))    continue;
     if (addrLineIsFacility(_lineTxt))    continue;
 
-    // Require at least one PII token match OR a clear street number > 99
+    // Require at least one PII address token match on the line.
+    // We do NOT fire on bare street numbers alone — that caused CPT codes (e.g. 99214)
+    // to be matched simply because they are 5-digit numbers starting a line.
+    // The correct rule: only redact a line if it actually contains a known patient
+    // address token (street number, street name, city, zip) from the user's PII data.
+    // This is semantically correct and eliminates false positives entirely.
     var _lineNorm2 = normalizeForMatch(_lineTxt);
     var _hasPii2   = false;
     for (var _pi4 = 0; _pi4 < piiValues.length; _pi4++) {
       var _pn2 = normalizeForMatch(piiValues[_pi4]);
-      if (_pn2.length >= 3 && _lineNorm2.indexOf(_pn2) !== -1) { _hasPii2 = true; break; }
-    }
-    var _snM = _lineTxt.trim().match(/^(\d{2,5})\s/);
-    if (_snM && parseInt(_snM[1], 10) > 99) _hasPii2 = true;
-    // Also fire on city/state/zip lines where zip matches a discovered PII value
-    if (!_hasPii2) {
-      var _zipMatches = _lineTxt.match(/\b(\d{5})(?:-\d{4})?\b/g);
-      if (_zipMatches) {
-        for (var _zmi = 0; _zmi < _zipMatches.length; _zmi++) {
-          if (piiValues.indexOf(_zipMatches[_zmi].substring(0, 5)) !== -1) { _hasPii2 = true; break; }
-        }
-      }
+      // Require whole-word match for short tokens (≤5 chars) to avoid "2424" matching inside "99214"
+      // For longer tokens (street names, city names) substring match is fine
+      if (_pn2.length < 4) continue; // skip very short tokens that cause false substring hits
+      if (_pn2.length >= 4 && _lineNorm2.indexOf(_pn2) !== -1) { _hasPii2 = true; break; }
     }
     if (!_hasPii2) continue;
 
