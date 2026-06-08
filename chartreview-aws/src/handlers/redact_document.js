@@ -284,6 +284,11 @@ function extractKnownPiiValues(extractedText) {
         // Skip values extracted under provider/physician labels — those are staff names not patient PII
         var _prefix = (match[0] || '').slice(0, -(val.length)).toLowerCase();
         if (/(?:rendering|treating|attending|referring|ordering|prescrib|provider|physician|surgeon|clinician|practitioner|therapist|radiologist|specialist)/.test(_prefix)) continue;
+        // DEBUG: trace any value containing clinical words that should never be PII
+        if (/medications|allergies|treatment|procedures/i.test(val)) {
+          console.log('[PII-TRACE] Suspicious value captured:', JSON.stringify(val),
+            'pattern_idx:', i, 'match_context:', JSON.stringify((match[0] || '').slice(0, 80)));
+        }
         found.add(val);
       }
     }
