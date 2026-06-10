@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-06-09 — Fix #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
+// Updated: 2026-06-09 — Fix #839: targeted MRN-only scan; deploy number in filename; #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
 
 'use strict';
 
@@ -24,6 +24,7 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
+const REDACT_BUILD = '839'; // Increment with each deploy to trace which build generated a file
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -2357,6 +2358,32 @@ module.exports.redactDocumentWorker = async function(event) {
       if (/^\d{4,5}$/.test(trimmed)) return false;
       return true;
     });
+
+    // ── TARGETED MRN SCAN from word blocks ───────────────────────────────────
+    // Textract emits footer "MRN:D002916777" as a single fused WORD token.
+    // Extract only these fused MRN: tokens to catch cross-hospital MRNs
+    // (e.g. Sunrise MRN when the facesheet came from UMC).
+    // This is intentionally narrow — ONLY matches "MRN:" prefix, nothing else.
+    (function() {
+      var _mrnRe = /^MRN:([A-Z0-9][A-Z0-9\-]{4,})$/i;
+      var _found = [];
+      for (var _bi = 0; _bi < wordBlocks.length; _bi++) {
+        var _bt = (wordBlocks[_bi].t || '').trim();
+        var _mm = _mrnRe.exec(_bt);
+        if (_mm) {
+          var _val = _mm[1];
+          if (filteredPiiValues.indexOf(_val) === -1 && filteredPiiValues.indexOf(_bt) === -1) {
+            _found.push(_val);
+            _found.push(_bt); // also add the fused form e.g. "MRN:D002916777"
+            if (!piiSourceMap[_val.toLowerCase()]) piiSourceMap[_val.toLowerCase()] = 'mrn-scan';
+          }
+        }
+      }
+      if (_found.length) {
+        console.log('[MRN-SCAN] found footer MRN tokens:', JSON.stringify(_found));
+        _found.forEach(function(v) { filteredPiiValues.push(v); });
+      }
+    })();
     allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
       var textractCount = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
       console.log('[REDACT] Textract path found ' + textractCount + ' box(es) across ' + Object.keys(allPii).length + ' page(s)');
@@ -2414,8 +2441,8 @@ module.exports.redactDocumentWorker = async function(event) {
     const keyParts     = fileKey.split('/');
     const origFilename = keyParts.pop();
     const baseName     = origFilename.replace(/\.pdf$/i, '');
-    const redactedKey  = keyParts.concat([baseName + '_REDACTED.pdf']).join('/');
-    const redactedName = baseName + '_REDACTED.pdf';
+    const redactedKey  = keyParts.concat([baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf']).join('/');
+    const redactedName = baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf';
 
     await updateJob(job_id, { progress_message: 'Saving redacted document...', updated_at: new Date().toISOString() });
 
@@ -2870,8 +2897,8 @@ module.exports.redactCaseWorker = async function(event) {
 
     var baseName   = (doc_records[0].original_filename || 'document').replace(/_Part\d+\.pdf$/i, '').replace(/\.pdf$/i, '');
     var newUUID    = randomUUID();
-    var mergedKey  = 'orgs/' + org_id + '/documents/' + newUUID + '/' + baseName + '_REDACTED.pdf';
-    var mergedName = baseName + '_REDACTED.pdf';
+    var mergedKey  = 'orgs/' + org_id + '/documents/' + newUUID + '/' + baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf';
+    var mergedName = baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf';
 
     await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: mergedKey, Body: mergedBytes, ContentType: 'application/pdf' }));
 
