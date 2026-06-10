@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-06-09 — Fix #842: revert to #837 base (remove all MRN scanning — caused PDF corruption); keep REDACT_BUILD version in filename only. #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
+// Updated: 2026-06-09 — Fix #843: fix case-path CSV log key regex to match _REDACTED_vNNN.pdf filenames; #842: revert to #837 base (remove all MRN scanning — caused PDF corruption); keep REDACT_BUILD version in filename only. #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
 
 'use strict';
 
@@ -24,7 +24,7 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
-const REDACT_BUILD = '842'; // bump each deploy to trace which build generated the file
+const REDACT_BUILD = '843'; // bump each deploy to trace which build generated the file
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -2886,7 +2886,7 @@ module.exports.redactCaseWorker = async function(event) {
         folder:      folder_name || '',
       };
       var _caseLogBytes = buildRedactionLogCsv(mergedName, mergedPiiByPage, _casePiiSummary);
-      _caseLogKey = mergedKey.replace(/_REDACTED\.pdf$/i, '_REDACTION_LOG.csv');
+      _caseLogKey = mergedKey.replace(/_REDACTED(?:_v[^/]+)?\.pdf$/i, '_REDACTION_LOG.csv');
       await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _caseLogKey, Body: _caseLogBytes, ContentType: 'text/csv' }));
       _caseLogUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _caseLogKey }), { expiresIn: 604800 });
       console.log('[REDACTION-LOG] Case CSV uploaded to', _caseLogKey);
