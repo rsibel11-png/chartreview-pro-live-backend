@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-06-06 — Fix #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
+// Updated: 2026-06-09 — Fix #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
 
 'use strict';
 
@@ -1271,12 +1271,19 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
   var LINE_TOLERANCE  = 0.012; // words within 1.2% vertical = same line
 
   function isPatientLabel(txt) {
-    // Must end with ':' to be a form field label (not a narrative word)
     var trimmed = (txt || '').trim();
-    if (trimmed.charAt(trimmed.length - 1) !== ':') return false;
     var n = normalizeForMatch(trimmed);
+    // Exact match (token ends with ':')
     for (var _pi = 0; _pi < PATIENT_LABEL_NORM.length; _pi++) {
       if (n === PATIENT_LABEL_NORM[_pi]) return true;
+    }
+    // Fused match: token starts with a known label prefix but has PII after the colon
+    // e.g. "Patient:MOORE," normalizes to "patientmoore," which starts with "patient:"
+    for (var _pi2 = 0; _pi2 < PATIENT_LABEL_NORM.length; _pi2++) {
+      var lbl = PATIENT_LABEL_NORM[_pi2];
+      if (lbl.charAt(lbl.length - 1) === ':' && n.indexOf(lbl) === 0 && n.length > lbl.length) {
+        return true;
+      }
     }
     return false;
   }
@@ -1341,6 +1348,28 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
       }
 
       if (!_isLabel) continue;
+
+      // If the label token itself is fused (e.g. "Patient:MOORE,"), redact the whole token box
+      var _labelNorm = normalizeForMatch(_w.t);
+      var _fusedPii = false;
+      for (var _fpi = 0; _fpi < PATIENT_LABEL_NORM.length; _fpi++) {
+        var _lbl = PATIENT_LABEL_NORM[_fpi];
+        if (_lbl.charAt(_lbl.length - 1) === ':' && _labelNorm.indexOf(_lbl) === 0 && _labelNorm.length > _lbl.length) {
+          _fusedPii = true;
+          break;
+        }
+      }
+      if (_fusedPii) {
+        var _fpk = String(_pageIdx);
+        if (!result[_fpk]) result[_fpk] = [];
+        result[_fpk].push({
+          label:  'patient_name_fused_label',
+          x:      Math.max(0, _w.l - 0.003),
+          y:      _w.tp,
+          width:  _w.w + 0.006,
+          height: (_w.h || 0.012) * 1.4,
+        });
+      }
 
       // Scan rightward — redact until gap > threshold
       var _redactStart  = null;
