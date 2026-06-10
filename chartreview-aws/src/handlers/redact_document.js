@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-06-09 — Fix #843: fix case-path CSV log key regex to match _REDACTED_vNNN.pdf filenames; #842: revert to #837 base (remove all MRN scanning — caused PDF corruption); keep REDACT_BUILD version in filename only. #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
+// Updated: 2026-06-09 — Fix #844: fused-label token matching — when piiNorm (>=6 chars) appears in a block concat preceded by a label prefix (e.g. "mrn:"), match and redact the whole token. Catches MRN:D002916777 etc. #843: fix case-path CSV log key regex to match _REDACTED_vNNN.pdf filenames; #842: revert to #837 base (remove all MRN scanning — caused PDF corruption); keep REDACT_BUILD version in filename only. #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
 
 'use strict';
 
@@ -24,7 +24,7 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
-const REDACT_BUILD = '843'; // bump each deploy to trace which build generated the file
+const REDACT_BUILD = '844'; // bump each deploy to trace which build generated the file
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -968,7 +968,15 @@ function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
             _t = _t.replace(/[A-Z]{1,3}\.[0-9][A-Za-z]{0,2}I?$/g, '').trim();
             return _t;
           }).join(''); var concat = normalizeForMatch(rawConcat);
-          if (piiNorm.length > 0 && concat === piiNorm) {
+          // Exact match OR label-fused match (e.g. "MRN:D002916777" contains "d002916777")
+          var _fusedMatch = false;
+          if (piiNorm.length >= 6 && concat !== piiNorm && concat.indexOf(piiNorm) !== -1) {
+            // Only match if what precedes piiNorm in concat is a label-like prefix ending in ':'
+            var _prefixEnd = concat.indexOf(piiNorm);
+            var _prefix = concat.substring(0, _prefixEnd);
+            _fusedMatch = _prefix.length > 0 && /[a-z]:$/.test(_prefix) && _prefix.length <= 15;
+          }
+          if (piiNorm.length > 0 && (concat === piiNorm || _fusedMatch)) {
             // Compute bounding box that covers all words in slice
             var minL = Math.min.apply(null, slice.map(function(w) { return w.l; }));
             var minT = Math.min.apply(null, slice.map(function(w) { return w.tp; }));
