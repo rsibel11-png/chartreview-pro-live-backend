@@ -1,6 +1,6 @@
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
-// Updated: 2026-06-09 — Fix #841: safe label-driven MRN extraction (via filteredPiiValues, not direct allPii); #839: targeted MRN-only scan; deploy number in filename; #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
+// Updated: 2026-06-09 — Fix #842: revert to #837 base (remove all MRN scanning — caused PDF corruption); keep REDACT_BUILD version in filename only. #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
 
 'use strict';
 
@@ -24,7 +24,7 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
-const REDACT_BUILD = '841'; // Increment with each deploy to trace which build generated a file
+const REDACT_BUILD = '842'; // bump each deploy to trace which build generated the file
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -2358,86 +2358,6 @@ module.exports.redactDocumentWorker = async function(event) {
       if (/^\d{4,5}$/.test(trimmed)) return false;
       return true;
     });
-
-    // ── TARGETED MRN SCAN from word blocks ───────────────────────────────────
-    // Textract emits footer "MRN:D002916777" as a single fused WORD token.
-    // Extract only these fused MRN: tokens to catch cross-hospital MRNs
-    // (e.g. Sunrise MRN when the facesheet came from UMC).
-    // This is intentionally narrow — ONLY matches "MRN:" prefix, nothing else.
-    (function() {
-      var _mrnRe = /^MRN:([A-Z0-9][A-Z0-9\-]{4,})$/i;
-      var _found = [];
-      for (var _bi = 0; _bi < wordBlocks.length; _bi++) {
-        var _bt = (wordBlocks[_bi].t || '').trim();
-        var _mm = _mrnRe.exec(_bt);
-        if (_mm) {
-          var _val = _mm[1];
-          if (filteredPiiValues.indexOf(_val) === -1 && filteredPiiValues.indexOf(_bt) === -1) {
-            _found.push(_val);
-            _found.push(_bt); // also add the fused form e.g. "MRN:D002916777"
-            if (!piiSourceMap[_val.toLowerCase()]) piiSourceMap[_val.toLowerCase()] = 'mrn-scan';
-          }
-        }
-      }
-      if (_found.length) {
-        console.log('[MRN-SCAN] found footer MRN tokens:', JSON.stringify(_found));
-        _found.forEach(function(v) { filteredPiiValues.push(v); });
-      }
-    })();
-
-    // ── LABEL-DRIVEN MRN VALUE EXTRACTION ────────────────────────────────────
-    // Scan word blocks for fused MRN:VALUE tokens OR adjacent MRN-label + value
-    // pairs. Extract the VALUE and add to filteredPiiValues so findBoxesFromBlocks
-    // can handle the geometry (same proven path as all other PII values).
-    // No prior knowledge of MRN value required — works for any hospital.
-    (function() {
-      // Fused token: "MRN:D002916777" or "UNITNO:D002916777"
-      var _fusedRe = /^(?:MRN|M\.R\.N\.|Medical[\s-]*Record[\s-]*(?:No\.?|Number|#)?|MR\s*#|Unit[\s-]*No\.?|Unit[\s-]*#)[:.\s#]+([A-Z0-9][A-Z0-9\-]{3,})$/i;
-      // Label-only token: "MRN:" or "MRN" with trailing colon/space
-      var _labelRe = /^(?:MRN|Medical[\s-]*Record[\s-]*(?:No\.?|Number|#)?|MR\s*#|Unit[\s-]*No\.?)[:.\s#]*$/i;
-      // What a bare ID value looks like
-      var _valueRe = /^[A-Z0-9][A-Z0-9\-]{4,}$/i;
-
-      var _found = [];
-      for (var _bi = 0; _bi < wordBlocks.length; _bi++) {
-        var _bt = (wordBlocks[_bi].t || '').trim();
-
-        // Case 1: fused token
-        var _fm = _fusedRe.exec(_bt);
-        if (_fm) {
-          var _val = _fm[1];
-          if (_found.indexOf(_val) === -1 && filteredPiiValues.indexOf(_val) === -1) {
-            _found.push(_val);
-          }
-          continue;
-        }
-
-        // Case 2: label token → look at next 1-3 tokens on same page for the value
-        if (_labelRe.test(_bt)) {
-          var _pg = wordBlocks[_bi].p || 1;
-          for (var _ni = _bi + 1; _ni < Math.min(_bi + 4, wordBlocks.length); _ni++) {
-            var _nblk = wordBlocks[_ni];
-            if ((_nblk.p || 1) !== _pg) break;
-            var _nt = (_nblk.t || '').trim();
-            if (/^[:\.\-#\s]+$/.test(_nt)) continue; // skip punctuation tokens
-            if (_valueRe.test(_nt) && _found.indexOf(_nt) === -1 && filteredPiiValues.indexOf(_nt) === -1) {
-              _found.push(_nt);
-            }
-            break; // only take the first meaningful token
-          }
-        }
-      }
-
-      if (_found.length) {
-        console.log('[MRN-EXTRACT] found MRN values from labels:', JSON.stringify(_found));
-        _found.forEach(function(v) {
-          filteredPiiValues.push(v);
-          if (!piiSourceMap[v.toLowerCase().replace(/[^a-z0-9]/g,'')]) {
-            piiSourceMap[v.toLowerCase().replace(/[^a-z0-9]/g,'')] = 'mrn-label';
-          }
-        });
-      }
-    })();
     allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
       var textractCount = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
       console.log('[REDACT] Textract path found ' + textractCount + ' box(es) across ' + Object.keys(allPii).length + ' page(s)');
@@ -2894,60 +2814,6 @@ module.exports.redactCaseWorker = async function(event) {
       if (wordBlocks && wordBlocks.length > 0) {
         var _mrnCheck = filteredPiiValues.filter(function(v) { return v && v.indexOf('0001506950') >= 0; });
         console.log('[PII-PREFLIGHT] filteredPiiValues count:', filteredPiiValues.length, '| MRN 0001506950 in list:', _mrnCheck.length > 0, '| MRN entries:', JSON.stringify(_mrnCheck));
-
-        // ── LABEL-DRIVEN MRN VALUE EXTRACTION ────────────────────────────────────
-        // Scan word blocks for fused MRN:VALUE tokens OR adjacent MRN-label + value
-        // pairs. Extract the VALUE and add to filteredPiiValues so findBoxesFromBlocks
-        // can handle the geometry (same proven path as all other PII values).
-        // No prior knowledge of MRN value required — works for any hospital.
-        (function() {
-          // Fused token: "MRN:D002916777" or "UNITNO:D002916777"
-          var _fusedRe = /^(?:MRN|M\.R\.N\.|Medical[\s-]*Record[\s-]*(?:No\.?|Number|#)?|MR\s*#|Unit[\s-]*No\.?|Unit[\s-]*#)[:.\s#]+([A-Z0-9][A-Z0-9\-]{3,})$/i;
-          // Label-only token: "MRN:" or "MRN" with trailing colon/space
-          var _labelRe = /^(?:MRN|Medical[\s-]*Record[\s-]*(?:No\.?|Number|#)?|MR\s*#|Unit[\s-]*No\.?)[:.\s#]*$/i;
-          // What a bare ID value looks like
-          var _valueRe = /^[A-Z0-9][A-Z0-9\-]{4,}$/i;
-
-          var _found = [];
-          for (var _bi = 0; _bi < wordBlocks.length; _bi++) {
-            var _bt = (wordBlocks[_bi].t || '').trim();
-
-            // Case 1: fused token
-            var _fm = _fusedRe.exec(_bt);
-            if (_fm) {
-              var _val = _fm[1];
-              if (_found.indexOf(_val) === -1 && filteredPiiValues.indexOf(_val) === -1) {
-                _found.push(_val);
-              }
-              continue;
-            }
-
-            // Case 2: label token → look at next 1-3 tokens on same page for the value
-            if (_labelRe.test(_bt)) {
-              var _pg = wordBlocks[_bi].p || 1;
-              for (var _ni = _bi + 1; _ni < Math.min(_bi + 4, wordBlocks.length); _ni++) {
-                var _nblk = wordBlocks[_ni];
-                if ((_nblk.p || 1) !== _pg) break;
-                var _nt = (_nblk.t || '').trim();
-                if (/^[:\.\-#\s]+$/.test(_nt)) continue; // skip punctuation tokens
-                if (_valueRe.test(_nt) && _found.indexOf(_nt) === -1 && filteredPiiValues.indexOf(_nt) === -1) {
-                  _found.push(_nt);
-                }
-                break; // only take the first meaningful token
-              }
-            }
-          }
-
-          if (_found.length) {
-            console.log('[MRN-EXTRACT] found MRN values from labels:', JSON.stringify(_found));
-            _found.forEach(function(v) {
-              filteredPiiValues.push(v);
-              if (!piiSourceMap[v.toLowerCase().replace(/[^a-z0-9]/g,'')]) {
-                piiSourceMap[v.toLowerCase().replace(/[^a-z0-9]/g,'')] = 'mrn-label';
-              }
-            });
-          }
-        })();
         allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
         var _p31boxes = allPii['31'] || allPii['32'] || [];
         console.log('[ALLPII-PAGE32] key 31 boxes:', (allPii['31']||[]).length, '| key 32 boxes:', (allPii['32']||[]).length);
