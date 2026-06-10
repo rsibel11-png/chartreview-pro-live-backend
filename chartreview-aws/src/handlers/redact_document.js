@@ -24,7 +24,7 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
-const REDACT_BUILD = '846'; // bump each deploy to trace which build generated the file
+const REDACT_BUILD = '847'; // bump each deploy to trace which build generated the file
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -1603,7 +1603,7 @@ function extractRotatedPdfText(pdfDoc, piiValues, rawPdfBytes) {
 
   var piiNorm = piiValues.map(function(v) {
     return { orig: v, norm: (v || '').toLowerCase().replace(/[^a-z0-9]/g, '') };
-  }).filter(function(p) { return p.norm.length >= 5; });
+  });
   if (!piiNorm.length) return result;
 
   var zlib    = require('zlib');
@@ -1724,14 +1724,14 @@ function extractRotatedPdfText(pdfDoc, piiValues, rawPdfBytes) {
 
         if (!texts.length) continue;
         var combined = texts.join(' ').replace(/\s+/g, ' ').trim();
-        if (!combined || combined.length < 6) continue;
+        if (!combined) continue;
 
         // PII match (minimum 4 chars to avoid false positives)
         var normCombined = combined.toLowerCase().replace(/[^a-z0-9]/g, '');
         var matched = false;
         for (var pj = 0; pj < piiNorm.length; pj++) {
           var pv = piiNorm[pj];
-          if (normCombined.indexOf(pv.norm) !== -1 && pv.norm.length >= 5) {
+          if (normCombined.indexOf(pv.norm) !== -1) {
             matched = true; break;
           }
         }
