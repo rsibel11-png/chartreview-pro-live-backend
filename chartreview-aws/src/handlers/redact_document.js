@@ -24,7 +24,7 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
-const REDACT_BUILD = '847'; // bump each deploy to trace which build generated the file
+const REDACT_BUILD = '848'; // bump each deploy to trace which build generated the file
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -1635,7 +1635,8 @@ function extractRotatedPdfText(pdfDoc, piiValues, rawPdfBytes) {
       cmScaleX: cmM ? parseFloat(cmM[1]) : 1.0,
       cmScaleY: cmM ? parseFloat(cmM[2]) : 1.0,
       cmTransX: cmM ? parseFloat(cmM[3]) : 0.0,
-      cmTransY: cmM ? parseFloat(cmM[4]) : 0.0
+      cmTransY: cmM ? parseFloat(cmM[4]) : 0.0,
+      rawText: txt
     });
   }
 
@@ -1649,7 +1650,7 @@ function extractRotatedPdfText(pdfDoc, piiValues, rawPdfBytes) {
     formStreams.push(txt);
   }
 
-  if (!formStreams.length) return result;
+  // Do not bail early even if no form streams — page content streams may have rotated text directly
 
   // ── Process each Form XObject ─────────────────────────────────────────────
   // Form streams appear in PDF in the same order as pages (one per page).
@@ -1784,6 +1785,109 @@ function extractRotatedPdfText(pdfDoc, piiValues, rawPdfBytes) {
           ' "' + combined.substring(0, 55) + '"' +
           ' box={x:' + bx.toFixed(3) + ',y:' + by.toFixed(3) +
           ',w:' + bw.toFixed(3) + ',h:' + bh.toFixed(3) + '}');
+      }
+    }
+  }
+
+  // ── Second pass: scan page content streams directly for rotated BT blocks ───
+  // The Sunrise lateral margin stamp ("Patient:MOORE, KIMBERLY") is written
+  // directly into the page content stream as a rotated BT block — NOT inside a
+  // Form XObject. So we scan pageContentStreams raw text too.
+  for (var pi = 0; pi < pageContentStreams.length; pi++) {
+    var pcs2  = pageContentStreams[pi];
+    if (!pcs2.rawText) continue;
+    var txt2    = pcs2.rawText;
+    var pageIdx2 = pi < numPages ? pi : numPages - 1;
+    var dim2     = pageDims[pageIdx2] || { w: 612, h: 792 };
+
+    var btRe2 = /BT([\s\S]*?)ET/g;
+    var btM2;
+    while ((btM2 = btRe2.exec(txt2)) !== null) {
+      var block2 = btM2[1];
+      var tmRe3 = /([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+Tm/g;
+      var allTms2 = [];
+      var tmM3;
+      while ((tmM3 = tmRe3.exec(block2)) !== null) {
+        allTms2.push({
+          idx: tmM3.index + tmM3[0].length,
+          a: parseFloat(tmM3[1]), b: parseFloat(tmM3[2]),
+          c: parseFloat(tmM3[3]), d: parseFloat(tmM3[4]),
+          e: parseFloat(tmM3[5]), f: parseFloat(tmM3[6])
+        });
+      }
+
+      for (var ti2 = 0; ti2 < allTms2.length; ti2++) {
+        var tm2 = allTms2[ti2];
+        if (!(Math.abs(tm2.b) > 0.3 || Math.abs(tm2.c) > 0.3)) continue;
+
+        var segEndPos2 = ti2 + 1 < allTms2.length ? allTms2[ti2 + 1].idx : block2.length;
+        var seg2 = block2.slice(tm2.idx, segEndPos2);
+
+        var tfM2 = seg2.match(/\/\w+\s+([\d.]+)\s+Tf/);
+        var fontSize2 = tfM2 ? parseFloat(tfM2[1]) : 10;
+
+        var texts2 = [];
+        var tjRe4 = /\(([^)]*)\)\s*Tj/g, tj4;
+        while ((tj4 = tjRe4.exec(seg2)) !== null) {
+          var t5 = tj4[1]
+            .replace(/\\([0-7]{3})/g, function(_, o) { return String.fromCharCode(parseInt(o, 8)); })
+            .replace(/\\\\/g, '\\').replace(/\\n/g, ' ').replace(/\\r/g, ' ').trim();
+          if (t5) texts2.push(t5);
+        }
+        var tjARe4 = /\[([^\]]*)\]\s*TJ/g, tja4;
+        while ((tja4 = tjARe4.exec(seg2)) !== null) {
+          var strRe4 = /\(([^)]*)\)/g, sr4;
+          while ((sr4 = strRe4.exec(tja4[1])) !== null) {
+            var t6 = sr4[1]
+              .replace(/\\([0-7]{3})/g, function(_, o) { return String.fromCharCode(parseInt(o, 8)); })
+              .replace(/\\\\/g, '\\').replace(/\\n/g, ' ').replace(/\\r/g, ' ').trim();
+            if (t6) texts2.push(t6);
+          }
+        }
+
+        if (!texts2.length) continue;
+        var combined2 = texts2.join(' ').replace(/\s+/g, ' ').trim();
+        if (!combined2) continue;
+
+        var normCombined2 = combined2.toLowerCase().replace(/[^a-z0-9]/g, '');
+        var matched2 = false;
+        for (var pj2 = 0; pj2 < piiNorm.length; pj2++) {
+          if (normCombined2.indexOf(piiNorm[pj2].norm) !== -1) {
+            matched2 = true; break;
+          }
+        }
+        if (!matched2) continue;
+
+        var tdSum2 = 0;
+        var tdRe4 = /([-\d.]+)\s+([-\d.]+)\s+Td/g, tdM4;
+        while ((tdM4 = tdRe4.exec(seg2)) !== null) {
+          tdSum2 += Math.abs(parseFloat(tdM4[1]));
+        }
+
+        // Page content stream coords are already in page pts
+        var pageX2 = tm2.e;
+        var pageY2 = tm2.f;
+        var fontPts2 = fontSize2;
+        var runPts2  = tdSum2 > 0 ? tdSum2 : combined2.length * fontPts2 * 0.65;
+
+        var nx2 = pageX2 / dim2.w;
+        var ny2 = 1.0 - (pageY2 / dim2.h);
+
+        var bx2 = Math.max(0, nx2 - 0.005);
+        var by2 = Math.max(0, ny2);
+        var bw2 = Math.min(1.0 - bx2, (fontPts2 * 2.2) / dim2.w);
+        var bh2 = Math.min(1.0 - by2, (runPts2 * 1.1) / dim2.h);
+
+        if (bw2 <= 0 || bh2 <= 0 || bx2 >= 1 || by2 >= 1) continue;
+
+        var key2 = String(pageIdx2);
+        if (!result[key2]) result[key2] = [];
+        result[key2].push({ label: 'rotated_page_text', x: bx2, y: by2, width: bw2, height: bh2 });
+
+        console.log('[ROTATED-PAGE] page=' + (pageIdx2 + 1) +
+          ' "' + combined2.substring(0, 55) + '"' +
+          ' box={x:' + bx2.toFixed(3) + ',y:' + by2.toFixed(3) +
+          ',w:' + bw2.toFixed(3) + ',h:' + bh2.toFixed(3) + '}');
       }
     }
   }
