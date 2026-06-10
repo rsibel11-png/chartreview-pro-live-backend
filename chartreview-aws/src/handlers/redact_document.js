@@ -24,7 +24,7 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
-const REDACT_BUILD = '839'; // Increment with each deploy to trace which build generated a file
+const REDACT_BUILD = '840'; // Increment with each deploy to trace which build generated a file
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
