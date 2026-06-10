@@ -1790,6 +1790,104 @@ function extractRotatedPdfText(pdfDoc, piiValues, rawPdfBytes) {
   return result;
 }
 
+
+async function applyRedactions(pdfBytes, piiByPage) {
+  const pdfDoc = await PDFDocument.load(pdfBytes);
+  const pages  = pdfDoc.getPages();
+
+  for (const pageIndexStr of Object.keys(piiByPage)) {
+    const pageIndex = parseInt(pageIndexStr, 10);
+    const boxes     = piiByPage[pageIndexStr];
+    if (pageIndex >= pages.length || !boxes || !boxes.length) continue;
+
+    const page     = pages[pageIndex];
+    const sz       = page.getSize();
+    const rawW     = sz.width;
+    const rawH     = sz.height;
+
+    // Read PDF page rotation (0 / 90 / 180 / 270).
+    // Textract renders the page visually (post-rotation) before OCR, so its
+    // bounding boxes are in the *visually-correct* coordinate space.
+    // pdf-lib draws in the *raw* (pre-rotation) coordinate space.
+    // We must transform Textract's normalized [0-1] coords into raw space.
+    var rotation = 0;
+    try {
+      var rotNode = page.node.get(page.node.doc.context.obj('Rotate'));
+      if (rotNode) rotation = Number(rotNode.value || rotNode.numberValue || 0);
+    } catch(_e) {
+      try { rotation = page.getRotation ? page.getRotation().angle : 0; } catch(_e2) { rotation = 0; }
+    }
+    rotation = ((rotation % 360) + 360) % 360; // normalise to 0/90/180/270
+
+    for (const box of boxes) {
+      // box.x, box.y, box.width, box.height are Textract-normalized [0-1],
+      // with origin at TOP-LEFT of the *visually rendered* page.
+      var bx = typeof box.x     === 'number' ? box.x     : (box.l  || 0);
+      var by = typeof box.y     === 'number' ? box.y     : (box.tp || 0);
+      var bw = typeof box.width === 'number' ? box.width : (box.w  || 0);
+      var bh = typeof box.height=== 'number' ? box.height: (box.h  || 0);
+      if (!bw || !bh || isNaN(bx) || isNaN(by) || isNaN(bw) || isNaN(bh)) continue;
+
+      var px, py, pw, ph;
+
+      if (rotation === 0) {
+        // Standard: visual space == raw space, just flip Y for pdf-lib.
+        // Handwriting boxes (label === 'handwriting') have Textract bounding boxes
+        // that sit slightly below the visible ink stroke. Shift those boxes upward
+        // by 1×bh so the box covers the actual signature. Print blocks are unchanged.
+        pw = bw * rawW;
+        if (box.label === 'handwriting') {
+          var _yShift = bh * rawH;
+          ph = (bh * rawH) + _yShift;
+          px = bx * rawW;
+          py = rawH - (by + bh) * rawH + _yShift;
+        } else {
+          ph = bh * rawH;
+          px = bx * rawW;
+          py = rawH - (by + bh) * rawH;
+        }
+
+      } else if (rotation === 90) {
+        // Visual page is rawH wide × rawW tall (axes swapped).
+        // Textract bx/by are in that visual space.
+        // Map back to raw space where x-axis = raw width, y-axis = raw height.
+        // In raw space: x_raw = by * rawW,  y_raw = (1 - bx - bw) * rawH
+        px = by * rawW;
+        py = (1 - bx - bw) * rawH;
+        pw = bh * rawW;
+        ph = bw * rawH;
+
+      } else if (rotation === 270) {
+        // Opposite of 90
+        px = (1 - by - bh) * rawW;
+        py = bx * rawH;
+        pw = bh * rawW;
+        ph = bw * rawH;
+
+      } else {
+        // 180: flip both axes
+        px = (1 - bx - bw) * rawW;
+        py = (by) * rawH;
+        pw = bw * rawW;
+        ph = bh * rawH;
+      }
+
+      page.drawRectangle({
+        x:      Math.max(0, px),
+        y:      Math.max(0, py),
+        width:  Math.min(rawW - Math.max(0, px), Math.abs(pw)),
+        height: Math.min(rawH - Math.max(0, py), Math.abs(ph)),
+        color:  rgb(0, 0, 0),
+        opacity: 1,
+      });
+    }
+  }
+
+  return Buffer.from(await pdfDoc.save({ useObjectStreams: false }));
+}
+
+// ── Merge two piiByPage maps ──────────────────────────────────────────────────
+
 function mergePiiMaps(a, b) {
   var out = {};
   var keys = new Set(Object.keys(a).concat(Object.keys(b)));
