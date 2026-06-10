@@ -1633,7 +1633,7 @@ module.exports = {
           content_type:         contentType,
           file_size:            data.file_size            || 0,
           status:               'pending_upload',
-          folder:               data.folder               || null,
+          folder:               (data.folder || '').trim() || null,
           parent_filename:      data.parent_filename      || null,
           total_parts:          data.total_parts          || null,
           part_index:           data.part_index      != null ? data.part_index : null,
