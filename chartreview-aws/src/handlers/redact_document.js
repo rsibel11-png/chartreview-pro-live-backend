@@ -24,7 +24,7 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
-const REDACT_BUILD = '844'; // bump each deploy to trace which build generated the file
+const REDACT_BUILD = '845'; // bump each deploy to trace which build generated the file
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -1587,337 +1587,208 @@ async function loadTextractBlocks(fileKey) {
 // ── STEP 2C: PDF text stream pass — catches rotated margin text Textract misses ─
 // Parses raw PDF content streams to find text with rotation matrices (~90°/270°).
 // No Textract, no Claude — pure PDF geometry.
-function extractRotatedPdfText(pdfDoc, piiValues) {
+function extractRotatedPdfText(pdfDoc, piiValues, rawPdfBytes) {
+  // Diagnose-confirmed approach: lateral stamp is in a Form XObject (Subtype/Form).
+  // Each page's direct content stream only contains "/INN Do" (a Do call).
+  // The Form XObject stream starts with "q 0.1 0 0 0.1 0 0 cm / q 10 0 0 10 0 0 cm"
+  // (net scale 1.0) then a BT block containing a single rotated Tm (0 -1 1 0 e f Tm)
+  // followed by Td-relative text tokens: MOORE, KIMBERLY MRN D002916777 Encounter:...
+  // Page cm matrix: "0.9406 0 0 0.9406 0 26.1663 cm" scales/translates form coords to page.
+  // Strategy: raw-bytes parse all Form XObject streams, decompress, find rotated Tm,
+  // collect Td-relative text, match PII, build normalized bounding box.
+
   var result = {};
   if (!piiValues || !piiValues.length) return result;
+  if (!rawPdfBytes) return result;
 
   var piiNorm = piiValues.map(function(v) {
     return { orig: v, norm: (v || '').toLowerCase().replace(/[^a-z0-9]/g, '') };
-  }).filter(function(p) { return p.norm.length >= 3; });
+  }).filter(function(p) { return p.norm.length >= 4; });
+  if (!piiNorm.length) return result;
 
-  var pages = pdfDoc.getPages();
+  var zlib    = require('zlib');
+  var pages   = pdfDoc.getPages();
+  var numPages = pages.length;
+  var pageDims = pages.map(function(p) { var s = p.getSize(); return { w: s.width, h: s.height }; });
+  var pdfStr  = rawPdfBytes.toString('latin1');
 
-  for (var pi = 0; pi < pages.length; pi++) {
-    var page = pages[pi];
-    var sz   = page.getSize();
-    var rawW = sz.width;
-    var rawH = sz.height;
+  function tryDecompress(str) {
+    var buf = Buffer.from(str, 'latin1');
+    try { return zlib.inflateSync(buf).toString('latin1'); } catch(e) {}
+    try { return zlib.inflateRawSync(buf).toString('latin1'); } catch(e) {}
+    return str;
+  }
 
-    var streamBytes = '';
-    try {
-      var contentRef = page.node.get(page.node.doc.context.obj('Contents'));
-      if (!contentRef) continue;
-      var streams = [];
-      var cname = contentRef.constructor ? contentRef.constructor.name : '';
-      if (cname === 'PDFArray') {
-        for (var si = 0; si < contentRef.size(); si++) {
-          var ref = contentRef.get(si);
-          var obj = page.node.doc.context.lookup(ref);
-          var bytes = obj && obj.getContents ? obj.getContents() : (obj && obj.contents ? obj.contents : null);
-          if (bytes) streams.push(Buffer.isBuffer(bytes) ? bytes.toString('latin1') : String.fromCharCode.apply(null, Array.from(bytes)));
+  // ── Collect page content streams (non-Form, non-Image, has /Do) ───────────
+  // These appear in page order in the PDF — one per page.
+  // Each contains the cm matrix that positions the Form XObject on the page.
+  var pageContentStreams = [];
+  var streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  var sm;
+  while ((sm = streamRe.exec(pdfStr)) !== null) {
+    var pre = pdfStr.substring(Math.max(0, sm.index - 600), sm.index);
+    if (/\/Subtype\s*\/Form/.test(pre) || /\/Subtype\s*\/Image/.test(pre)) continue;
+    var txt = tryDecompress(sm[1]);
+    if (!/\bDo\b/.test(txt)) continue;
+    var cmM = txt.match(/([\d.]+)\s+0\s+0\s+([\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+cm/);
+    pageContentStreams.push({
+      cmScaleX: cmM ? parseFloat(cmM[1]) : 1.0,
+      cmScaleY: cmM ? parseFloat(cmM[2]) : 1.0,
+      cmTransX: cmM ? parseFloat(cmM[3]) : 0.0,
+      cmTransY: cmM ? parseFloat(cmM[4]) : 0.0
+    });
+  }
+
+  // ── Collect Form XObject streams ──────────────────────────────────────────
+  var formStreams = [];
+  streamRe.lastIndex = 0;
+  while ((sm = streamRe.exec(pdfStr)) !== null) {
+    var pre = pdfStr.substring(Math.max(0, sm.index - 600), sm.index);
+    if (!/\/Subtype\s*\/Form/.test(pre)) continue;
+    var txt = tryDecompress(sm[1]);
+    formStreams.push(txt);
+  }
+
+  if (!formStreams.length) return result;
+
+  // ── Process each Form XObject ─────────────────────────────────────────────
+  // Form streams appear in PDF in the same order as pages (one per page).
+  for (var fi = 0; fi < formStreams.length; fi++) {
+    var txt     = formStreams[fi];
+    var pageIdx = fi < numPages ? fi : numPages - 1;
+    var dim     = pageDims[pageIdx] || { w: 612, h: 792 };
+    var pcs     = pageContentStreams[fi] || {};
+    var cmSx    = pcs.cmScaleX || 1.0;
+    var cmSy    = pcs.cmScaleY || 1.0;
+    var cmTy    = pcs.cmTransY || 0.0;
+
+    // Detect form stream inner scale matrix pair: "0.1 0 0 0.1 ... cm" + "10 0 0 10 ... cm"
+    var outerM = txt.match(/q\s+([\d.]+)\s+0\s+0\s+([\d.]+)/);
+    var outerScale = outerM ? parseFloat(outerM[1]) : 1.0;
+    var hasInner10 = /\b10\s+0\s+0\s+10\b/.test(txt);
+    var innerScale = hasInner10 ? 10 : 1;
+    // Net form coord → pre-cm-transform page pts = coord * outerScale * innerScale
+
+    // ── Find BT...ET blocks ───────────────────────────────────────────────
+    var btRe = /BT([\s\S]*?)ET/g;
+    var btM;
+    while ((btM = btRe.exec(txt)) !== null) {
+      var block = btM[1];
+
+      // Find ALL Tm matrices in this block with their positions
+      var tmRe = /([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+Tm/g;
+      var allTms = [];
+      var tmM;
+      while ((tmM = tmRe.exec(block)) !== null) {
+        allTms.push({
+          idx: tmM.index + tmM[0].length,
+          a: parseFloat(tmM[1]), b: parseFloat(tmM[2]),
+          c: parseFloat(tmM[3]), d: parseFloat(tmM[4]),
+          e: parseFloat(tmM[5]), f: parseFloat(tmM[6])
+        });
+      }
+
+      for (var ti = 0; ti < allTms.length; ti++) {
+        var tm = allTms[ti];
+        if (!(Math.abs(tm.b) > 0.3 || Math.abs(tm.c) > 0.3)) continue;
+
+        // Segment: from this Tm to the NEXT Tm (not past it)
+        var segEnd = ti + 1 < allTms.length ? allTms[ti + 1].idx - allTms[ti + 1].idx.toString().length - 50 : block.length;
+        // Safer: use raw string positions
+        var segEndPos = ti + 1 < allTms.length ? allTms[ti + 1].idx : block.length;
+        var seg = block.slice(tm.idx, segEndPos);
+
+        // Font size from first Tf in segment
+        var tfM = seg.match(/\/\w+\s+([\d.]+)\s+Tf/);
+        var fontSize = tfM ? parseFloat(tfM[1]) : 10;
+
+        // Collect Tj / TJ text tokens
+        var texts = [];
+        var tjRe2 = /\(([^)]*)\)\s*Tj/g, tj2;
+        while ((tj2 = tjRe2.exec(seg)) !== null) {
+          var t = tj2[1]
+            .replace(/\\([0-7]{3})/g, function(_, o) { return String.fromCharCode(parseInt(o, 8)); })
+            .replace(/\\\\/g, '\\').replace(/\\n/g, ' ').replace(/\\r/g, ' ').trim();
+          if (t) texts.push(t);
         }
-      } else {
-        var obj2 = page.node.doc.context.lookup(contentRef);
-        var bytes2 = obj2 && obj2.getContents ? obj2.getContents() : (obj2 && obj2.contents ? obj2.contents : null);
-        if (bytes2) streams.push(Buffer.isBuffer(bytes2) ? bytes2.toString('latin1') : String.fromCharCode.apply(null, Array.from(bytes2)));
-      }
-      streamBytes = streams.join(' ');
-    } catch(e) { continue; }
-    if (!streamBytes) continue;
-
-    var boxes = [];
-    // Match Tm operator: a b c d e f Tm
-    var tmRe = /([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+Tm/g;
-    var tmMatches = [];
-    var m;
-    while ((m = tmRe.exec(streamBytes)) !== null) {
-      var a = parseFloat(m[1]), b = parseFloat(m[2]);
-      var c = parseFloat(m[3]), d = parseFloat(m[4]);
-      var e = parseFloat(m[5]), f = parseFloat(m[6]);
-      // Rotated ~90° or ~270°: off-diagonal components dominate
-      var isRotated = (Math.abs(b) > 0.5 || Math.abs(c) > 0.5) &&
-                      Math.abs(a) < 0.5 && Math.abs(d) < 0.5;
-      tmMatches.push({ pos: m.index + m[0].length, a, b, c, d, e, f, isRotated });
-    }
-    if (!tmMatches.length) continue;
-
-    for (var ti = 0; ti < tmMatches.length; ti++) {
-      var tm = tmMatches[ti];
-      if (!tm.isRotated) continue;
-      var segEnd = ti + 1 < tmMatches.length ? tmMatches[ti + 1].pos : streamBytes.length;
-      var seg    = streamBytes.slice(tm.pos, segEnd);
-
-      // Extract text from Tj and TJ operators
-      var texts = [];
-      var tjRe  = /\(([^)]*)\)\s*Tj/g;
-      var tjARe = /\[([^\]]*)\]\s*TJ/g;
-      var mm;
-      while ((mm = tjRe.exec(seg))  !== null) texts.push(mm[1]);
-      while ((mm = tjARe.exec(seg)) !== null) {
-        var strRe = /\(([^)]*)\)/g, sm;
-        while ((sm = strRe.exec(mm[1])) !== null) texts.push(sm[1]);
-      }
-      if (!texts.length) continue;
-
-      // Decode octal escapes (\nnn) in PDF strings
-      var combined = texts.join('').replace(/\\([0-7]{3})/g, function(_, o) {
-        return String.fromCharCode(parseInt(o, 8));
-      }).replace(/\\\\/g, '\\').trim();
-      if (!combined || combined.length < 2) continue;
-
-      var normCombined = combined.toLowerCase().replace(/[^a-z0-9]/g, '');
-      var matched = false;
-      for (var pj = 0; pj < piiNorm.length; pj++) {
-        var pv = piiNorm[pj];
-        if (pv.norm.length < 3) continue;
-        if (normCombined.indexOf(pv.norm) !== -1 || pv.norm.indexOf(normCombined) !== -1) {
-          matched = true; break;
+        var tjARe2 = /\[([^\]]*)\]\s*TJ/g, tja2;
+        while ((tja2 = tjARe2.exec(seg)) !== null) {
+          var strRe2 = /\(([^)]*)\)/g, sr2;
+          while ((sr2 = strRe2.exec(tja2[1])) !== null) {
+            var t2 = sr2[1]
+              .replace(/\\([0-7]{3})/g, function(_, o) { return String.fromCharCode(parseInt(o, 8)); })
+              .replace(/\\\\/g, '\\').replace(/\\n/g, ' ').replace(/\\r/g, ' ').trim();
+            if (t2) texts.push(t2);
+          }
         }
+
+        if (!texts.length) continue;
+        var combined = texts.join(' ').replace(/\s+/g, ' ').trim();
+        if (!combined || combined.length < 4) continue;
+
+        // PII match (minimum 4 chars to avoid false positives)
+        var normCombined = combined.toLowerCase().replace(/[^a-z0-9]/g, '');
+        var matched = false;
+        for (var pj = 0; pj < piiNorm.length; pj++) {
+          var pv = piiNorm[pj];
+          if (normCombined.indexOf(pv.norm) !== -1 || pv.norm.indexOf(normCombined) !== -1) {
+            matched = true; break;
+          }
+        }
+        if (!matched) continue;
+
+        // ── Td accumulation — only within the rotated segment ─────────────
+        // Sum only the horizontal (x) Td advances in this segment.
+        // These represent movement along the rotated text axis = vertical on page.
+        var tdSum = 0;
+        var tdRe2 = /([-\d.]+)\s+([-\d.]+)\s+Td/g, tdM2;
+        while ((tdM2 = tdRe2.exec(seg)) !== null) {
+          tdSum += Math.abs(parseFloat(tdM2[1]));
+        }
+
+        // ── Coordinate conversion ─────────────────────────────────────────
+        // Form coords → page pts:
+        //   page_x = tm.e * outerScale * innerScale * cmSx + cmTransX (≈0)
+        //   page_y = tm.f * outerScale * innerScale * cmSy + cmTy
+        var netSx   = outerScale * innerScale * cmSx;
+        var netSy   = outerScale * innerScale * cmSy;
+        var pageX   = tm.e * netSx;
+        var pageY   = tm.f * netSy + cmTy;
+
+        // Font and run in page pts
+        var fontPts = fontSize * netSx;
+        // runPts = total advance along the rotated text axis (= vertical distance on page)
+        var runPts  = tdSum > 0 ? tdSum * netSx : combined.length * fontPts * 0.65;
+
+        // Box dimensions in pts
+        var boxW_pts = fontPts * 2.2;
+        var boxH_pts = runPts * 1.1;
+
+        // Normalize (0–1). PDF origin = bottom-left. Screen origin = top-left.
+        var nx = pageX / dim.w;
+        var ny = 1.0 - (pageY / dim.h);  // ny = screen Y of text origin
+
+        // For b=-1,c=1 (CCW 90°): text advances downward on screen from ny.
+        var bx = Math.max(0, nx - 0.005);
+        var by = Math.max(0, ny);                              // top of stamp
+        var bw = Math.min(1.0 - bx, boxW_pts / dim.w);
+        var bh = Math.min(1.0 - by, boxH_pts / dim.h);
+
+        if (bw <= 0 || bh <= 0 || bx >= 1 || by >= 1) continue;
+
+        var key = String(pageIdx);
+        if (!result[key]) result[key] = [];
+        result[key].push({ label: 'rotated_xobj_text', x: bx, y: by, width: bw, height: bh });
+
+        console.log('[ROTATED-XOBJ] page=' + (pageIdx + 1) +
+          ' "' + combined.substring(0, 55) + '"' +
+          ' box={x:' + bx.toFixed(3) + ',y:' + by.toFixed(3) +
+          ',w:' + bw.toFixed(3) + ',h:' + bh.toFixed(3) + '}');
       }
-      if (!matched) continue;
-
-      // Estimate font size from the matrix scale factor
-      var fontSize = Math.sqrt(tm.b * tm.b + tm.d * tm.d);
-      if (fontSize < 1) fontSize = 10;
-      var charCount = Math.max(combined.length, 4);
-
-      // For 90°-rotated text: e=x position, f=y position in raw PDF points
-      // The text runs vertically — build a bounding box in normalized coords
-      var boxW = fontSize * 1.8 / rawW;          // ~1-2 chars wide
-      var boxH = (charCount * fontSize * 1.1) / rawH;  // full text height
-
-      // Normalize: PDF origin is bottom-left, our system uses top-left
-      var nx = tm.e / rawW;
-      var ny = 1.0 - (tm.f / rawH);
-
-      var bx = Math.max(0, nx - boxW * 0.3);
-      var by = Math.max(0, ny - boxH);
-      var bw = Math.min(1.0 - bx, boxW * 1.5);
-      var bh = Math.min(1.0 - by, boxH * 1.2);
-
-      boxes.push({ label: 'rotated_pdf_text', x: bx, y: by, width: bw, height: bh });
-      console.log('[ROTATED-PDF] p=' + (pi+1) + ' t=' + JSON.stringify(combined) +
-        ' e=' + tm.e.toFixed(1) + ' f=' + tm.f.toFixed(1) +
-        ' box={x:' + bx.toFixed(3) + ',y:' + by.toFixed(3) + ',w:' + bw.toFixed(3) + ',h:' + bh.toFixed(3) + '}');
     }
-    if (boxes.length) result[String(pi)] = (result[String(pi)] || []).concat(boxes);
   }
   return result;
 }
-
-// ── STEP 2B: Claude vision pass — handwritten content only ───────────────────
-
-async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
-  const pdfBase64 = pdfBytes.toString('base64');
-
-  const confirmedSection = knownPiiValues && knownPiiValues.length > 0
-    ? '=== CONFIRMED PATIENT PII — MUST REDACT ALL ===\n\n' +
-      'These strings are confirmed patient PII. Find EVERY handwritten occurrence.\n\n' +
-      knownPiiValues.map(function(v) { return '  - "' + v + '"'; }).join('\n') + '\n'
-    : '';
-
-  const prompt = [
-    'You are a HIPAA redaction assistant for workers compensation medical records.',
-    'Your job is to find and return bounding boxes for PATIENT DEMOGRAPHIC information only.',
-    'Clinical content must be preserved — only identity/contact information is redacted.',
-    '',
-    '=== WHAT TO REDACT (patient demographics only) ===',
-    '',
-    'PATIENT NAME — the patient name value, not provider names:',
-    '  e.g. "Patient: MORA-MALDONADO,VILMA N"  →  redact "MORA-MALDONADO,VILMA N"',
-    '  e.g. "PATIENT: Smith, John A"  →  redact "Smith, John A"',
-    '  e.g. handwritten name on C-4 form patient name field',
-    '',
-    'DATE OF BIRTH — redact the birth date value when labeled as DOB:',
-    '  e.g. line reads "DOB: 05/21/69  AGE: 56  SEX: F" → redact "05/21/69" AND "56"',
-    '  e.g. line reads "DOB: 05/21/1969" → redact the date value',
-    '  e.g. line reads "DATE OF BIRTH: May 21, 1969" → redact the date',
-    '  e.g. line reads "Birth Date: 05/21/69" → redact the date',
-    '  e.g. radiology header "DOB:" field → redact the value next to it',
-    '  KEY RULE: The label that triggers DOB redaction MUST be one of:',
-    '    DOB:  D.O.B.:  DATE OF BIRTH:  Birth Date:  Patient DOB:  Birthdate:',
-    '  SERVICE DATE RULE — these labels do NOT trigger redaction:',
-    '    Date:  DATE:  DATE:xx/xx/xx TIME:  ADM DT:  REP SRV DT:  SERVICE DT:',
-    '    Discharge date:  Date of admission:  Observation Start Date:',
-    '    Any date appearing in clinical notes, vital signs tables, medication orders',
-    'COMPACT HEADER RULE — many continuation pages have this 4-line header block:',
-    '  Patient: [name]  /  Unit#[number]  /  Date: [xx/xx/xx]  /  Acct# [number]',
-    '  The "Date:" value in this 4-line block is a REPORT date, NOT a birth date.',
-    '  DO NOT REDACT the Date: value here. Only redact the Patient name and Acct# value.',
-    '',
-    'MRN / UNIT / ACCOUNT NUMBERS:',
-    '  e.g. "UNIT #: D003081753"  →  redact "D003081753"',
-    '  e.g. "ACCOUNT#: D00136377973"  →  redact "D00136377973"',
-    '  e.g. "MRN#: 403522"  →  redact "403522"',
-    '  e.g. "Patient #: 403522"  →  redact the number',
-    '',
-    'SSN: any value in xxx-xx-xxxx format',
-    '',
-    'INSURANCE / CLAIM IDs:',
-    '  e.g. "Plan #: 354000611225"  →  redact the number',
-    '  e.g. "Group #: 76414937"  →  redact the number',
-    '  e.g. "CLM#: 0583WC260300444"  →  redact the number',
-    '',
-    'PATIENT ADDRESS AND PHONE:',
-    '  e.g. "1828 E State Highway 168 Box 578, Moapa, NV 89025"  →  redact',
-    '  e.g. "(818) 497-1726"  →  redact',
-    '',
-    'PATIENT PHOTO or PATIENT SIGNATURE on forms',
-    '',
-    '=== WHAT NOT TO REDACT ===',
-    '',
-    'Provider names: "Electronically Signed by Ching,Wilbert MD"  →  DO NOT redact',
-    'Dates of service: "SERVICE DT: 10/08/25", "ADM DT: 10/02/25", "REP SRV DT: 10/03/25"  →  DO NOT redact',
-    'Date labels alone: "Date: 10/08/25" on CorVel header continuation pages  →  DO NOT redact (service date)',
-    'AGE field standalone: "AGE: 56" without adjacent DOB  →  DO NOT redact',
-    'Diagnoses: "S52.021A – Displaced fracture of olecranon"  →  DO NOT redact',
-    'ICD/CPT codes: "S52.131A", "W01.0XXA"  →  DO NOT redact',
-    'Medications: "Hydrocodone 10mg", "gabapentin 600mg"  →  DO NOT redact',
-    'Clinical narrative: HPI, exam findings, assessment/plan  →  DO NOT redact',
-    'Facility names: "Sunrise Hospital", "Nevada Orthopedic"  →  DO NOT redact',
-    'Report numbers: "RPT #: 1003-0280"  →  DO NOT redact',
-    'Employer: "DISTRICT ATTORNEY OF FAMIL"  →  DO NOT redact',
-    '',
-    confirmedSection,
-    '=== BOX PLACEMENT ===',
-    'Cover the VALUE only, not the label. E.g. for "DOB: 05/21/69" cover only "05/21/69".',
-    'Start slightly LEFT of the value (subtract ~0.005 from x). Add ~0.008 to width.',
-    'For multi-line values, use one box per line.',
-    '',
-    '=== OUTPUT FORMAT ===',
-    'JSON object keyed by 0-based page index.',
-    'Only include pages that have demographics to redact. Omit pages with nothing to redact.',
-    'Return ONLY valid JSON — no explanation, no markdown.',
-    '{',
-    '  "0": [{"label":"patient name","x":0.08,"y":0.05,"width":0.38,"height":0.018}],',
-    '  "3": [{"label":"DOB","x":0.22,"y":0.08,"width":0.12,"height":0.016},{"label":"unit number","x":0.10,"y":0.11,"width":0.20,"height":0.016}]',
-    '}',
-  ].filter(Boolean).join('\n');
-
-  const body = JSON.stringify({
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 4096,
-    temperature: 0,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
-        { type: 'text', text: prompt },
-      ],
-    }],
-  });
-
-  const resp = await bedrock.send(new InvokeModelCommand({
-    modelId: MODEL_ID,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body,
-  }));
-
-  const result  = JSON.parse(Buffer.from(resp.body).toString('utf-8'));
-  const rawText = (result.content && result.content[0] && result.content[0].text) || '{}';
-  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  try { return JSON.parse(cleaned); } catch (e) { return {}; }
-}
-
-// ── STEP 3: Apply black boxes ─────────────────────────────────────────────────
-
-async function applyRedactions(pdfBytes, piiByPage) {
-  const pdfDoc = await PDFDocument.load(pdfBytes);
-  const pages  = pdfDoc.getPages();
-
-  for (const pageIndexStr of Object.keys(piiByPage)) {
-    const pageIndex = parseInt(pageIndexStr, 10);
-    const boxes     = piiByPage[pageIndexStr];
-    if (pageIndex >= pages.length || !boxes || !boxes.length) continue;
-
-    const page     = pages[pageIndex];
-    const sz       = page.getSize();
-    const rawW     = sz.width;
-    const rawH     = sz.height;
-
-    // Read PDF page rotation (0 / 90 / 180 / 270).
-    // Textract renders the page visually (post-rotation) before OCR, so its
-    // bounding boxes are in the *visually-correct* coordinate space.
-    // pdf-lib draws in the *raw* (pre-rotation) coordinate space.
-    // We must transform Textract's normalized [0-1] coords into raw space.
-    var rotation = 0;
-    try {
-      var rotNode = page.node.get(page.node.doc.context.obj('Rotate'));
-      if (rotNode) rotation = Number(rotNode.value || rotNode.numberValue || 0);
-    } catch(_e) {
-      try { rotation = page.getRotation ? page.getRotation().angle : 0; } catch(_e2) { rotation = 0; }
-    }
-    rotation = ((rotation % 360) + 360) % 360; // normalise to 0/90/180/270
-
-    for (const box of boxes) {
-      // box.x, box.y, box.width, box.height are Textract-normalized [0-1],
-      // with origin at TOP-LEFT of the *visually rendered* page.
-      var bx = typeof box.x     === 'number' ? box.x     : (box.l  || 0);
-      var by = typeof box.y     === 'number' ? box.y     : (box.tp || 0);
-      var bw = typeof box.width === 'number' ? box.width : (box.w  || 0);
-      var bh = typeof box.height=== 'number' ? box.height: (box.h  || 0);
-      if (!bw || !bh || isNaN(bx) || isNaN(by) || isNaN(bw) || isNaN(bh)) continue;
-
-      var px, py, pw, ph;
-
-      if (rotation === 0) {
-        // Standard: visual space == raw space, just flip Y for pdf-lib.
-        // Handwriting boxes (label === 'handwriting') have Textract bounding boxes
-        // that sit slightly below the visible ink stroke. Shift those boxes upward
-        // by 1×bh so the box covers the actual signature. Print blocks are unchanged.
-        pw = bw * rawW;
-        if (box.label === 'handwriting') {
-          var _yShift = bh * rawH;
-          ph = (bh * rawH) + _yShift;
-          px = bx * rawW;
-          py = rawH - (by + bh) * rawH + _yShift;
-        } else {
-          ph = bh * rawH;
-          px = bx * rawW;
-          py = rawH - (by + bh) * rawH;
-        }
-
-      } else if (rotation === 90) {
-        // Visual page is rawH wide × rawW tall (axes swapped).
-        // Textract bx/by are in that visual space.
-        // Map back to raw space where x-axis = raw width, y-axis = raw height.
-        // In raw space: x_raw = by * rawW,  y_raw = (1 - bx - bw) * rawH
-        px = by * rawW;
-        py = (1 - bx - bw) * rawH;
-        pw = bh * rawW;
-        ph = bw * rawH;
-
-      } else if (rotation === 270) {
-        // Opposite of 90
-        px = (1 - by - bh) * rawW;
-        py = bx * rawH;
-        pw = bh * rawW;
-        ph = bw * rawH;
-
-      } else {
-        // 180: flip both axes
-        px = (1 - bx - bw) * rawW;
-        py = (by) * rawH;
-        pw = bw * rawW;
-        ph = bh * rawH;
-      }
-
-      page.drawRectangle({
-        x:      Math.max(0, px),
-        y:      Math.max(0, py),
-        width:  Math.min(rawW - Math.max(0, px), Math.abs(pw)),
-        height: Math.min(rawH - Math.max(0, py), Math.abs(ph)),
-        color:  rgb(0, 0, 0),
-        opacity: 1,
-      });
-    }
-  }
-
-  return Buffer.from(await pdfDoc.save({ useObjectStreams: false }));
-}
-
-// ── Merge two piiByPage maps ──────────────────────────────────────────────────
 
 function mergePiiMaps(a, b) {
   var out = {};
@@ -2372,7 +2243,7 @@ module.exports.redactDocumentWorker = async function(event) {
       // PDF text stream pass — catches rotated margin text Textract skips entirely
       try {
         var _pdfDocR = await PDFDocument.load(pdfBytes);
-        var _rotPii  = extractRotatedPdfText(_pdfDocR, filteredPiiValues);
+        var _rotPii  = extractRotatedPdfText(_pdfDocR, filteredPiiValues, pdfBytes);
         var _rotCnt  = Object.values(_rotPii).reduce(function(s,b){return s+b.length;},0);
         if (_rotCnt > 0) {
           console.log('[ROTATED-PDF] ' + _rotCnt + ' box(es) from rotated margin text');
