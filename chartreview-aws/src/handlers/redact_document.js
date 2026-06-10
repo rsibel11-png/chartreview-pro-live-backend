@@ -1574,6 +1574,128 @@ async function loadTextractBlocks(fileKey) {
   }
 }
 
+
+// ── STEP 2C: PDF text stream pass — catches rotated margin text Textract misses ─
+// Parses raw PDF content streams to find text with rotation matrices (~90°/270°).
+// No Textract, no Claude — pure PDF geometry.
+function extractRotatedPdfText(pdfDoc, piiValues) {
+  var result = {};
+  if (!piiValues || !piiValues.length) return result;
+
+  var piiNorm = piiValues.map(function(v) {
+    return { orig: v, norm: (v || '').toLowerCase().replace(/[^a-z0-9]/g, '') };
+  }).filter(function(p) { return p.norm.length >= 3; });
+
+  var pages = pdfDoc.getPages();
+
+  for (var pi = 0; pi < pages.length; pi++) {
+    var page = pages[pi];
+    var sz   = page.getSize();
+    var rawW = sz.width;
+    var rawH = sz.height;
+
+    var streamBytes = '';
+    try {
+      var contentRef = page.node.get(page.node.doc.context.obj('Contents'));
+      if (!contentRef) continue;
+      var streams = [];
+      var cname = contentRef.constructor ? contentRef.constructor.name : '';
+      if (cname === 'PDFArray') {
+        for (var si = 0; si < contentRef.size(); si++) {
+          var ref = contentRef.get(si);
+          var obj = page.node.doc.context.lookup(ref);
+          var bytes = obj && obj.getContents ? obj.getContents() : (obj && obj.contents ? obj.contents : null);
+          if (bytes) streams.push(Buffer.isBuffer(bytes) ? bytes.toString('latin1') : String.fromCharCode.apply(null, Array.from(bytes)));
+        }
+      } else {
+        var obj2 = page.node.doc.context.lookup(contentRef);
+        var bytes2 = obj2 && obj2.getContents ? obj2.getContents() : (obj2 && obj2.contents ? obj2.contents : null);
+        if (bytes2) streams.push(Buffer.isBuffer(bytes2) ? bytes2.toString('latin1') : String.fromCharCode.apply(null, Array.from(bytes2)));
+      }
+      streamBytes = streams.join(' ');
+    } catch(e) { continue; }
+    if (!streamBytes) continue;
+
+    var boxes = [];
+    // Match Tm operator: a b c d e f Tm
+    var tmRe = /([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+Tm/g;
+    var tmMatches = [];
+    var m;
+    while ((m = tmRe.exec(streamBytes)) !== null) {
+      var a = parseFloat(m[1]), b = parseFloat(m[2]);
+      var c = parseFloat(m[3]), d = parseFloat(m[4]);
+      var e = parseFloat(m[5]), f = parseFloat(m[6]);
+      // Rotated ~90° or ~270°: off-diagonal components dominate
+      var isRotated = (Math.abs(b) > 0.5 || Math.abs(c) > 0.5) &&
+                      Math.abs(a) < 0.5 && Math.abs(d) < 0.5;
+      tmMatches.push({ pos: m.index + m[0].length, a, b, c, d, e, f, isRotated });
+    }
+    if (!tmMatches.length) continue;
+
+    for (var ti = 0; ti < tmMatches.length; ti++) {
+      var tm = tmMatches[ti];
+      if (!tm.isRotated) continue;
+      var segEnd = ti + 1 < tmMatches.length ? tmMatches[ti + 1].pos : streamBytes.length;
+      var seg    = streamBytes.slice(tm.pos, segEnd);
+
+      // Extract text from Tj and TJ operators
+      var texts = [];
+      var tjRe  = /\(([^)]*)\)\s*Tj/g;
+      var tjARe = /\[([^\]]*)\]\s*TJ/g;
+      var mm;
+      while ((mm = tjRe.exec(seg))  !== null) texts.push(mm[1]);
+      while ((mm = tjARe.exec(seg)) !== null) {
+        var strRe = /\(([^)]*)\)/g, sm;
+        while ((sm = strRe.exec(mm[1])) !== null) texts.push(sm[1]);
+      }
+      if (!texts.length) continue;
+
+      // Decode octal escapes (\nnn) in PDF strings
+      var combined = texts.join('').replace(/\\([0-7]{3})/g, function(_, o) {
+        return String.fromCharCode(parseInt(o, 8));
+      }).replace(/\\\\/g, '\\').trim();
+      if (!combined || combined.length < 2) continue;
+
+      var normCombined = combined.toLowerCase().replace(/[^a-z0-9]/g, '');
+      var matched = false;
+      for (var pj = 0; pj < piiNorm.length; pj++) {
+        var pv = piiNorm[pj];
+        if (pv.norm.length < 3) continue;
+        if (normCombined.indexOf(pv.norm) !== -1 || pv.norm.indexOf(normCombined) !== -1) {
+          matched = true; break;
+        }
+      }
+      if (!matched) continue;
+
+      // Estimate font size from the matrix scale factor
+      var fontSize = Math.sqrt(tm.b * tm.b + tm.d * tm.d);
+      if (fontSize < 1) fontSize = 10;
+      var charCount = Math.max(combined.length, 4);
+
+      // For 90°-rotated text: e=x position, f=y position in raw PDF points
+      // The text runs vertically — build a bounding box in normalized coords
+      var boxW = fontSize * 1.8 / rawW;          // ~1-2 chars wide
+      var boxH = (charCount * fontSize * 1.1) / rawH;  // full text height
+
+      // Normalize: PDF origin is bottom-left, our system uses top-left
+      var nx = tm.e / rawW;
+      var ny = 1.0 - (tm.f / rawH);
+
+      var bx = Math.max(0, nx - boxW * 0.3);
+      var by = Math.max(0, ny - boxH);
+      var bw = Math.min(1.0 - bx, boxW * 1.5);
+      var bh = Math.min(1.0 - by, boxH * 1.2);
+
+      boxes.push({ label: 'rotated_pdf_text', x: bx, y: by, width: bw, height: bh });
+      console.log('[ROTATED-PDF] p=' + (pi+1) + ' t=' + JSON.stringify(combined) +
+        ' e=' + tm.e.toFixed(1) + ' f=' + tm.f.toFixed(1) +
+        ' box={x:' + bx.toFixed(3) + ',y:' + by.toFixed(3) + ',w:' + bw.toFixed(3) + ',h:' + bh.toFixed(3) + '}');
+    }
+    if (boxes.length) result[String(pi)] = (result[String(pi)] || []).concat(boxes);
+  }
+  return result;
+}
+
 // ── STEP 2B: Claude vision pass — handwritten content only ───────────────────
 
 async function detectHandwrittenPii(pdfBytes, knownPiiValues) {
@@ -2238,6 +2360,16 @@ module.exports.redactDocumentWorker = async function(event) {
     allPii = findBoxesFromBlocks(wordBlocks, filteredPiiValues, piiSourceMap);
       var textractCount = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
       console.log('[REDACT] Textract path found ' + textractCount + ' box(es) across ' + Object.keys(allPii).length + ' page(s)');
+      // PDF text stream pass — catches rotated margin text Textract skips entirely
+      try {
+        var _pdfDocR = await PDFDocument.load(pdfBytes);
+        var _rotPii  = extractRotatedPdfText(_pdfDocR, filteredPiiValues);
+        var _rotCnt  = Object.values(_rotPii).reduce(function(s,b){return s+b.length;},0);
+        if (_rotCnt > 0) {
+          console.log('[ROTATED-PDF] ' + _rotCnt + ' box(es) from rotated margin text');
+          allPii = mergePiiMaps(allPii, _rotPii);
+        }
+      } catch(_re) { console.warn('[ROTATED-PDF] pass failed (non-fatal):', _re.message); }
 
     } else {
       // ── FALLBACK: Claude vision (no Textract blocks available) ─────────────
