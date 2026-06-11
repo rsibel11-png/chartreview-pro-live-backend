@@ -590,6 +590,19 @@ const sanitizeVisits = (visits, patientName) => {
                         setting.includes('consent for') ||
                         setting.includes('surgical consent') ||
                         setting.includes('informed consent'));
+    // PPR rescue: if the LLM mislabeled a dictated note as "Physician Progress Report"
+    // but populated SOAP fields (hpi_summary, physical_exam_findings, treatment_plan),
+    // it is clearly a real clinical visit — override the setting and keep it.
+    if (isPPR && !isC4) {
+      const hasSoap = (visit.hpi_summary && visit.hpi_summary.length > 20) ||
+                      (visit.physical_exam_findings && visit.physical_exam_findings.length > 20) ||
+                      (visit.treatment_plan && visit.treatment_plan.length > 20);
+      if (hasSoap) {
+        console.log(`sanitizeVisits: PPR rescue — SOAP fields present, keeping [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
+        visit.practice_setting = visit.practice_setting.replace(/physician['s]* progress report/i, '').trim().replace(/^[-–—,\s]+|[-–—,\s]+$/g, '').trim() || 'Office Visit';
+        return true;
+      }
+    }
     const skip = !isC4 && (isPPR || isCodingSummary || isAdminOnly);
     if (skip) console.log(`sanitizeVisits: dropping non-clinical entry [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
     return !skip;
@@ -749,9 +762,6 @@ If the same provider has both a Consultation Report and an Operative Report on t
 PHYSICIAN'S PROGRESS REPORT (PPR) — SKIP ENTIRELY:
 In workers' compensation cases, providers routinely generate a Physician's Progress Report (PPR) — a standard pre-printed WC form. The PPR always accompanies a separately dictated/typed office note from the same provider on the same date. The dictated note contains ALL the same clinical information, written more completely.
 RULE: A true PPR is identified by "PHYSICIAN'S PROGRESS REPORT" appearing as the document title at the very top of the page — before any structured patient header — combined with pre-printed checkbox fields for disability status and work restrictions. If a document has a full structured header (facility, patient name, service date, dictating provider) followed by a SOAP-style narrative body (Subjective Complaints / Objective Findings / Assessment / Plan), it is a dictated office note, NOT a PPR — even if the words "Physician Progress Report" appear as a label somewhere inside the notes section body. Extract it as a regular office visit and set practice_setting to the facility name. Do NOT extract it as "Physician Progress Report".
-
-TRANSCRIPTION FORMAT ANCHOR — ALWAYS EXTRACT:
-Documents from transcription services (e.g., US MedGroup, MModal) have a structured header containing fields like "Service Date:", "Dictated By:", "Service Location:", "Transcription". If you see these fields in the document header, the document is ALWAYS a transcribed clinical office visit — extract it regardless of any section label that appears in the Notes body (including "PHYSICIAN PROGRESS REPORT", "PHYSICIAN'S PROGRESS REPORT", or any similar label). The Notes body section label is never the document type — it is a section header within the note itself. Use the facility name (e.g., "US MedGroup - CMC LVG Polaris") as practice_setting.
 
 CRITICAL: If the document(s) contain MULTIPLE visits or encounters, you MUST extract each as a separate entry in the visits array.
 
