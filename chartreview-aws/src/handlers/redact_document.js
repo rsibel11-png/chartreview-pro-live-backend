@@ -14,7 +14,7 @@ const { PDFDocument, rgb }                             = require('pdf-lib');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
-const REDACT_BUILD = '837-revert'; // Reverted to #837 baseline 2026-06-10
+const REDACT_BUILD = '851'; // #851: restore versioned filename in redacted output
 
 
 const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
@@ -2417,8 +2417,8 @@ module.exports.redactDocumentWorker = async function(event) {
     const keyParts     = fileKey.split('/');
     const origFilename = keyParts.pop();
     const baseName     = origFilename.replace(/\.pdf$/i, '');
-    const redactedKey  = keyParts.concat([baseName + '_REDACTED.pdf']).join('/');
-    const redactedName = baseName + '_REDACTED.pdf';
+    const redactedKey  = keyParts.concat([baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf']).join('/');
+    const redactedName = baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf';
 
     await updateJob(job_id, { progress_message: 'Saving redacted document...', updated_at: new Date().toISOString() });
 
@@ -2873,8 +2873,8 @@ module.exports.redactCaseWorker = async function(event) {
 
     var baseName   = (doc_records[0].original_filename || 'document').replace(/_Part\d+\.pdf$/i, '').replace(/\.pdf$/i, '');
     var newUUID    = randomUUID();
-    var mergedKey  = 'orgs/' + org_id + '/documents/' + newUUID + '/' + baseName + '_REDACTED.pdf';
-    var mergedName = baseName + '_REDACTED.pdf';
+    var mergedKey  = 'orgs/' + org_id + '/documents/' + newUUID + '/' + baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf';
+    var mergedName = baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf';
 
     await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: mergedKey, Body: mergedBytes, ContentType: 'application/pdf' }));
 
@@ -2888,7 +2888,7 @@ module.exports.redactCaseWorker = async function(event) {
         folder:      folder_name || '',
       };
       var _caseLogBytes = buildRedactionLogCsv(mergedName, mergedPiiByPage, _casePiiSummary);
-      _caseLogKey = mergedKey.replace(/_REDACTED\.pdf$/i, '_REDACTION_LOG.csv');
+      _caseLogKey = mergedKey.replace(/_REDACTED_v[^/]+\.pdf$/i, '_REDACTION_LOG.csv');
       await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _caseLogKey, Body: _caseLogBytes, ContentType: 'text/csv' }));
       _caseLogUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _caseLogKey }), { expiresIn: 604800 });
       console.log('[REDACTION-LOG] Case CSV uploaded to', _caseLogKey);
