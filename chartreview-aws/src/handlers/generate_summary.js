@@ -568,6 +568,31 @@ const sanitizeVisits = (visits, patientName) => {
     // Code-level safety net: drop non-clinical document types even if the model extracted them
     const setting = (visit.practice_setting || '').toLowerCase();
     const provider = (visit.rendering_provider || '').toLowerCase();
+
+    // ── Structural SOAP test (LLM-label-independent) ─────────────────────
+    // A true PPR / admin form has no narrative content.
+    // Any visit with substantive SOAP fields is a real clinical encounter
+    // regardless of what the LLM put in practice_setting.
+    const soapScore =
+      ((visit.hpi_summary            || '').length > 20 ? 1 : 0) +
+      ((visit.physical_exam_findings || '').length > 20 ? 1 : 0) +
+      ((visit.treatment_plan         || '').length > 20 ? 1 : 0) +
+      ((visit.impression_diagnosis   || '').length > 10 ? 1 : 0);
+    if (soapScore >= 2) {
+      // Has real clinical narrative — keep unconditionally, fix mislabeled setting
+      const mislabeled = /physician['s]* progress report|ppr/i.test(visit.practice_setting || '');
+      if (mislabeled) {
+        console.log(`sanitizeVisits: structural rescue — SOAP score ${soapScore}, fixing mislabeled setting [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
+        visit.practice_setting = (visit.practice_setting || '')
+          .replace(/physician['s]* progress report/gi, '')
+          .replace(/ppr/gi, '')
+          .trim()
+          .replace(/^[-–—,\s]+|[-–—,\s]+$/g, '')
+          .trim() || 'Office Visit';
+      }
+      return true;
+    }
+
     const isPPR = setting.includes("physician's progress report") ||
                   setting.includes("physicians progress report") ||
                   setting.includes("physician progress report") ||
@@ -590,19 +615,6 @@ const sanitizeVisits = (visits, patientName) => {
                         setting.includes('consent for') ||
                         setting.includes('surgical consent') ||
                         setting.includes('informed consent'));
-    // PPR rescue: if the LLM mislabeled a dictated note as "Physician Progress Report"
-    // but populated SOAP fields (hpi_summary, physical_exam_findings, treatment_plan),
-    // it is clearly a real clinical visit — override the setting and keep it.
-    if (isPPR && !isC4) {
-      const hasSoap = (visit.hpi_summary && visit.hpi_summary.length > 20) ||
-                      (visit.physical_exam_findings && visit.physical_exam_findings.length > 20) ||
-                      (visit.treatment_plan && visit.treatment_plan.length > 20);
-      if (hasSoap) {
-        console.log(`sanitizeVisits: PPR rescue — SOAP fields present, keeping [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
-        visit.practice_setting = visit.practice_setting.replace(/physician['s]* progress report/i, '').trim().replace(/^[-–—,\s]+|[-–—,\s]+$/g, '').trim() || 'Office Visit';
-        return true;
-      }
-    }
     const skip = !isC4 && (isPPR || isCodingSummary || isAdminOnly);
     if (skip) console.log(`sanitizeVisits: dropping non-clinical entry [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
     return !skip;
