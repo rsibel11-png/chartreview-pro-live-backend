@@ -14,7 +14,7 @@ const { PDFDocument, rgb }                             = require('pdf-lib');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
-const REDACT_BUILD = '854'; // #851: restore versioned filename in redacted output
+const REDACT_BUILD = '855'; // #851: restore versioned filename in redacted output
 
 
 const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
@@ -2927,6 +2927,16 @@ module.exports.redactCaseWorker = async function(event) {
         }
       }
 
+      // ── XObject lateral margin pass for case worker path ─────────────────────
+      try {
+        var _cwDocR = await PDFDocument.load(pdfBytes);
+        var _cwRotPii = extractRotatedPdfText(_cwDocR, filteredPiiValues);
+        var _cwRotCnt = Object.values(_cwRotPii).reduce(function(s,b){return s+b.length;},0);
+        if (_cwRotCnt > 0) {
+          console.log('[ROTATED-XOBJ-CASE] ' + _cwRotCnt + ' box(es) from XObject lateral margin');
+          allPii = mergePiiMaps(allPii, _cwRotPii);
+        }
+      } catch(_cwe) { console.warn('[ROTATED-XOBJ-CASE] failed (non-fatal):', _cwe.message); }
       var redactedBytes = await applyRedactions(pdfBytes, allPii);
       var redactCount   = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
       return { redactedBytes, redactCount, piiByPage: allPii };
