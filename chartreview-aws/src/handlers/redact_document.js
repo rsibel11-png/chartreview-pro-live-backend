@@ -14,7 +14,7 @@ const { PDFDocument, rgb }                             = require('pdf-lib');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
-const REDACT_BUILD = '856'; // #851: restore versioned filename in redacted output
+const REDACT_BUILD = '857'; // #851: restore versioned filename in redacted output
 
 
 const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
@@ -1860,6 +1860,44 @@ function extractRotatedPdfText(pdfDoc, piiValues) {
   return result;
 }
 
+
+async function applyRedactions(pdfBytes, piiByPage) {
+  const pdfDoc = await PDFDocument.load(pdfBytes);
+  const pages  = pdfDoc.getPages();
+
+  for (const pageIndexStr of Object.keys(piiByPage)) {
+    const pageIndex = parseInt(pageIndexStr, 10);
+    const boxes     = piiByPage[pageIndexStr];
+    if (pageIndex >= pages.length || !boxes || !boxes.length) continue;
+
+    const page = pages[pageIndex];
+    const sz   = page.getSize();
+    const w    = sz.width;
+    const h    = sz.height;
+
+    for (const box of boxes) {
+      // Claude returns normalized coords with top-left origin (y=0 at top).
+      // pdf-lib uses bottom-left origin, so we flip Y.
+      // No artificial shifts — trust Claude's box placement exactly.
+      const px = box.x * w;
+      const py = h - (box.y + box.height) * h;
+      const pw = box.width  * w;
+      const ph = box.height * h;
+      page.drawRectangle({
+        x:      Math.max(0, px),
+        y:      Math.max(0, py),
+        width:  Math.min(w - Math.max(0, px), pw),
+        height: Math.min(h, ph),
+        color:   rgb(0, 0, 0),
+        opacity: 1,
+      });
+    }
+  }
+
+  return Buffer.from(await pdfDoc.save({ useObjectStreams: false }));
+}
+
+// ── Merge two piiByPage maps ──────────────────────────────────────────────────
 
 function mergePiiMaps(a, b) {
   var out = {};
