@@ -14,7 +14,7 @@ const { PDFDocument, rgb }                             = require('pdf-lib');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
-const REDACT_BUILD = '851'; // #851: restore versioned filename in redacted output
+const REDACT_BUILD = '854'; // #851: restore versioned filename in redacted output
 
 
 const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
@@ -1582,120 +1582,206 @@ async function loadTextractBlocks(fileKey) {
 // Parses raw PDF content streams to find text with rotation matrices (~90°/270°).
 // No Textract, no Claude — pure PDF geometry.
 function extractRotatedPdfText(pdfDoc, piiValues) {
+  var zlib = require('zlib');
   var result = {};
   if (!piiValues || !piiValues.length) return result;
 
+  // Strict one-direction containment: document text must contain the full PII value.
+  // NEVER reverse (pii.indexOf(token)) -- that caused catastrophic over-redaction in #846.
   var piiNorm = piiValues.map(function(v) {
     return { orig: v, norm: (v || '').toLowerCase().replace(/[^a-z0-9]/g, '') };
-  }).filter(function(p) { return p.norm.length >= 3; });
+  }).filter(function(p) { return p.norm.length >= 4; });
+  if (!piiNorm.length) return result;
 
+  // Page size map for bbox normalization
   var pages = pdfDoc.getPages();
+  var pageSizes = pages.map(function(p) { return p.getSize(); });
 
-  for (var pi = 0; pi < pages.length; pi++) {
-    var page = pages[pi];
-    var sz   = page.getSize();
-    var rawW = sz.width;
-    var rawH = sz.height;
+  // ── Decompress a raw stream buffer ──────────────────────────────────────
+  function decompressBytes(raw) {
+    var buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+    try { return zlib.inflateSync(buf).toString('latin1'); }
+    catch(e) {
+      try { return zlib.inflateRawSync(buf).toString('latin1'); }
+      catch(e2) { return buf.toString('latin1'); }
+    }
+  }
 
-    var streamBytes = '';
-    try {
-      var contentRef = page.node.get(page.node.doc.context.obj('Contents'));
-      if (!contentRef) continue;
-      var streams = [];
-      var cname = contentRef.constructor ? contentRef.constructor.name : '';
-      if (cname === 'PDFArray') {
-        for (var si = 0; si < contentRef.size(); si++) {
-          var ref = contentRef.get(si);
-          var obj = page.node.doc.context.lookup(ref);
-          var bytes = obj && obj.getContents ? obj.getContents() : (obj && obj.contents ? obj.contents : null);
-          if (bytes) streams.push(Buffer.isBuffer(bytes) ? bytes.toString('latin1') : String.fromCharCode.apply(null, Array.from(bytes)));
-        }
-      } else {
-        var obj2 = page.node.doc.context.lookup(contentRef);
-        var bytes2 = obj2 && obj2.getContents ? obj2.getContents() : (obj2 && obj2.contents ? obj2.contents : null);
-        if (bytes2) streams.push(Buffer.isBuffer(bytes2) ? bytes2.toString('latin1') : String.fromCharCode.apply(null, Array.from(bytes2)));
-      }
-      streamBytes = streams.join(' ');
-    } catch(e) { continue; }
-    if (!streamBytes) continue;
+  // ── Extract and decode all Tj/TJ text from a stream segment ─────────────
+  function extractSegmentText(seg) {
+    var texts = [];
+    var tjRe  = /\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*Tj/g;
+    var tjARe = /\[([^\]]*)\]\s*TJ/g;
+    var mm, sm;
+    while ((mm = tjRe.exec(seg))  !== null) texts.push(mm[1]);
+    while ((mm = tjARe.exec(seg)) !== null) {
+      var strRe2 = /\(([^)\\]*(?:\\.[^)\\]*)*)\)/g;
+      while ((sm = strRe2.exec(mm[1])) !== null) texts.push(sm[1]);
+    }
+    return texts.join('')
+      .replace(/\\([0-7]{3})/g, function(_, o) { return String.fromCharCode(parseInt(o, 8)); })
+      .replace(/\\\\/g, '\\').replace(/\\\(/g, '(').replace(/\\\)/g, ')')
+      .trim();
+  }
 
+  // ── Match combined text against PII list (strict: doc contains PII) ─────
+  function matchesPii(combined) {
+    var norm = combined.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (norm.length < 3) return false;
+    for (var pj = 0; pj < piiNorm.length; pj++) {
+      if (norm.indexOf(piiNorm[pj].norm) !== -1) return true;
+    }
+    return false;
+  }
+
+  // ── Compute normalized bounding box for a rotated Tm match ──────────────
+  // [a=0, b=-1, c=1, d=0] = 90 CW: text runs DOWNWARD from (e,f)
+  // [a=0, b=1, c=-1, d=0] = 90 CCW: text runs UPWARD from (e,f)
+  function rotatedBox(tm, fontSize, textLenPts, pageW, pageH) {
+    var e = tm.e, f = tm.f;
+    var stripW  = Math.max(fontSize * 2.2, 14);
+    var padding = fontSize * 0.5;
+    var x1, y1, x2, y2;
+    if (tm.b < 0) {
+      // 90 CW: text goes downward, strip extends left of origin
+      x1 = e - stripW - padding;
+      x2 = e + padding;
+      y1 = f - textLenPts - padding;
+      y2 = f + padding;
+    } else {
+      // 90 CCW: text goes upward, strip extends right of origin
+      x1 = e - padding;
+      x2 = e + stripW + padding;
+      y1 = f - padding;
+      y2 = f + textLenPts + padding;
+    }
+    x1 = Math.max(0, x1); x2 = Math.min(pageW, x2);
+    y1 = Math.max(0, y1); y2 = Math.min(pageH, y2);
+    var nx = x1 / pageW;
+    var ny = 1.0 - (y2 / pageH);   // PDF y-up to normalized y-down
+    var nw = (x2 - x1) / pageW;
+    var nh = (y2 - y1) / pageH;
+    return { x: Math.max(0, nx), y: Math.max(0, ny),
+             width: Math.min(1, nw), height: Math.min(1, nh) };
+  }
+
+  // ── Scan a decompressed stream for rotated Tm+PII matches ───────────────
+  function scanStream(streamText, pageW, pageH, pageLabel) {
     var boxes = [];
-    // Match Tm operator: a b c d e f Tm
     var tmRe = /([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+Tm/g;
     var tmMatches = [];
     var m;
-    while ((m = tmRe.exec(streamBytes)) !== null) {
+    while ((m = tmRe.exec(streamText)) !== null) {
       var a = parseFloat(m[1]), b = parseFloat(m[2]);
       var c = parseFloat(m[3]), d = parseFloat(m[4]);
-      var e = parseFloat(m[5]), f = parseFloat(m[6]);
-      // Rotated ~90° or ~270°: off-diagonal components dominate
-      var isRotated = (Math.abs(b) > 0.5 || Math.abs(c) > 0.5) &&
-                      Math.abs(a) < 0.5 && Math.abs(d) < 0.5;
-      tmMatches.push({ pos: m.index + m[0].length, a, b, c, d, e, f, isRotated });
+      var e2 = parseFloat(m[5]), f2 = parseFloat(m[6]);
+      // Rotated ~90 or ~270: off-diagonal dominant, diagonal near zero
+      var isRotated = (Math.abs(b) > 0.7 || Math.abs(c) > 0.7) &&
+                      Math.abs(a) < 0.3 && Math.abs(d) < 0.3;
+      tmMatches.push({ pos: m.index + m[0].length,
+                       a: a, b: b, c: c, d: d, e: e2, f: f2, isRotated: isRotated });
     }
-    if (!tmMatches.length) continue;
-
     for (var ti = 0; ti < tmMatches.length; ti++) {
       var tm = tmMatches[ti];
       if (!tm.isRotated) continue;
-      var segEnd = ti + 1 < tmMatches.length ? tmMatches[ti + 1].pos : streamBytes.length;
-      var seg    = streamBytes.slice(tm.pos, segEnd);
+      var segEnd = (ti + 1 < tmMatches.length) ? tmMatches[ti + 1].pos : streamText.length;
+      var seg = streamText.slice(tm.pos, segEnd);
+      var combined = extractSegmentText(seg);
+      if (!combined || combined.length < 3) continue;
+      if (!matchesPii(combined)) continue;
 
-      // Extract text from Tj and TJ operators
-      var texts = [];
-      var tjRe  = /\(([^)]*)\)\s*Tj/g;
-      var tjARe = /\[([^\]]*)\]\s*TJ/g;
-      var mm;
-      while ((mm = tjRe.exec(seg))  !== null) texts.push(mm[1]);
-      while ((mm = tjARe.exec(seg)) !== null) {
-        var strRe = /\(([^)]*)\)/g, sm;
-        while ((sm = strRe.exec(mm[1])) !== null) texts.push(sm[1]);
-      }
-      if (!texts.length) continue;
+      // Font size from matrix off-diagonal scale
+      var fontSize = Math.sqrt(tm.b * tm.b + tm.c * tm.c);
+      if (fontSize < 1) fontSize = 9;
+      var textLenPts = combined.replace(/\s/g, '').length * fontSize * 0.65;
 
-      // Decode octal escapes (\nnn) in PDF strings
-      var combined = texts.join('').replace(/\\([0-7]{3})/g, function(_, o) {
-        return String.fromCharCode(parseInt(o, 8));
-      }).replace(/\\\\/g, '\\').trim();
-      if (!combined || combined.length < 2) continue;
+      var box = rotatedBox(tm, fontSize, textLenPts, pageW, pageH);
+      boxes.push({ label: 'rotated_xobj_text',
+                   x: box.x, y: box.y, width: box.width, height: box.height });
+      console.log('[ROTATED-XOBJ] ' + pageLabel +
+        ' t=' + JSON.stringify(combined.substring(0, 60)) +
+        ' e=' + tm.e.toFixed(1) + ' f=' + tm.f.toFixed(1) +
+        ' box={x:' + box.x.toFixed(3) + ',y:' + box.y.toFixed(3) +
+        ',w:' + box.width.toFixed(3) + ',h:' + box.height.toFixed(3) + '}');
+    }
+    return boxes;
+  }
 
-      var normCombined = combined.toLowerCase().replace(/[^a-z0-9]/g, '');
-      var matched = false;
-      for (var pj = 0; pj < piiNorm.length; pj++) {
-        var pv = piiNorm[pj];
-        if (pv.norm.length < 3) continue;
-        if (normCombined.indexOf(pv.norm) !== -1 || pv.norm.indexOf(normCombined) !== -1) {
-          matched = true; break;
+  // ── Build XObject ref → page index map ──────────────────────────────────
+  var xobjPageMap = {};
+  try {
+    var ctx = pdfDoc.context;
+    for (var pi = 0; pi < pages.length; pi++) {
+      try {
+        var resRef = pages[pi].node.get(ctx.obj('Resources'));
+        if (!resRef) continue;
+        var resDict = ctx.lookup(resRef);
+        if (!resDict) continue;
+        var xoRef = resDict.get ? resDict.get(ctx.obj('XObject')) : null;
+        if (!xoRef) continue;
+        var xoDict = ctx.lookup(xoRef);
+        if (!xoDict || !xoDict.entries) continue;
+        var xoEntries = Array.from(xoDict.entries());
+        for (var ei = 0; ei < xoEntries.length; ei++) {
+          var xoVal = xoEntries[ei][1];
+          if (xoVal && xoVal.tag) xobjPageMap[xoVal.tag] = pi;
+        }
+      } catch(e) { /* skip page */ }
+    }
+  } catch(e) {
+    console.warn('[ROTATED-XOBJ] page map failed (non-fatal):', e.message);
+  }
+
+  // ── Enumerate all Form XObjects, decompress, scan ───────────────────────
+  try {
+    var ctx2 = pdfDoc.context;
+    var allObjs = Array.from(ctx2.enumerateIndirectObjects());
+    var scanned = 0, matchedObjs = 0;
+
+    for (var oi = 0; oi < allObjs.length; oi++) {
+      var ref2  = allObjs[oi][0];
+      var obj2  = allObjs[oi][1];
+      var oname = (obj2 && obj2.constructor) ? obj2.constructor.name : '';
+      if (oname !== 'PDFRawStream' && oname !== 'PDFStream') continue;
+
+      // Must be /Subtype /Form
+      var dictEntries = (obj2.dict && obj2.dict.entries) ? Array.from(obj2.dict.entries()) : [];
+      var isForm = false;
+      for (var di = 0; di < dictEntries.length; di++) {
+        if (dictEntries[di][0] && dictEntries[di][0].encodedName === '/Subtype' &&
+            dictEntries[di][1] && dictEntries[di][1].encodedName === '/Form') {
+          isForm = true; break;
         }
       }
-      if (!matched) continue;
+      if (!isForm) continue;
+      scanned++;
 
-      // Estimate font size from the matrix scale factor
-      var fontSize = Math.sqrt(tm.b * tm.b + tm.d * tm.d);
-      if (fontSize < 1) fontSize = 10;
-      var charCount = Math.max(combined.length, 4);
+      var pageIdx = (ref2 && ref2.tag && xobjPageMap[ref2.tag] !== undefined)
+                    ? xobjPageMap[ref2.tag] : -1;
+      var pageW2 = pageIdx >= 0 ? pageSizes[pageIdx].width  : 612;
+      var pageH2 = pageIdx >= 0 ? pageSizes[pageIdx].height : 792;
 
-      // For 90°-rotated text: e=x position, f=y position in raw PDF points
-      // The text runs vertically — build a bounding box in normalized coords
-      var boxW = fontSize * 1.8 / rawW;          // ~1-2 chars wide
-      var boxH = (charCount * fontSize * 1.1) / rawH;  // full text height
+      var streamText2 = '';
+      try {
+        var rawBytes = obj2.getContents ? obj2.getContents() : obj2.contents;
+        if (!rawBytes || !rawBytes.length) continue;
+        streamText2 = decompressBytes(rawBytes);
+      } catch(e) { continue; }
+      if (!streamText2) continue;
 
-      // Normalize: PDF origin is bottom-left, our system uses top-left
-      var nx = tm.e / rawW;
-      var ny = 1.0 - (tm.f / rawH);
-
-      var bx = Math.max(0, nx - boxW * 0.3);
-      var by = Math.max(0, ny - boxH);
-      var bw = Math.min(1.0 - bx, boxW * 1.5);
-      var bh = Math.min(1.0 - by, boxH * 1.2);
-
-      boxes.push({ label: 'rotated_pdf_text', x: bx, y: by, width: bw, height: bh });
-      console.log('[ROTATED-PDF] p=' + (pi+1) + ' t=' + JSON.stringify(combined) +
-        ' e=' + tm.e.toFixed(1) + ' f=' + tm.f.toFixed(1) +
-        ' box={x:' + bx.toFixed(3) + ',y:' + by.toFixed(3) + ',w:' + bw.toFixed(3) + ',h:' + bh.toFixed(3) + '}');
+      var pageLabel2 = pageIdx >= 0 ? ('p=' + (pageIdx + 1)) : ('xobj=' + (ref2 ? ref2.tag : '?'));
+      var boxes2 = scanStream(streamText2, pageW2, pageH2, pageLabel2);
+      if (boxes2.length) {
+        matchedObjs++;
+        var storePage = pageIdx >= 0 ? pageIdx : 0;
+        result[String(storePage)] = (result[String(storePage)] || []).concat(boxes2);
+      }
     }
-    if (boxes.length) result[String(pi)] = (result[String(pi)] || []).concat(boxes);
+    console.log('[ROTATED-XOBJ] scanned=' + scanned + ' form xobjects, matched=' + matchedObjs);
+  } catch(e) {
+    console.warn('[ROTATED-XOBJ] enumeration failed (non-fatal):', e.message);
   }
+
   return result;
 }
 
