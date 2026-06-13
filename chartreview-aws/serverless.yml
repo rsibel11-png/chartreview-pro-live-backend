@@ -531,3 +531,20 @@ resources:
       JOBS_TABLE: chartreview-jobs-prod
       MODEL_ID: us.anthropic.claude-sonnet-4-6
 
+  # ── PDF FLATTEN (text layer scrubbing) ──
+  flattenPdf:
+    handler: src/handlers/flatten_pdf.flattenStart
+    timeout: 900
+    memorySize: 1024
+    environment:
+      S3_BUCKET: chartreview-documents-prod
+      DOCUMENTS_TABLE: chartreview-documents-prod
+    events:
+      - http:
+          path: /documents/{aws_document_id}/flatten
+          method: post
+          cors: true
+      - http:
+          path: /documents/{aws_document_id}/flatten
+          method: options
+          cors: true
