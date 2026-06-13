@@ -334,7 +334,7 @@ jobs:
             --http-method OPTIONS --authorization-type NONE --region $REGION 2>/dev/null || true
 
           aws apigateway put-integration --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
-            --http-method OPTIONS --type MOCK \
+            --http-method OPTIONS --type MOCK --passthrough-behavior WHEN_NO_MATCH \
             --request-templates '{"application/json":"{\"statusCode\":200}"}' --region $REGION
 
           aws apigateway put-method-response --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
