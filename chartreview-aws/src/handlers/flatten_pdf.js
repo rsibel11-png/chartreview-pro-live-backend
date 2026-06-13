@@ -22,10 +22,14 @@
 'use strict';
 
 const { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
 const { PDFDocument, PDFName, PDFArray } = require('pdf-lib');
 const zlib = require('zlib');
 
 const s3 = new S3Client({ region: 'us-east-1' });
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1' }));
+const DOCS_TABLE = process.env.DOCS_TABLE || 'chartreview-documents-prod';
 const BUCKET = process.env.S3_BUCKET || 'chartreview-documents-prod';
 
 const CORS = {
@@ -46,6 +50,17 @@ async function s3ToBuffer(key) {
 }
 
 async function findRedactedKey(orgId, docId) {
+  // First try DynamoDB lookup by aws_document_id (most reliable — avoids orgId mismatch)
+  try {
+    const rec = await ddb.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: docId } }));
+    if (rec.Item && rec.Item.file_key) {
+      console.log('[FLATTEN] DynamoDB file_key hit:', rec.Item.file_key);
+      return rec.Item.file_key;
+    }
+  } catch (e) {
+    console.warn('[FLATTEN] DynamoDB lookup failed, falling back to S3 scan:', e.message);
+  }
+  // Fallback: S3 scan using orgId from JWT
   const prefix = `orgs/${orgId}/documents/${docId}/`;
   const { Contents } = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix }));
   if (!Contents) return null;
