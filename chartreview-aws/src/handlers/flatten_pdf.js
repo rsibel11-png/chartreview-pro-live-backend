@@ -168,16 +168,14 @@ async function scrubPdfTextLayer(pdfBuffer) {
     
     if (!pageHasRedactions) { stats.skipped++; continue; }
     
-    // Step 2: Scrub text from ALL streams on this page
+    // Step 2: Scrub text from ALL direct page streams
     for (const item of decompressedStreams) {
       if (!item) continue;
       const { streamObj, contentStr } = item;
-      
       try {
         const scrubbed = scrubTextFromStream(contentStr);
         const newBytes = Buffer.from(scrubbed, 'latin1');
         const compressed = compressStream(newBytes);
-        
         streamObj.contents = compressed;
         if (streamObj.dict) {
           streamObj.dict.set(PDFName.of('Length'), pdfDoc.context.obj(compressed.length));
@@ -187,6 +185,40 @@ async function scrubPdfTextLayer(pdfBuffer) {
         stats.errors++;
       }
     }
+    
+    // Step 3: Also scrub Form XObjects referenced by this page (lateral margin stamps etc.)
+    // These live in Resources > XObject dict and are separate streams not returned by getPageStreams
+    try {
+      const resources = page.node.lookup(PDFName.of('Resources'));
+      if (resources) {
+        const xobjectDict = resources.lookup(PDFName.of('XObject'));
+        if (xobjectDict && xobjectDict.entries) {
+          for (const [key, ref] of xobjectDict.entries()) {
+            try {
+              const xobj = pdfDoc.context.lookup(ref);
+              if (!xobj || !xobj.contents) continue;
+              const subtypeName = xobj.dict ? xobj.dict.get(PDFName.of('Subtype')) : null;
+              const isForm = subtypeName && subtypeName.asString && subtypeName.asString() === '/Form';
+              if (!isForm) continue;
+              const raw = xobj.contents;
+              const decompressed = decompressStream(raw);
+              const contentStr = decompressed.toString('latin1');
+              if (contentStr.includes('BT') || contentStr.includes('Tj')) {
+                const scrubbed = scrubTextFromStream(contentStr);
+                const newBytes = Buffer.from(scrubbed, 'latin1');
+                const compressed = compressStream(newBytes);
+                xobj.contents = compressed;
+                if (xobj.dict) {
+                  xobj.dict.set(PDFName.of('Length'), pdfDoc.context.obj(compressed.length));
+                  xobj.dict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+                }
+                stats.fullScrub++;
+              }
+            } catch (e) { stats.errors++; }
+          }
+        }
+      }
+    } catch (e) { stats.errors++; }
     
     stats.fullScrub++;
   }
