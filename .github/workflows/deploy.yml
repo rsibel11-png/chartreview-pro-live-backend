@@ -347,7 +347,7 @@ jobs:
 
           aws apigateway put-integration-response --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
             --http-method OPTIONS --status-code 200 --selection-pattern "" \
-            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'''Content-Type,Authorization,x-api-key,x-org-id'''","method.response.header.Access-Control-Allow-Methods":"'''POST,OPTIONS'''","method.response.header.Access-Control-Allow-Origin":"'''*'''"}' \
+            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'"'"'Content-Type,Authorization,x-api-key,x-org-id'"'"'","method.response.header.Access-Control-Allow-Methods":"'"'"'POST,OPTIONS'"'"'","method.response.header.Access-Control-Allow-Origin":"'"'"'*'"'"'"}' \
             --region $REGION || true
 
           aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION || true
