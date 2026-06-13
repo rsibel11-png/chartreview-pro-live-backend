@@ -272,6 +272,88 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
+      - name: Create flattenPdf Lambda if missing
+        run: |
+          aws lambda get-function --function-name chartreview-pro-prod-flattenPdf --region us-east-1 2>/dev/null || \
+          aws lambda create-function \
+            --function-name chartreview-pro-prod-flattenPdf \
+            --runtime nodejs20.x \
+            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
+            --handler src/handlers/flatten_pdf.flattenStart \
+            --timeout 900 \
+            --memory-size 1024 \
+            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod}" \
+            --zip-file fileb://function.zip \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Wire /documents/{id}/flatten route in API Gateway
+        run: |
+          API_ID="1h4kpspbs6"
+          REGION="us-east-1"
+          ACCOUNT="531948420933"
+          STAGE="prod"
+          LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT}:function:chartreview-pro-prod-flattenPdf"
+
+          DOCS_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
+            --query "items[?path=='/documents/{aws_document_id}'].id" --output text)
+          echo "Parent resource: $DOCS_RESOURCE"
+
+          FLATTEN_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
+            --query "items[?path=='/documents/{aws_document_id}/flatten'].id" --output text)
+
+          if [ -z "$FLATTEN_RESOURCE" ]; then
+            FLATTEN_RESOURCE=$(aws apigateway create-resource \
+              --rest-api-id $API_ID --parent-id $DOCS_RESOURCE \
+              --path-part flatten --region $REGION --query 'id' --output text)
+            echo "Created /flatten resource: $FLATTEN_RESOURCE"
+          else
+            echo "/flatten already exists: $FLATTEN_RESOURCE"
+          fi
+
+          aws apigateway put-method --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
+            --http-method POST --authorization-type NONE --region $REGION 2>/dev/null || true
+
+          aws apigateway put-integration --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
+            --http-method POST --type AWS_PROXY --integration-http-method POST \
+            --uri "arn:aws:apigateway:${REGION}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations" \
+            --region $REGION
+
+          aws lambda add-permission \
+            --function-name chartreview-pro-prod-flattenPdf \
+            --statement-id apigateway-flatten-$(date +%s) \
+            --action lambda:InvokeFunction \
+            --principal apigateway.amazonaws.com \
+            --source-arn "arn:aws:execute-api:${REGION}:${ACCOUNT}:${API_ID}/*" \
+            --region $REGION 2>/dev/null || true
+
+          aws apigateway put-method --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
+            --http-method OPTIONS --authorization-type NONE --region $REGION 2>/dev/null || true
+
+          aws apigateway put-integration --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
+            --http-method OPTIONS --type MOCK \
+            --request-templates '{"application/json":"{\"statusCode\":200}"}' --region $REGION
+
+          aws apigateway put-method-response --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
+            --http-method OPTIONS --status-code 200 \
+            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":false,"method.response.header.Access-Control-Allow-Methods":false,"method.response.header.Access-Control-Allow-Origin":false}' \
+            --region $REGION 2>/dev/null || true
+
+          aws apigateway put-integration-response --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
+            --http-method OPTIONS --status-code 200 \
+            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'''Content-Type,Authorization,x-api-key,x-org-id'''","method.response.header.Access-Control-Allow-Methods":"'''POST,OPTIONS'''","method.response.header.Access-Control-Allow-Origin":"'''*'''"}' \
+            --region $REGION 2>/dev/null || true
+
+          aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION || true
+          echo "Done — /documents/{aws_document_id}/flatten is live"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
@@ -311,6 +393,7 @@ jobs:
             "chartreview-pro-prod-redactDocumentStart"
             "chartreview-pro-prod-redactDocumentWorker"
             "chartreview-pro-prod-redactCaseWorker"
+            "chartreview-pro-prod-flattenPdf"
             "chartreview-pro-prod-getFolderPii"
           )
           for FUNC in "${FUNCTIONS[@]}"; do
