@@ -14,7 +14,7 @@ const { PDFDocument, rgb }                             = require('pdf-lib');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
 
-const REDACT_BUILD = '857'; // #851: restore versioned filename in redacted output
+const REDACT_BUILD = '858'; // #851: restore versioned filename in redacted output
 
 
 const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1', requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });
@@ -702,6 +702,57 @@ function discoverFacilityPhones(extractedText) {
 function normalizeForMatch(str) {
   return (str || '').toLowerCase().replace(/[\s\-,\.\(\)]/g, '');
 }
+
+// ── Special page type detection ──────────────────────────────────────────────
+// Builds a map of { pageIndex(0-based) -> fullText } from Textract word blocks
+function buildPageTextMap(wordBlocks) {
+  var map = {};
+  for (var i = 0; i < wordBlocks.length; i++) {
+    var b = wordBlocks[i];
+    if (b.BlockType !== 'WORD' && b.BlockType !== 'LINE') continue;
+    var pg = (b.Page || 1) - 1;  // 0-based
+    if (!map[pg]) map[pg] = [];
+    map[pg].push(b.Text || '');
+  }
+  var result = {};
+  Object.keys(map).forEach(function(pg) { result[pg] = map[pg].join(' '); });
+  return result;
+}
+
+function detectSpecialPageType(pageText) {
+  if (!pageText) return null;
+  var t = pageText.toUpperCase();
+
+  // Facesheet: IN/OUT/ER PATIENT ADMISSION RECORD
+  if (
+    t.indexOf('PATIENT ADMISSION RECORD') >= 0 ||
+    (t.indexOf('IN/OUT/ER') >= 0 && t.indexOf('PATIENT') >= 0) ||
+    (t.indexOf('ADMISSION RECORD') >= 0 && t.indexOf('NAME:') >= 0 && t.indexOf('STREET:') >= 0)
+  ) {
+    return 'facesheet';
+  }
+
+  // Patient Signature Page
+  if (
+    t.indexOf('PATIENT SIGNATURE') >= 0 &&
+    (t.indexOf('DATE OF BIRTH') >= 0 || t.indexOf('GUARDIAN NAME') >= 0)
+  ) {
+    return 'signature_page';
+  }
+
+  // Legal / admin cover pages (Ontellus, ChartSwap)
+  if (
+    t.indexOf('REGARDING PATIENT:') >= 0 ||
+    t.indexOf('CHARTSWAP') >= 0 ||
+    t.indexOf('ONTELLUS') >= 0 ||
+    (t.indexOf('RECORDS OF') >= 0 && t.indexOf('FACILITY/PROVIDER') >= 0)
+  ) {
+    return 'legal_cover';
+  }
+
+  return null;
+}
+
 
 function findBoxesFromBlocks(wordBlocks, piiValues, piiSourceMap) {
   // piiSourceMap: { normalizedValue -> source } — used to stamp audit label on each box
@@ -1861,14 +1912,48 @@ function extractRotatedPdfText(pdfDoc, piiValues) {
 }
 
 
-async function applyRedactions(pdfBytes, piiByPage) {
+async function applyRedactions(pdfBytes, piiByPage, pageTextMap) {
+  pageTextMap = pageTextMap || {};
   const pdfDoc = await PDFDocument.load(pdfBytes);
   const pages  = pdfDoc.getPages();
 
-  for (const pageIndexStr of Object.keys(piiByPage)) {
-    const pageIndex = parseInt(pageIndexStr, 10);
-    const boxes     = piiByPage[pageIndexStr];
-    if (pageIndex >= pages.length || !boxes || !boxes.length) continue;
+  // Build a combined set of page indices to process:
+  // pages that have PII boxes PLUS any special pages detected from text
+  var _allPageIndices = new Set(Object.keys(piiByPage).map(function(k){ return parseInt(k,10); }));
+  // Also add any page that is a facesheet/signature/legal regardless of PII
+  Object.keys(pageTextMap).forEach(function(pgStr) {
+    var _type = detectSpecialPageType(pageTextMap[pgStr]);
+    if (_type) _allPageIndices.add(parseInt(pgStr, 10));
+  });
+
+  for (const pageIndex of _allPageIndices) {
+    if (pageIndex >= pages.length) continue;
+    const pageIndexStr = String(pageIndex);
+
+    // ── Special page type override ─────────────────────────────────────────
+    var _pageText    = pageTextMap[pageIndexStr] || '';
+    var _specialType = detectSpecialPageType(_pageText);
+
+    let boxes;
+    if (_specialType === 'facesheet') {
+      // Full-page coverage block — black out entire patient info section (~top 68%)
+      boxes = [{ x: 0.0, y: 0.0, width: 1.0, height: 0.68, label: 'facesheet_coverage' }];
+    } else if (_specialType === 'signature_page') {
+      // Cover patient name + DOB fields at top of signature page
+      boxes = [{ x: 0.0, y: 0.0, width: 1.0, height: 0.22, label: 'signature_coverage' }];
+    } else if (_specialType === 'legal_cover') {
+      // Cover the "Regarding Patient:" and case name section
+      var _legalBoxes = [
+        { x: 0.0, y: 0.06, width: 1.0, height: 0.22, label: 'legal_cover_coverage' }
+      ];
+      // Also include any standard PII boxes for this page
+      var _piiBoxes = piiByPage[pageIndexStr] || [];
+      boxes = _legalBoxes.concat(_piiBoxes);
+    } else {
+      boxes = piiByPage[pageIndexStr] || [];
+    }
+
+    if (!boxes || !boxes.length) continue;
 
     const page = pages[pageIndex];
     const sz   = page.getSize();
@@ -2398,7 +2483,8 @@ module.exports.redactDocumentWorker = async function(event) {
       updated_at: new Date().toISOString(),
     });
 
-    const redactedBytes = await applyRedactions(pdfBytes, allPii);
+    const _ptm1 = buildPageTextMap(wordBlocks);
+    const redactedBytes = await applyRedactions(pdfBytes, allPii, _ptm1);
 
     const keyParts     = fileKey.split('/');
     const origFilename = keyParts.pop();
@@ -2837,7 +2923,8 @@ module.exports.redactCaseWorker = async function(event) {
           allPii = mergePiiMaps(allPii, _cwRotPii);
         }
       } catch(_cwe) { console.warn('[ROTATED-XOBJ-CASE] failed (non-fatal):', _cwe.message); }
-      var redactedBytes = await applyRedactions(pdfBytes, allPii);
+      var _ptm2 = buildPageTextMap(wordBlocks);
+      var redactedBytes = await applyRedactions(pdfBytes, allPii, _ptm2);
       var redactCount   = Object.values(allPii).reduce(function(s, b) { return s + b.length; }, 0);
       return { redactedBytes, redactCount, piiByPage: allPii };
     }));
