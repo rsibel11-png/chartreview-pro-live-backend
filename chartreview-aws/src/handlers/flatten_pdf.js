@@ -23,7 +23,8 @@
 
 const { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, PutCommand } = require('@aws-sdk/lib-dynamodb');
+const { randomUUID } = require('crypto');
 const { PDFDocument, PDFName, PDFArray } = require('pdf-lib');
 const zlib = require('zlib');
 
@@ -237,11 +238,39 @@ module.exports.flattenStart = async (event) => {
     }));
     
     console.log(`[FLATTEN] Saved: ${flatKey}`);
-    
+
+    // Write DynamoDB record so flattened doc appears in Library
+    const sourceRec = await ddb.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id } })).then(r => r.Item).catch(() => null);
+    const flatDocId = randomUUID();
+    const flatName = flatKey.split('/').pop();
+    await ddb.send(new PutCommand({
+      TableName: DOCS_TABLE,
+      Item: {
+        aws_document_id:   flatDocId,
+        org_id:            sourceRec?.org_id            || null,
+        patient_id:        sourceRec?.patient_id         || null,
+        folder_name:       sourceRec?.folder_name        || null,
+        provider_name:     sourceRec?.provider_name      || null,
+        original_filename: flatName,
+        file_key:          flatKey,
+        s3_key:            flatKey,
+        is_redacted:       true,
+        is_flattened:      true,
+        flattened_from:    aws_document_id,
+        redacted_from:     sourceRec?.redacted_from      || null,
+        status:            'processed',
+        is_clinical:       sourceRec?.is_clinical        || false,
+        created_at:        new Date().toISOString(),
+        updated_at:        new Date().toISOString(),
+      },
+    }));
+    console.log(`[FLATTEN] DynamoDB record written: ${flatDocId}`);
+
     return resp(200, {
       status: 'complete',
       source_key: sourceKey,
       flattened_key: flatKey,
+      flat_doc_id: flatDocId,
       original_size_bytes: pdfBuffer.length,
       flattened_size_bytes: flatBuffer.length,
       message: 'Text layer scrubbed from all redacted pages. PII is permanently removed from the PDF data structure.',
