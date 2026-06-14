@@ -369,7 +369,8 @@ exports.flattenStart = async (event) => {
     // Resolve orgId: prefer auth middleware (_orgId), fall back to DynamoDB record
     orgId = event._orgId
       || event.requestContext?.authorizer?.claims?.['custom:org_id']
-      || body.org_id;
+      || body.org_id
+      || (event.headers && (event.headers['x-org-id'] || event.headers['X-Org-Id']));
 
     if (!orgId) {
       // Last resort: look up org_id from the document record itself
