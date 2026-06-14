@@ -362,11 +362,22 @@ exports.flattenStart = async (event) => {
 
   let orgId, docId;
   try {
-    const claims = event.requestContext?.authorizer?.claims || {};
-    orgId = claims['custom:org_id'] || claims['cognito:groups']?.[0];
     const body = JSON.parse(event.body || '{}');
-    docId = body.aws_document_id || event.pathParameters?.aws_document_id;
-    if (!orgId || !docId) return resp(400, { error: 'Missing org_id or aws_document_id' });
+    docId = event.pathParameters?.aws_document_id || body.aws_document_id;
+    if (!docId) return resp(400, { error: 'Missing aws_document_id' });
+
+    // Resolve orgId: prefer auth middleware (_orgId), fall back to DynamoDB record
+    orgId = event._orgId
+      || event.requestContext?.authorizer?.claims?.['custom:org_id']
+      || body.org_id;
+
+    if (!orgId) {
+      // Last resort: look up org_id from the document record itself
+      const docLookup = await ddb.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: docId } }));
+      orgId = docLookup.Item?.org_id;
+    }
+
+    if (!orgId) return resp(400, { error: 'Could not resolve org_id for document ' + docId });
   } catch (e) {
     return resp(400, { error: 'Bad request: ' + e.message });
   }
