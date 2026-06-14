@@ -26,7 +26,7 @@ const zlib = require('zlib');
 
 const s3 = new S3Client({ region: 'us-east-1' });
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1' }));
-const DOCS_TABLE = process.env.DOCS_TABLE || 'chartreview-documents-prod';
+const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const BUCKET = process.env.S3_BUCKET || 'chartreview-documents-prod';
 
 const CORS = {
@@ -357,7 +357,7 @@ async function scrubPdfTextLayer(pdfBuffer) {
 
 // ─── Lambda Handler ───────────────────────────────────────────────────────────
 
-exports.handler = async (event) => {
+exports.flattenStart = async (event) => {
   if (event.httpMethod === 'OPTIONS') return resp(200, {});
 
   let orgId, docId;
