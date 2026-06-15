@@ -1644,8 +1644,18 @@ const generateSummaryWorker = async (event) => {
       console.warn('coordinator: failed to stamp summary_id on job (non-fatal):', stampErr.message);
     }
 
-    // ── Run verify inline FIRST — pass knownVisits so it skips redundant Bedrock call ──
-    let finalVisits = allVisits;
+    // markJobComplete FIRST — frontend gets notified immediately with allVisits
+    // verify runs after as best-effort post-processing (non-blocking)
+    await markJobComplete(job_id, {
+      patient_name:   patientName || '',
+      case_number:    caseNumber  || '',
+      visits:         allVisits,
+      doc_count:      docRecords.length,
+      visit_count:    allVisits.length,
+      aws_summary_id,
+    });
+
+    // ── Run verify post-completion — updates summary if correctedVisits differ ──
     try {
       const verifyResult = await runVerifyInline({
         job_id,
@@ -1655,22 +1665,11 @@ const generateSummaryWorker = async (event) => {
         precomputedViVisits: knownVisits,
       });
       if (verifyResult && Array.isArray(verifyResult.correctedVisits) && verifyResult.correctedVisits.length > 0) {
-        finalVisits = verifyResult.correctedVisits;
-        console.log('coordinator: verify returned correctedVisits — using for markJobComplete');
+        console.log('coordinator: verify returned correctedVisits — summary already saved, verify runs post-completion');
       }
     } catch (verifyErr) {
       console.warn('coordinator: inline verify failed (non-fatal):', verifyErr.message);
     }
-
-    // markJobComplete AFTER verify — finalVisits has corrected dates
-    await markJobComplete(job_id, {
-      patient_name:   patientName || '',
-      case_number:    caseNumber  || '',
-      visits:         finalVisits,
-      doc_count:      docRecords.length,
-      visit_count:    finalVisits.length,
-      aws_summary_id,
-    });
 
   } catch (err) {
     console.error('coordinator fatal:', err);
