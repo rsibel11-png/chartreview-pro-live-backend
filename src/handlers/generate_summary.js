@@ -1145,121 +1145,85 @@ const generateSummaryWorker = async (event) => {
     }
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
 
-    // ── 3. Read encounter_index from DynamoDB (written by classifyJobWorker VI pre-pass) ────
-    // No Bedrock call needed here — classify already ran VI pre-pass and stored results.
-    // encounter_index = [{ date, provider, facility, visit_type, pages, source_doc_id? }]
+    // ── 3. VI pre-pass (fresh — runs per-coordinator, not from stale classify data) ──
     let knownVisits = [];
     let patientName = patient_name;
     let caseNumber  = '';
     try {
-      await setJobStatus(job_id, 'Loading pre-pass encounter index...');
-      const normalizeDate = (raw) => {
-        let d = (raw || '').trim();
-        if (!d) return '';
-        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-        const mmddyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-        if (mmddyyyy) return `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
-        const parsed = new Date(d);
-        return isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+      await setJobStatus(job_id, 'Building visit checklist (pre-pass)...');
+      const VI_CONCURRENCY = 4;
+      const viResults = new Array(allParts.length).fill(null);
+      const viSchema = {
+        type: 'object',
+        properties: {
+          patient_name: { type: 'string' },
+          visits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                date:             { type: 'string' },
+                provider:         { type: 'string' },
+                facility:         { type: 'string' },
+                visit_type:       { type: 'string' },
+                source_doc_id:    { type: 'string' },
+                source_part_label:{ type: 'string' },
+                pages:            { type: 'array', items: { type: 'integer' }, description: 'Page numbers (1-based) where this encounter appears' },
+              },
+            },
+          },
+        },
       };
-
-      for (const part of allParts) {
-        const ei = Array.isArray(part.encounter_index) ? part.encounter_index : [];
-        if (ei.length === 0) {
-          console.log(`coordinator: part ${part.label} has no encounter_index — will use full-document fallback`);
-          continue;
-        }
-        const partVisits = ei.map(v => ({
-          ...v,
-          date: normalizeDate(v.date),
-          source_doc_id: part.id,
-          source_part_label: part.label,
-          pages: Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [],
-        })).filter(v => v.date);
-        knownVisits = knownVisits.concat(partVisits);
-        console.log(`coordinator: part ${part.label} -> ${partVisits.length} visits from encounter_index`);
-      }
-
-      // ── Page-header date correction for ED/hospital visits ──────────────────
-      // Hospital EMR notes print "Date: MM/DD/YY" in the patient header on every
-      // page. The first page carries the encounter date. The electronic signature
-      // (only source of "10/02" in Tall's note) is at the very end.
-      // Strategy: read the Date: field from the patient header on the first page
-      // of the encounter in the raw Textract text. If earlier than stored date, use it.
-      knownVisits = knownVisits.map(function(v) {
-        var isED = /er visit|emergency|ed visit/i.test(v.visit_type || '') ||
-                   /emergency/i.test(v.facility || '');
-        if (!isED || !v.date || !Array.isArray(v.pages) || v.pages.length === 0) return v;
-
-        var srcPart = allParts.find(function(p) { return p.id === v.source_doc_id; });
-        var rawText = srcPart ? (srcPart.extracted_text || '') : '';
-        if (!rawText) return v;
-
-        var cy = parseInt(v.date.split('-')[0], 10);
-        var cm = parseInt(v.date.split('-')[1], 10);
-        var cd = parseInt(v.date.split('-')[2], 10);
-        var storedDate = new Date(cy, cm - 1, cd);
-        var earliestCandidate = null;
-
-        // Check first 2 pages of encounter
-        var pagesToCheck = v.pages.slice(0, 2);
-        for (var pi = 0; pi < pagesToCheck.length; pi++) {
-          var pageNum = pagesToCheck[pi];
-          var markerIdx = rawText.indexOf('--- PAGE ' + pageNum + ' ---');
-          if (markerIdx === -1) continue;
-
-          // Grab 500 chars after the page marker (patient header block)
-          var block = rawText.slice(markerIdx, markerIdx + 500);
-
-          // Match bare "Date: MM/DD/YY" at line start or after newline
-          // Skips "Discharge Date", "Birth Date", "Signed...Date", etc.
-          var dateMatch = block.match(/(?:^|\n)Date:\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i);
-          if (!dateMatch) continue;
-
-          var rawDate = dateMatch[1];
-          var dp = rawDate.split(/[\/\-]/);
-          if (dp.length < 3) continue;
-          var month = parseInt(dp[0], 10);
-          var day   = parseInt(dp[1], 10);
-          var year  = parseInt(dp[2], 10);
-          if (year < 100) year += 2000;
-          if (month < 1 || month > 12 || day < 1 || day > 31) continue;
-
-          var candidate = new Date(year, month - 1, day);
-          var diffDays = (storedDate - candidate) / (1000 * 60 * 60 * 24);
-          // Accept if 1-7 days before stored (signature) date
-          if (diffDays >= 1 && diffDays <= 7) {
-            if (!earliestCandidate || candidate < earliestCandidate) {
-              earliestCandidate = candidate;
+      for (let vi = 0; vi < allParts.length; vi += VI_CONCURRENCY) {
+        const viChunk = allParts.slice(vi, vi + VI_CONCURRENCY);
+        await Promise.all(viChunk.map(async (viPart, chunkIdx) => {
+          const partIdx = vi + chunkIdx;
+          try {
+            const hasText = viPart.extracted_text && viPart.extracted_text.length > 200;
+            const viResult = hasText
+              ? await callBedrockText(viPart.extracted_text, buildVisitIndexPrompt(), viSchema, regionOrder)
+              : await callBedrock([viPart.file_key], buildVisitIndexPrompt(), viSchema, regionOrder);
+            console.log(`VI: ${viPart.label} using ${hasText ? 'Textract text' : 'PDF vision'} (${(viPart.extracted_text || '').length} chars)`);
+            if (Array.isArray(viResult.visits)) {
+              viResults[partIdx] = viResult.visits
+                .map(v => {
+                  let d = (v.date || '').trim();
+                  if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+                    const mmddyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+                    if (mmddyyyy) d = `${mmddyyyy[3]}-${mmddyyyy[1].padStart(2,'0')}-${mmddyyyy[2].padStart(2,'0')}`;
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+                      const parsed = new Date(d);
+                      d = isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+                    }
+                  }
+                  const pages = Array.isArray(v.pages) ? v.pages.filter(p => Number.isInteger(p) && p > 0) : [];
+                  return { ...v, date: d, source_doc_id: viPart.id, source_part_label: viPart.label, pages };
+                })
+                .filter(v => v.date);
             }
+            console.log(`VI: ${viPart.label} -> ${(viResults[partIdx] || []).length} visits`);
+          } catch (e) {
+            console.warn(`VI pre-pass failed for ${viPart.id}: ${e.message}`);
           }
-        }
-
-        if (earliestCandidate) {
-          var corrected = earliestCandidate.toISOString().split('T')[0];
-          console.log('coordinator: ED page-header date fix ' + v.provider + ' ' + v.date + ' -> ' + corrected + ' (first-page Date: header, pages checked: ' + pagesToCheck.join(',') + ')');
-          return Object.assign({}, v, { date: corrected });
-        }
-        return v;
-      });
-
-      // Deduplicate by date+provider across all parts
+        }));
+      }
+      for (const tagged of viResults) {
+        if (tagged) knownVisits = knownVisits.concat(tagged);
+      }
       const viSeen = new Set();
       knownVisits = knownVisits.filter(v => {
         const k = `${v.date}|${(v.provider || '').toLowerCase()}`;
         if (viSeen.has(k)) return false;
         viSeen.add(k); return true;
       });
-      // Filter admin visit types
       knownVisits = knownVisits.filter(v =>
         !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
       );
-      console.log(`coordinator: encounter_index loaded — ${knownVisits.length} unique visits across all parts`);
+      console.log(`VI pre-pass complete: ${knownVisits.length} unique visits`);
     } catch (viErr) {
-      console.warn('coordinator: encounter_index read failed (non-fatal):', viErr.message);
+      console.warn('VI pre-pass failed (non-fatal):', viErr.message);
       knownVisits = [];
     }
-
     // ── 3b. Service-date correction pass (free — regex on extracted_text) ─────
     // The VI pre-pass sometimes returns ADM DT or signature date instead of
     // SERVICE DT for hospital provider notes. Scan extracted_text around each
