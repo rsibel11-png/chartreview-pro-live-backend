@@ -27,7 +27,6 @@ const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
 const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
 const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
 const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
-const FLATTEN_FN = process.env.FLATTEN_FUNCTION_NAME       || 'chartreview-redact-prod-flattenPdfPython';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -2960,60 +2959,7 @@ module.exports.redactCaseWorker = async function(event) {
     var mergedKey  = 'orgs/' + org_id + '/documents/' + newUUID + '/' + baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf';
     var mergedName = baseName + '_REDACTED_v' + REDACT_BUILD + '.pdf';
 
-    // Upload _REDACTED.pdf as scratch (input to flatten — not written to DynamoDB)
     await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: mergedKey, Body: mergedBytes, ContentType: 'application/pdf' }));
-    console.log('[redact-case] Uploaded scratch _REDACTED.pdf → ' + mergedKey);
-
-    // ── Synchronous flatten: rasterize every redaction box, scrub text layer ──
-    // flattenPdfPython v9 writes _FLAT.pdf to flatKey and returns its DynamoDB doc id.
-    // On failure: fall back gracefully to the _REDACTED.pdf so the job still completes.
-    var flatKey      = mergedKey.replace('_REDACTED_v' + REDACT_BUILD + '.pdf', '_REDACTED_v' + REDACT_BUILD + '_FLAT.pdf');
-    var flatName     = mergedName.replace('_REDACTED_v' + REDACT_BUILD + '.pdf', '_REDACTED_v' + REDACT_BUILD + '_FLAT.pdf');
-    var flatDocId    = null;
-    var finalKey     = mergedKey;   // fallback = scratch redacted file
-    var finalName    = mergedName;
-    var isFlatted    = false;
-
-    try {
-      await updateJob(job_id, { progress_message: 'Flattening redaction boxes...', updated_at: new Date().toISOString() });
-      var flatPayload = {
-        mode:       'flatten',
-        doc_id:     randomUUID(),   // scratch id — flatten Lambda will create the real one
-        source_key: mergedKey,
-        dest_key:   flatKey,
-        job_id:     null,           // no separate status table entry needed
-        pii_values: [],
-        doc_meta: {
-          org_id:         org_id         || null,
-          patient_id:     patient_id     || null,
-          folder:         folder_name    || null,
-          folder_name:    folder_name    || null,
-          provider_name:  doc_records[0].provider_name || null,
-          is_clinical:    false,
-          pages:          totalPages,
-          case_name:      folder_name    || null,
-        },
-      };
-      var flatResp = await lambdaClient.send(new InvokeCommand({
-        FunctionName:   FLATTEN_FN,
-        InvocationType: 'RequestResponse',
-        Payload:        Buffer.from(JSON.stringify(flatPayload)),
-      }));
-      var flatBody = JSON.parse(Buffer.from(flatResp.Payload).toString());
-      // flatBody is the Lambda response envelope: { statusCode, body }
-      var flatResult = typeof flatBody.body === 'string' ? JSON.parse(flatBody.body) : (flatBody.body || {});
-      if (flatBody.statusCode === 200 && flatResult.success) {
-        flatDocId  = flatResult.new_doc_id;
-        finalKey   = flatKey;
-        finalName  = flatName;
-        isFlatted  = true;
-        console.log('[redact-case] Flatten complete — doc_id=' + flatDocId + ' boxes=' + flatResult.total_boxes);
-      } else {
-        console.warn('[redact-case] Flatten returned non-success, falling back to _REDACTED.pdf:', JSON.stringify(flatResult));
-      }
-    } catch (_flatErr) {
-      console.warn('[redact-case] Flatten failed (non-fatal), falling back to _REDACTED.pdf:', _flatErr.message);
-    }
 
     // ── Redaction log CSV ────────────────────────────────────────────────────
     var _caseLogKey = null; var _caseLogUrl = null;
@@ -3025,7 +2971,7 @@ module.exports.redactCaseWorker = async function(event) {
         folder:      folder_name || '',
       };
       var _caseLogBytes = buildRedactionLogCsv(mergedName, mergedPiiByPage, _casePiiSummary);
-      _caseLogKey = finalKey.replace(/_REDACTED_v[^/]+\.pdf$/i, '_REDACTION_LOG.csv');
+      _caseLogKey = mergedKey.replace(/_REDACTED_v[^/]+\.pdf$/i, '_REDACTION_LOG.csv');
       await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: _caseLogKey, Body: _caseLogBytes, ContentType: 'text/csv' }));
       _caseLogUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: _caseLogKey }), { expiresIn: 604800 });
       console.log('[REDACTION-LOG] Case CSV uploaded to', _caseLogKey);
@@ -3033,59 +2979,37 @@ module.exports.redactCaseWorker = async function(event) {
       console.warn('[REDACTION-LOG] Failed to generate case CSV:', _caseLogErr.message);
     }
 
-    // ── Single DynamoDB record — points to flat file (or redacted fallback) ──
-    // If flatten succeeded, flatDocId was created by the flatten Lambda — use it.
-    // If flatten failed, we create our own record pointing to the scratch _REDACTED.pdf.
-    var newDocId = flatDocId || randomUUID();
-    if (!flatDocId) {
-      // Flatten failed — write the fallback record ourselves
-      await dynamo.send(new PutCommand({
-        TableName: DOCS_TABLE,
-        Item: {
-          aws_document_id:   newDocId,
-          org_id:            org_id || null,
-          patient_id:        patient_id || null,
-          folder_name:       folder_name || null,
-          provider_name:     doc_records[0].provider_name || null,
-          original_filename: finalName,
-          file_key:          finalKey,
-          s3_key:            finalKey,
-          is_redacted:       true,
-          is_flat:           false,
-          redacted_from:     original_document_id || doc_records.map(function(d) { return d.aws_document_id; }).join(','),
-          redaction_count:   totalRedactions,
-          redacted_pages:    totalPages,
-          redaction_log_key: _caseLogKey  || null,
-          redaction_log_url: _caseLogUrl  || null,
-          status:            'processed',
-          is_clinical:       false,
-          created_at:        new Date().toISOString(),
-          updated_at:        new Date().toISOString(),
-        },
-      }));
-    } else {
-      // Flatten succeeded — update the record it created with redaction metadata
-      await dynamo.send(new UpdateCommand({
-        TableName:                 DOCS_TABLE,
-        Key:                       { aws_document_id: newDocId },
-        UpdateExpression:          'SET redacted_from = :rf, redaction_count = :rc, redacted_pages = :rp, redaction_log_key = :rlk, redaction_log_url = :rlu, updated_at = :ua',
-        ExpressionAttributeValues: {
-          ':rf':  original_document_id || doc_records.map(function(d) { return d.aws_document_id; }).join(','),
-          ':rc':  totalRedactions,
-          ':rp':  totalPages,
-          ':rlk': _caseLogKey  || null,
-          ':rlu': _caseLogUrl  || null,
-          ':ua':  new Date().toISOString(),
-        },
-      }));
-    }
+    var newDocId = randomUUID();
+    await dynamo.send(new PutCommand({
+      TableName: DOCS_TABLE,
+      Item: {
+        aws_document_id:   newDocId,
+        org_id:            org_id || null,
+        patient_id:        patient_id || null,
+        folder_name:       folder_name || null,
+        provider_name:     doc_records[0].provider_name || null,
+        original_filename: mergedName,
+        file_key:          mergedKey,
+        s3_key:            mergedKey,
+        is_redacted:       true,
+        redacted_from:     original_document_id || doc_records.map(function(d) { return d.aws_document_id; }).join(','),
+        redaction_count:   totalRedactions,
+        redacted_pages:    totalPages,
+        redaction_log_key: _caseLogKey  || null,
+        redaction_log_url: _caseLogUrl  || null,
+        status:            'processed',
+        is_clinical:       false,
+        created_at:        new Date().toISOString(),
+        updated_at:        new Date().toISOString(),
+      },
+    }));
 
-    var downloadUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: finalKey }), { expiresIn: 3600 });
+    var downloadUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: mergedKey }), { expiresIn: 3600 });
 
     await updateJob(job_id, {
       status: 'complete',
-      progress_message: 'Case redaction complete - ' + totalRedactions + ' item(s) redacted across ' + totalPages + ' page(s).' + (isFlatted ? ' Text layer scrubbed.' : ''),
-      result: { new_doc_id: newDocId, download_url: downloadUrl, redaction_count: totalRedactions, redacted_pages: totalPages, is_flat: isFlatted },
+      progress_message: 'Case redaction complete - ' + totalRedactions + ' item(s) redacted across ' + totalPages + ' page(s).',
+      result: { new_doc_id: newDocId, download_url: downloadUrl, redaction_count: totalRedactions, redacted_pages: totalPages },
       updated_at: new Date().toISOString(),
     });
 
