@@ -10,6 +10,7 @@ const { DynamoDBClient }                               = require('@aws-sdk/clien
 const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { BedrockRuntimeClient, InvokeModelCommand }     = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand }                  = require('@aws-sdk/client-lambda');
+const { SQSClient, SendMessageCommand }                = require('@aws-sdk/client-sqs');
 const { PDFDocument, rgb }                             = require('pdf-lib');
 const { randomUUID }                                   = require('crypto');
 const { validateApiKey }                               = require('./auth');
@@ -21,12 +22,15 @@ const s3           = new S3Client({ region: process.env.AWS_REGION || 'us-east-1
 const dynamo       = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
 const bedrock      = new BedrockRuntimeClient({ region: 'us-east-1' });
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' });
+const sqsClient    = new SQSClient({ region: process.env.AWS_REGION || 'us-east-1' });
 
-const BUCKET     = process.env.S3_BUCKET       || 'chartreview-documents-prod';
-const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
-const JOBS_TABLE = process.env.JOBS_TABLE      || 'chartreview-jobs-prod';
-const MODEL_ID   = process.env.MODEL_ID        || 'us.anthropic.claude-sonnet-4-6';
-const WORKER_FN  = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
+const BUCKET           = process.env.S3_BUCKET         || 'chartreview-documents-prod';
+const DOCS_TABLE       = process.env.DOCUMENTS_TABLE   || 'chartreview-documents-prod';
+const JOBS_TABLE       = process.env.JOBS_TABLE        || 'chartreview-jobs-prod';
+const MODEL_ID         = process.env.MODEL_ID          || 'us.anthropic.claude-sonnet-4-6';
+const WORKER_FN        = process.env.REDACT_WORKER_FUNCTION_NAME || 'chartreview-pro-prod-redactDocumentWorker';
+const FLATTEN_QUEUE_URL = process.env.FLATTEN_QUEUE_URL || 'https://sqs.us-east-1.amazonaws.com/531948420933/chartreview-flatten-queue-prod';
+const FLATTEN_STATUS_TABLE = process.env.FLATTEN_STATUS_TABLE || 'chartreview-flatten-status-prod';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -2521,6 +2525,7 @@ module.exports.redactDocumentWorker = async function(event) {
     // ── End redaction log ──────────────────────────────────────────────────────
 
     const newDocId = randomUUID();
+    // Updated: 2026-06-19 — is_hidden:true so library only shows the _FLAT output after auto-flatten
     await dynamo.send(new PutCommand({
       TableName: DOCS_TABLE,
       Item: {
@@ -2533,6 +2538,7 @@ module.exports.redactDocumentWorker = async function(event) {
         file_key:          redactedKey,
         s3_key:            redactedKey,
         is_redacted:       true,
+        is_hidden:         true,
         redacted_from:     doc_id,
         redaction_count:   totalRedactions,
         redacted_pages:    totalPagesAffected,
@@ -2553,7 +2559,7 @@ module.exports.redactDocumentWorker = async function(event) {
 
     await updateJob(job_id, {
       status:           'complete',
-      progress_message: 'Redaction complete - ' + totalRedactions + ' item(s) redacted across ' + totalPagesAffected + ' page(s).',
+      progress_message: 'Redaction complete - flattening PDF...',
       result: {
         new_doc_id:      newDocId,
         download_url:    downloadUrl,
@@ -2562,6 +2568,39 @@ module.exports.redactDocumentWorker = async function(event) {
       },
       updated_at: new Date().toISOString(),
     });
+
+    // ── Auto-flatten: dispatch to Python rasterizer via SQS ──────────────────
+    try {
+      var _flatJobId  = randomUUID();
+      var _baseName   = redactedName.replace(/_REDACTED.*$/i, '').replace(/\.pdf$/i, '');
+      var _flatName   = _baseName + '_REDACTED_FLAT.pdf';
+      var _keyPfx     = redactedKey.substring(0, redactedKey.lastIndexOf('/') + 1);
+      var _flatKey    = _keyPfx + _flatName;
+      var _flatNow    = new Date().toISOString();
+      await dynamo.send(new PutCommand({
+        TableName: FLATTEN_STATUS_TABLE,
+        Item: { job_id: _flatJobId, doc_id: newDocId, status: 'flattening',
+                dest_key: _flatKey, flat_name: _flatName,
+                created_at: _flatNow, updated_at: _flatNow,
+                ttl: Math.floor(Date.now()/1000) + 86400 }
+      }));
+      await sqsClient.send(new SendMessageCommand({
+        QueueUrl: FLATTEN_QUEUE_URL,
+        MessageBody: JSON.stringify({
+          mode: 'flatten', doc_id: newDocId, source_key: redactedKey,
+          dest_key: _flatKey, dynamo_id: newDocId, job_id: _flatJobId,
+          doc_meta: {
+            org_id: doc.org_id || null, patient_id: doc.patient_id || null,
+            folder: doc.folder_name || null, provider_name: doc.provider_name || null,
+            is_clinical: doc.is_clinical || false
+          }
+        })
+      }));
+      console.log('[AUTO-FLATTEN] dispatched job_id=' + _flatJobId);
+    } catch (_fe) {
+      console.warn('[AUTO-FLATTEN] non-fatal dispatch error:', _fe.message);
+    }
+    // ── End auto-flatten ─────────────────────────────────────────────────────
 
   } catch (err) {
     console.error('Redaction worker error:', err);
@@ -2980,6 +3019,7 @@ module.exports.redactCaseWorker = async function(event) {
     }
 
     var newDocId = randomUUID();
+    // Updated: 2026-06-19 — is_hidden:true so library only shows the _FLAT output after auto-flatten
     await dynamo.send(new PutCommand({
       TableName: DOCS_TABLE,
       Item: {
@@ -2992,6 +3032,7 @@ module.exports.redactCaseWorker = async function(event) {
         file_key:          mergedKey,
         s3_key:            mergedKey,
         is_redacted:       true,
+        is_hidden:         true,
         redacted_from:     original_document_id || doc_records.map(function(d) { return d.aws_document_id; }).join(','),
         redaction_count:   totalRedactions,
         redacted_pages:    totalPages,
@@ -3008,10 +3049,44 @@ module.exports.redactCaseWorker = async function(event) {
 
     await updateJob(job_id, {
       status: 'complete',
-      progress_message: 'Case redaction complete - ' + totalRedactions + ' item(s) redacted across ' + totalPages + ' page(s).',
+      progress_message: 'Case redaction complete - ' + totalRedactions + ' item(s) redacted across ' + totalPages + ' page(s). Flattening PDF...',
       result: { new_doc_id: newDocId, download_url: downloadUrl, redaction_count: totalRedactions, redacted_pages: totalPages },
       updated_at: new Date().toISOString(),
     });
+
+    // ── Auto-flatten: dispatch to Python rasterizer via SQS ──────────────────
+    try {
+      var _caseFlatJobId = randomUUID();
+      var _caseBaseName  = mergedName.replace(/_REDACTED.*$/i, '').replace(/\.pdf$/i, '');
+      var _caseFlatName  = _caseBaseName + '_REDACTED_FLAT.pdf';
+      var _caseKeyPfx    = mergedKey.substring(0, mergedKey.lastIndexOf('/') + 1);
+      var _caseFlatKey   = _caseKeyPfx + _caseFlatName;
+      var _caseFlatNow   = new Date().toISOString();
+      await dynamo.send(new PutCommand({
+        TableName: FLATTEN_STATUS_TABLE,
+        Item: { job_id: _caseFlatJobId, doc_id: newDocId, status: 'flattening',
+                dest_key: _caseFlatKey, flat_name: _caseFlatName,
+                created_at: _caseFlatNow, updated_at: _caseFlatNow,
+                ttl: Math.floor(Date.now()/1000) + 86400 }
+      }));
+      await sqsClient.send(new SendMessageCommand({
+        QueueUrl: FLATTEN_QUEUE_URL,
+        MessageBody: JSON.stringify({
+          mode: 'flatten', doc_id: newDocId, source_key: mergedKey,
+          dest_key: _caseFlatKey, dynamo_id: newDocId, job_id: _caseFlatJobId,
+          doc_meta: {
+            org_id: org_id || null, patient_id: patient_id || null,
+            folder: folder_name || null,
+            provider_name: (doc_records[0] && doc_records[0].provider_name) || null,
+            is_clinical: false
+          }
+        })
+      }));
+      console.log('[AUTO-FLATTEN] case dispatched job_id=' + _caseFlatJobId);
+    } catch (_cfe) {
+      console.warn('[AUTO-FLATTEN] case non-fatal dispatch error:', _cfe.message);
+    }
+    // ── End auto-flatten ─────────────────────────────────────────────────────
 
   } catch (err) {
     console.error('Case redaction worker error:', err);
