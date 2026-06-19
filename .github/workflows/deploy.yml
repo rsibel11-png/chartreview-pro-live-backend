@@ -34,359 +34,14 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      - name: Create classifyJobWorker Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-classifyJobWorker --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-classifyJobWorker \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/documents_new.classifyJobWorker \
-            --timeout 600 \
-            --memory-size 1024 \
-            --zip-file fileb://function.zip \
-            --region us-east-1
+      - name: Deploy all Lambda functions
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create generateSummaryStart Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-generateSummaryStart --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-generateSummaryStart \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/generate_summary.generateSummaryStart \
-            --timeout 29 \
-            --memory-size 512 \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create generateSummaryWorker Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-generateSummaryWorker --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-generateSummaryWorker \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/generate_summary.generateSummaryWorker \
-            --timeout 900 \
-            --memory-size 1024 \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create generateSummaryChunkWorker Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-generateSummaryChunkWorker --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-generateSummaryChunkWorker \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/generate_summary.generateSummaryChunkWorker \
-            --timeout 900 \
-            --memory-size 1024 \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create buildVisitIndexStart Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-buildVisitIndexStart --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-buildVisitIndexStart \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/generate_summary.buildVisitIndexStart \
-            --timeout 29 \
-            --memory-size 512 \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create buildVisitIndexWorker Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-buildVisitIndexWorker --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-buildVisitIndexWorker \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/generate_summary.buildVisitIndexWorker \
-            --timeout 900 \
-            --memory-size 1024 \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create verifySummaryWorker Lambda if not exists
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-verifySummaryWorker --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-verifySummaryWorker \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/generate_summary.verifySummaryWorker \
-            --timeout 900 \
-            --memory-size 1024 \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-
-      - name: Create redactDocumentStart Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-redactDocumentStart --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-redactDocumentStart \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/redact_document.redactDocumentStart \
-            --timeout 29 \
-            --memory-size 512 \
-            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,REDACT_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactDocumentWorker,REDACT_CASE_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactCaseWorker,MODEL_ID=us.anthropic.claude-sonnet-4-6}" \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create redactDocumentWorker Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-redactDocumentWorker --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-redactDocumentWorker \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/redact_document.redactDocumentWorker \
-            --timeout 900 \
-            --memory-size 1024 \
-            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,MODEL_ID=us.anthropic.claude-sonnet-4-6}" \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create redactCaseWorker Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-redactCaseWorker --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-redactCaseWorker \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/redact_document.redactCaseWorker \
-            --timeout 900 \
-            --memory-size 1024 \
-            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,MODEL_ID=us.anthropic.claude-sonnet-4-6}" \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Wire /documents/{id}/redact route in API Gateway
-        run: |
-          API_ID="1h4kpspbs6"
-          REGION="us-east-1"
-          ACCOUNT="531948420933"
-          STAGE="prod"
-          LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT}:function:chartreview-pro-prod-redactDocumentStart"
-
-          DOCS_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
-            --query "items[?path=='/documents/{aws_document_id}'].id" --output text)
-          echo "Parent resource: $DOCS_RESOURCE"
-
-          REDACT_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
-            --query "items[?path=='/documents/{aws_document_id}/redact'].id" --output text)
-
-          if [ -z "$REDACT_RESOURCE" ]; then
-            REDACT_RESOURCE=$(aws apigateway create-resource \
-              --rest-api-id $API_ID --parent-id $DOCS_RESOURCE \
-              --path-part redact --region $REGION --query 'id' --output text)
-            echo "Created /redact resource: $REDACT_RESOURCE"
-          else
-            echo "/redact already exists: $REDACT_RESOURCE"
-          fi
-
-          aws apigateway put-method --rest-api-id $API_ID --resource-id $REDACT_RESOURCE \
-            --http-method POST --authorization-type NONE --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration --rest-api-id $API_ID --resource-id $REDACT_RESOURCE \
-            --http-method POST --type AWS_PROXY --integration-http-method POST \
-            --uri "arn:aws:apigateway:${REGION}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations" \
-            --region $REGION
-
-          aws lambda add-permission \
-            --function-name chartreview-pro-prod-redactDocumentStart \
-            --statement-id apigateway-redact-$(date +%s) \
-            --action lambda:InvokeFunction \
-            --principal apigateway.amazonaws.com \
-            --source-arn "arn:aws:execute-api:${REGION}:${ACCOUNT}:${API_ID}/*" \
-            --region $REGION 2>/dev/null || true
-
-          aws apigateway put-method --rest-api-id $API_ID --resource-id $REDACT_RESOURCE \
-            --http-method OPTIONS --authorization-type NONE --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration --rest-api-id $API_ID --resource-id $REDACT_RESOURCE \
-            --http-method OPTIONS --type MOCK \
-            --request-templates '{"application/json":"{\"statusCode\":200}"}' --region $REGION
-
-          aws apigateway put-method-response --rest-api-id $API_ID --resource-id $REDACT_RESOURCE \
-            --http-method OPTIONS --status-code 200 \
-            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":false,"method.response.header.Access-Control-Allow-Methods":false,"method.response.header.Access-Control-Allow-Origin":false}' \
-            --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration-response --rest-api-id $API_ID --resource-id $REDACT_RESOURCE \
-            --http-method OPTIONS --status-code 200 \
-            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'\''Content-Type,Authorization,x-api-key,x-org-id'\''","method.response.header.Access-Control-Allow-Methods":"'\''POST,OPTIONS'\''","method.response.header.Access-Control-Allow-Origin":"'\''*'\''"}' \
-            --region $REGION 2>/dev/null || true
-
-          aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION || true
-          echo "Done — /documents/{aws_document_id}/redact is live"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Create flattenPdf Lambda if missing
-        run: |
-          aws lambda get-function --function-name chartreview-pro-prod-flattenPdf --region us-east-1 2>/dev/null || \
-          aws lambda create-function \
-            --function-name chartreview-pro-prod-flattenPdf \
-            --runtime nodejs20.x \
-            --role arn:aws:iam::531948420933:role/chartreview-pro-prod-us-east-1-lambdaRole \
-            --handler src/handlers/flatten_pdf.flattenStart \
-            --timeout 900 \
-            --memory-size 1024 \
-            --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod}" \
-            --zip-file fileb://function.zip \
-            --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Wire /documents/{id}/flatten route in API Gateway
-        run: |
-          API_ID="1h4kpspbs6"
-          REGION="us-east-1"
-          ACCOUNT="531948420933"
-          STAGE="prod"
-          LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT}:function:chartreview-pro-prod-flattenPdf"
-
-          DOCS_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
-            --query "items[?path=='/documents/{aws_document_id}'].id" --output text)
-          echo "Parent resource: $DOCS_RESOURCE"
-
-          FLATTEN_RESOURCE=$(aws apigateway get-resources --rest-api-id $API_ID --region $REGION \
-            --query "items[?path=='/documents/{aws_document_id}/flatten'].id" --output text)
-
-          if [ -z "$FLATTEN_RESOURCE" ]; then
-            FLATTEN_RESOURCE=$(aws apigateway create-resource \
-              --rest-api-id $API_ID --parent-id $DOCS_RESOURCE \
-              --path-part flatten --region $REGION --query 'id' --output text)
-            echo "Created /flatten resource: $FLATTEN_RESOURCE"
-          else
-            echo "/flatten already exists: $FLATTEN_RESOURCE"
-          fi
-
-          aws apigateway put-method --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
-            --http-method POST --authorization-type NONE --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
-            --http-method POST --type AWS_PROXY --integration-http-method POST \
-            --uri "arn:aws:apigateway:${REGION}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations" \
-            --region $REGION
-
-          aws lambda add-permission \
-            --function-name chartreview-pro-prod-flattenPdf \
-            --statement-id apigateway-flatten-$(date +%s) \
-            --action lambda:InvokeFunction \
-            --principal apigateway.amazonaws.com \
-            --source-arn "arn:aws:execute-api:${REGION}:${ACCOUNT}:${API_ID}/*" \
-            --region $REGION 2>/dev/null || true
-
-          aws apigateway put-method --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
-            --http-method OPTIONS --authorization-type NONE --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
-            --http-method OPTIONS --type MOCK --passthrough-behavior WHEN_NO_MATCH \
-            --request-templates '{"application/json":"{\"statusCode\":200}"}' --region $REGION
-
-          aws apigateway put-method-response --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
-            --http-method OPTIONS --status-code 200 \
-            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":false,"method.response.header.Access-Control-Allow-Methods":false,"method.response.header.Access-Control-Allow-Origin":false}' \
-            --region $REGION 2>/dev/null || true
-
-          aws apigateway delete-integration-response --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
-            --http-method OPTIONS --status-code 200 --region $REGION 2>/dev/null || true
-
-          aws apigateway put-integration-response --rest-api-id $API_ID --resource-id $FLATTEN_RESOURCE \
-            --http-method OPTIONS --status-code 200 --selection-pattern "" \
-            --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'"'"'Content-Type,Authorization,x-api-key,x-org-id'"'"'","method.response.header.Access-Control-Allow-Methods":"'"'"'POST,OPTIONS'"'"'","method.response.header.Access-Control-Allow-Origin":"'"'"'*'"'"'"}' \
-            --region $REGION || true
-
-          aws apigateway create-deployment --rest-api-id $API_ID --stage-name $STAGE --region $REGION || true
-          echo "Done — /documents/{aws_document_id}/flatten is live"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Deploy all Lambda functions directly
         run: |
           FUNCTIONS=(
-            "chartreview-pro-prod-listPatients"
-            "chartreview-pro-prod-createPatient"
-            "chartreview-pro-prod-getPatient"
-            "chartreview-pro-prod-updatePatient"
-            "chartreview-pro-prod-deletePatient"
-            "chartreview-pro-prod-listPatientDocuments"
-            "chartreview-pro-prod-getUploadUrl"
-            "chartreview-pro-prod-directUpload"
-            "chartreview-pro-prod-listAllDocuments"
-            "chartreview-pro-prod-getDocument"
-            "chartreview-pro-prod-updateDocument"
-            "chartreview-pro-prod-deleteDocument"
-            "chartreview-pro-prod-getDownloadUrl"
-            "chartreview-pro-prod-getDocumentText"
-            "chartreview-pro-prod-getDocumentFullText"
-            "chartreview-pro-prod-processDocument"
-            "chartreview-pro-prod-processWorker"
-            "chartreview-pro-prod-assessRelevance"
-            "chartreview-pro-prod-reassessDocument"
-            "chartreview-pro-prod-classifyStart"
             "chartreview-pro-prod-classifyJobWorker"
-            "chartreview-pro-prod-getJob"
-            "chartreview-pro-prod-listAllSummaries"
-            "chartreview-pro-prod-createSummary"
-            "chartreview-pro-prod-getSummary"
-            "chartreview-pro-prod-updateSummary"
-            "chartreview-pro-prod-deleteSummary"
             "chartreview-pro-prod-generateSummaryStart"
             "chartreview-pro-prod-generateSummaryWorker"
             "chartreview-pro-prod-generateSummaryChunkWorker"
@@ -397,42 +52,29 @@ jobs:
             "chartreview-pro-prod-redactDocumentWorker"
             "chartreview-pro-prod-redactCaseWorker"
             "chartreview-pro-prod-flattenPdf"
-            "chartreview-pro-prod-getFolderPii"
           )
-          for FUNC in "${FUNCTIONS[@]}"; do
-            echo "Updating $FUNC..."
+          for FN in "${FUNCTIONS[@]}"; do
+            echo "Deploying $FN..."
             aws lambda update-function-code \
-              --function-name "$FUNC" \
+              --function-name "$FN" \
               --zip-file fileb://function.zip \
-              --region us-east-1 || echo "WARNING: $FUNC not found, skipping"
+              --region us-east-1 \
+              --no-cli-pager
+            echo "✅ $FN deployed"
           done
-          echo "All Lambda functions updated!"
+
+      - name: Wait for all updates to complete
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
-
-      - name: Update generateSummary env vars
         run: |
-          for fn in \
-            chartreview-pro-prod-generateSummaryWorker \
-            chartreview-pro-prod-generateSummaryChunkWorker \
-            chartreview-pro-prod-generateSummaryStart \
-            chartreview-pro-prod-verifySummaryWorker; do
-            aws lambda update-function-configuration \
-              --function-name $fn \
-              --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,SUMMARIES_TABLE=chartreview-summaries-prod,JOBS_TABLE=chartreview-jobs-prod,BEDROCK_USAGE_TABLE=chartreview-bedrock-usage,GENERATE_CHUNK_WORKER_FUNCTION_NAME=chartreview-pro-prod-generateSummaryChunkWorker,VERIFY_WORKER_FUNCTION_NAME=chartreview-pro-prod-verifySummaryWorker,VI_WORKER_FUNCTION_NAME=chartreview-pro-prod-buildVisitIndexWorker,GENERATE_WORKER_FUNCTION_NAME=chartreview-pro-prod-generateSummaryWorker}" \
-              --region us-east-1 || echo "WARNING: failed to update $fn env vars"
+          FUNCTIONS=(
+            "chartreview-pro-prod-redactDocumentWorker"
+            "chartreview-pro-prod-redactCaseWorker"
+          )
+          for FN in "${FUNCTIONS[@]}"; do
+            echo "Waiting for $FN to be active..."
+            aws lambda wait function-updated --function-name "$FN" --region us-east-1
+            echo "✅ $FN active"
           done
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-
-      - name: Update redactDocumentStart env vars
-        run: |
-          aws lambda update-function-configuration             --function-name chartreview-pro-prod-redactDocumentStart             --environment "Variables={S3_BUCKET=chartreview-documents-prod,DOCUMENTS_TABLE=chartreview-documents-prod,JOBS_TABLE=chartreview-jobs-prod,REDACT_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactDocumentWorker,REDACT_CASE_WORKER_FUNCTION_NAME=chartreview-pro-prod-redactCaseWorker,MODEL_ID=us.anthropic.claude-sonnet-4-6}"             --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
