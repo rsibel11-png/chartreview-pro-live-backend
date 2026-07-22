@@ -530,7 +530,7 @@ const deduplicateVisits = (visits) => {
 // correctEdVisitDates removed — replaced by step 3b service-date scan
 
 const sanitizeVisits = (visits, patientName) => {
-  const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan','patient_name_on_doc'];
+  const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
   const validProgressions = ['improved','same','worse','not_documented'];
   return (visits || []).map(visit => {
     const clean = { ...visit };
@@ -540,15 +540,6 @@ const sanitizeVisits = (visits, patientName) => {
       else if (typeof val === 'object') clean[field] = JSON.stringify(val);
       else if (typeof val !== 'string') clean[field] = String(val);
     });
-    // Ensure possible_different_patient is a boolean
-    clean.possible_different_patient = clean.possible_different_patient === true || clean.possible_different_patient === 'true';
-    // Code-level name check: compare patient_name_on_doc against primary patientName
-    if (patientName && clean.patient_name_on_doc) {
-      if (!isSamePatient(patientName, clean.patient_name_on_doc)) {
-        clean.possible_different_patient = true;
-        console.log('sanitizeVisits: name mismatch flagged — primary="' + patientName + '" doc="' + clean.patient_name_on_doc + '" (' + clean.visit_date + ' ' + clean.rendering_provider + ')');
-      }
-    }
     if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
     if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
 
@@ -836,19 +827,8 @@ CRITICAL EXTRACTION RULES:
 Return ALL entries found across ALL documents as separate entries in the visits array.
 
 Also extract:
-- Patient name (the primary patient for this record set)
+- Patient name (should be consistent across documents)
 - Case number (should be consistent across documents)
-
-PATIENT NAME HANDLING — CRITICAL:
-Different documents in this record set may show the patient's name in different formats
-(e.g. "GARCIA PEREZ, MARIA" in hospital records vs "Maria D Garcia" in office notes,
-or "Maria Garcia-Perez" vs "Maria Garcia"). These are ALL the same patient — do NOT
-skip or drop any visit because the patient name appears differently.
-For EACH visit you extract, also fill in patient_name_on_doc with the patient name
-EXACTLY as it appears on that specific document (from header, letterhead, or footer).
-If the name format differs significantly from the primary patient name, set
-possible_different_patient to true. When in doubt, extract the visit and flag it —
-never silently drop a visit due to a name mismatch.
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
 ${checklistSection}
@@ -902,7 +882,6 @@ Return all entries in the visits array.`;
 // ═══════════════════════════════════════════════════════════════════════════════
 // GENERATE SUMMARY — CONCURRENT CHUNK ARCHITECTURE
 // Updated: 2026-05-03
-// Updated: 2026-07-21 — patient name tagging: extract ALL visits regardless of name variation, add patient_name_on_doc + possible_different_patient fields, code-level isSamePatient check flags mismatches for user review
 //
 // Architecture:
 //   generateSummaryWorker (coordinator):
@@ -1006,8 +985,6 @@ const generateSummaryChunkWorker = async (event) => {
             impression_diagnosis:  { type: 'string' },
             icd10_codes:           { type: 'array', items: { type: 'string' } },
             treatment_plan:        { type: 'string' },
-            patient_name_on_doc:   { type: 'string', description: 'Patient name exactly as it appears on THIS document (from header/letterhead/footer). Empty if not visible.' },
-            possible_different_patient: { type: 'boolean', description: 'Set true if the patient name on this document might belong to a different patient. When in doubt, set true.' },
           },
         },
       },
@@ -1462,8 +1439,6 @@ const generateSummaryWorker = async (event) => {
                   impression_diagnosis:   { type: 'string' },
                   icd10_codes:            { type: 'array', items: { type: 'string' } },
                   treatment_plan:         { type: 'string' },
-                  patient_name_on_doc:   { type: 'string' },
-                  possible_different_patient: { type: 'boolean' },
                 },
               },
             },
@@ -1772,38 +1747,6 @@ const normalizeProvider = (name) => {
     .filter(Boolean)
     .sort()
     .join(' ');
-};
-
-// Normalize patient name for comparison: uppercase, strip credentials/punctuation,
-// strip middle initials, sort tokens so "GARCIA PEREZ, MARIA" == "Maria D Garcia"
-// Returns a sorted token string that's order-independent.
-const normalizePatientName = (raw) => {
-  return (raw || '')
-    .replace(/\b(MD|DO|JR|SR|II|III)\b/gi, '')
-    .replace(/[^a-zA-Z\s]/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(t => t.length > 1)   // strip single-char initials (e.g. "D" middle initial)
-    .map(t => t.toLowerCase())
-    .sort()
-    .join(' ');
-};
-
-// Check if two patient names likely refer to the same person.
-// Returns true if they share the same sorted token set (after normalization),
-// or if one is a subset of the other (e.g. "Maria Garcia" vs "Maria Garcia Perez").
-const isSamePatient = (name1, name2) => {
-  const n1 = normalizePatientName(name1);
-  const n2 = normalizePatientName(name2);
-  if (!n1 || !n2) return true;   // can't compare -> assume same (safer)
-  if (n1 === n2) return true;
-  const t1 = new Set(n1.split(' '));
-  const t2 = new Set(n2.split(' '));
-  const smaller = t1.size <= t2.size ? t1 : t2;
-  const larger  = t1.size <= t2.size ? t2 : t1;
-  let matches = 0;
-  for (const t of smaller) { if (larger.has(t)) matches++; }
-  return matches === smaller.size && smaller.size >= 2;
 };
 
 // ── Fetch PDF bytes from S3 ───────────────────────────────────────────────────
