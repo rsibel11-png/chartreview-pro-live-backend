@@ -1,3 +1,4 @@
+// Updated: 2026-07-21 — default include_all_pt to true (all PT/OT visits included, user selects in edit page)
 // Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
@@ -779,7 +780,7 @@ const CHUNK_FN          = process.env.GENERATE_CHUNK_WORKER_FUNCTION_NAME || 'ch
 // ─── generateSummaryStart — receives API call, creates job, fires worker async ─
 const generateSummaryStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
-  const { doc_ids, patient_name = '', include_all_pt = false } = body;
+  const { doc_ids, patient_name = '', include_all_pt = true } = body;
   const org_id = event._orgId || body.org_id || '';
 
   if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
@@ -952,7 +953,7 @@ const generateSummaryChunkWorker = async (event) => {
 
 // ── generateSummaryWorker (coordinator) ──────────────────────────────────────
 const generateSummaryWorker = async (event) => {
-  const { job_id, doc_ids, patient_name = '', org_id, include_all_pt = false } = event;
+  const { job_id, doc_ids, patient_name = '', org_id, include_all_pt = true } = event;
   console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length}`);
 
   // Pre-fetch region order once for entire coordinator run
