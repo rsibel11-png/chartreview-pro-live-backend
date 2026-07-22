@@ -491,8 +491,38 @@ const stripLabFindings = (visit) => {
   return { ...visit, lab_findings: '' };
 };
 
+// Normalize patient name for comparison: uppercase, strip punctuation/middle initials, sort tokens
+const normalizePatientName = (name) => {
+  if (!name) return '';
+  return name.toUpperCase()
+    .replace(/[.,]/g, ' ')
+    .replace(/\b([A-Z])\b/g, '') // strip single-char initials
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(t => t.length > 1)
+    .sort()
+    .join(' ');
+};
+
+// Check if two normalized names are the same patient (subset match)
+const isSamePatient = (name1, name2) => {
+  const n1 = normalizePatientName(name1);
+  const n2 = normalizePatientName(name2);
+  if (!n1 || !n2) return true; // if either is empty, don't flag
+  if (n1 === n2) return true;
+  // Subset check: 'GARCIA MARIA' is a subset of 'GARCIA MARIA PEREZ'
+  const tokens1 = new Set(n1.split(' '));
+  const tokens2 = new Set(n2.split(' '));
+  const smaller = tokens1.size <= tokens2.size ? tokens1 : tokens2;
+  const larger  = tokens1.size <= tokens2.size ? tokens2 : tokens1;
+  let common = 0;
+  for (const t of smaller) if (larger.has(t)) common++;
+  return common >= smaller.size; // all tokens of the smaller set must be in the larger
+};
+
 const sanitizeVisits = (visits, patientName) => {
-  const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
+  const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan','patient_name_on_doc'];
   const validProgressions = ['improved','same','worse','not_documented'];
   return (visits || [])
     .filter(visit => !isExcludedVisit(visit))
@@ -525,6 +555,11 @@ const sanitizeVisits = (visits, patientName) => {
       const patientLower = patientName?.toLowerCase();
       if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
         clean.practice_setting = '';
+      }
+      // Flag possible different patient based on document-level name
+      clean.possible_different_patient = false;
+      if (clean.patient_name_on_doc && patientName) {
+        clean.possible_different_patient = !isSamePatient(clean.patient_name_on_doc, patientName);
       }
       return clean;
     });
@@ -713,7 +748,7 @@ CRITICAL EXTRACTION RULES:
 Return ALL entries found across ALL documents as separate entries in the visits array.
 
 Also extract:
-- Patient name (should be consistent across documents)
+- Patient name — NOTE: Name formatting may vary across documents (e.g., 'GARCIA PEREZ, MARIA' and 'Maria D Garcia' are the same patient). Extract ALL visits from ALL documents regardless of name formatting variations. Do NOT skip a visit because the patient name looks different.
 - Case number (should be consistent across documents)
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
@@ -746,7 +781,7 @@ Return all entries in the visits array.`;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GENERATE SUMMARY — CONCURRENT CHUNK ARCHITECTURE
-// Updated: 2026-05-03
+// Updated: 2026-07-22 — surgical patient name tagging: extract ALL visits regardless of name variations, flag possible_different_patient
 //
 // Architecture:
 //   generateSummaryWorker (coordinator):
@@ -850,6 +885,7 @@ const generateSummaryChunkWorker = async (event) => {
             impression_diagnosis:  { type: 'string' },
             icd10_codes:           { type: 'array', items: { type: 'string' } },
             treatment_plan:        { type: 'string' },
+            patient_name_on_doc:   { type: 'string' },
           },
         },
       },
@@ -870,6 +906,7 @@ const generateSummaryChunkWorker = async (event) => {
             hpi_summary:          { type: 'string' },
             impression_diagnosis: { type: 'string' },
             treatment_plan:       { type: 'string' },
+            patient_name_on_doc:  { type: 'string' },
           },
         },
       },
