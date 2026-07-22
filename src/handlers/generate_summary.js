@@ -189,7 +189,7 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder) => {
 
   const bedrockPayload = {
     anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 8000,
+    max_tokens: 64000,
     messages: [{ role: 'user', content: contentBlocks }],
     tools: [{
       name: 'structured_output',
@@ -781,7 +781,7 @@ Return all entries in the visits array.`;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GENERATE SUMMARY — CONCURRENT CHUNK ARCHITECTURE
-// Updated: 2026-07-22 — surgical patient name tagging: extract ALL visits regardless of name variations, flag possible_different_patient
+// Updated: 2026-07-22 — surgical patient name tagging + zero-visit retry + max_tokens 64K (re-prompts Bedrock when valid JSON returns empty visits array): extract ALL visits regardless of name variations, flag possible_different_patient
 //
 // Architecture:
 //   generateSummaryWorker (coordinator):
@@ -924,10 +924,30 @@ const generateSummaryChunkWorker = async (event) => {
     try {
       const ptCtx = batch.length === 1 ? (batch[0].pt_session_context || '') : '';
       const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], ptCtx), fullSchema, regionOrder);
+      // ── Zero-visit retry: if Bedrock returned valid JSON but empty visits array,
+      //    retry once with an explicit instruction that visits exist in this document.
+      if (result && Array.isArray(result.visits) && result.visits.length === 0) {
+        console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: got 0 visits — retrying with zero-visit prompt...`);
+        const zeroRetryPrompt = buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], ptCtx) +
+          `
+
+CRITICAL: Your previous response returned zero visits for this document. This document DOES contain clinical encounters. You MUST find and extract them. Look for any date + provider combination. Do NOT return an empty visits array.`;
+        try {
+          const retryResult = await callBedrock(fileKeys, zeroRetryPrompt, fullSchema, regionOrder);
+          if (retryResult && Array.isArray(retryResult.visits) && retryResult.visits.length > 0) {
+            console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: zero-visit retry recovered ${retryResult.visits.length} visits`);
+            return retryResult;
+          }
+          console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: zero-visit retry also returned 0 visits`);
+        } catch (zeroRetryErr) {
+          console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: zero-visit retry failed:`, zeroRetryErr.message);
+        }
+      }
       return result;
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
+        const ptCtx = batch.length === 1 ? (batch[0].pt_session_context || '') : '';
         const result = await callBedrock(fileKeys, buildPrompt(knownVisitsChecklist, batchLabel, '', [], [], ptCtx), simplifiedSchema, regionOrder);
         return result;
       } catch (retryErr) {
