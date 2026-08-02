@@ -534,6 +534,47 @@ const deduplicateVisits = (visits) => {
 
 // correctEdVisitDates removed — replaced by step 3b service-date scan
 
+// Updated: 2026-08-02 — trim imaging_findings to final IMPRESSION/CONCLUSION only
+// Post-processing fix: strips narrative FINDINGS text from radiology reports,
+// keeping only the radiologist's final impression/conclusion section.
+// This is a CODE-LEVEL fix — no prompt changes (prompt changes caused date misreads).
+const trimImagingToImpression = (text) => {
+  if (!text || typeof text !== 'string' || text.length < 20) return text;
+
+  // Look for IMPRESSION or CONCLUSION marker (case-insensitive, allowing : or space)
+  const markerRe = /\b(IMPRESSION|CONCLUSION)\s*[:\-]?\s*/i;
+  const match = text.match(markerRe);
+  if (!match) return text; // No impression section found — leave untouched
+
+  const impressionStart = match.index;
+  let impressionText = text.slice(impressionStart);
+
+  // The model sometimes appends a repeat of the narrative after the impression,
+  // separated by a semicolon. Strip anything after the last numbered item that
+  // looks like repeated narrative (organ descriptions, etc.).
+  // Pattern: after the impression items, a ";" followed by organ-name narrative
+  const repeatRe = /;\s*(?:Osseous|Joint|Lateral|Medial|Spring|Peroneal|Achilles|Plantar|Sinus|Soft\s+tissue|Tendon|Ligament|Cartilage|Bone|Muscle|Vascular|Neurovascular)/i;
+  const repeatMatch = impressionText.match(repeatRe);
+  if (repeatMatch) {
+    impressionText = impressionText.slice(0, repeatMatch.index);
+  }
+
+  // Also strip a trailing semicolon and any remaining narrative after it
+  // if the text after ; is longer than 100 chars (likely narrative, not part of impression)
+  const trailingSemi = impressionText.lastIndexOf(';');
+  if (trailingSemi > 0 && trailingSemi > impressionText.length - 200) {
+    const afterSemi = impressionText.slice(trailingSemi + 1).trim();
+    if (afterSemi.length > 100) {
+      // Check if it looks like narrative (contains organ/structure keywords)
+      if (/^(Osseous|Joint|Lateral|Medial|Spring|Peroneal|Achilles|Plantar|Sinus|Soft\s+tissue|Tendon|Ligament|Cartilage|Bone|Muscle|Vascular|Neurovascular|There\s+is|No\s+evidence|The\s+)/i.test(afterSemi)) {
+        impressionText = impressionText.slice(0, trailingSemi);
+      }
+    }
+  }
+
+  return impressionText.trim();
+};
+
 const sanitizeVisits = (visits, patientName) => {
   const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
   const validProgressions = ['improved','same','worse','not_documented'];
@@ -546,6 +587,10 @@ const sanitizeVisits = (visits, patientName) => {
       else if (typeof val !== 'string') clean[field] = String(val);
     });
     if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
+    // Trim imaging_findings to final IMPRESSION/CONCLUSION for radiology reports
+    if (clean.imaging_findings) {
+      clean.imaging_findings = trimImagingToImpression(clean.imaging_findings);
+    }
     if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
 
     // Scrub military-time-as-year artifacts: model sometimes writes "10/08/2033" when
