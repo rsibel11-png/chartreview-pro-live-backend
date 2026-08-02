@@ -541,38 +541,36 @@ const deduplicateVisits = (visits) => {
 const trimImagingToImpression = (text) => {
   if (!text || typeof text !== 'string' || text.length < 20) return text;
 
-  // Look for IMPRESSION or CONCLUSION marker (case-insensitive, allowing : or space)
+  // Pattern 1: explicit IMPRESSION: or CONCLUSION: header
   const markerRe = /\b(IMPRESSION|CONCLUSION)\s*[:\-]?\s*/i;
-  const match = text.match(markerRe);
-  if (!match) return text; // No impression section found — leave untouched
-
-  const impressionStart = match.index;
-  let impressionText = text.slice(impressionStart);
-
-  // The model sometimes appends a repeat of the narrative after the impression,
-  // separated by a semicolon. Strip anything after the last numbered item that
-  // looks like repeated narrative (organ descriptions, etc.).
-  // Pattern: after the impression items, a ";" followed by organ-name narrative
-  const repeatRe = /;\s*(?:Osseous|Joint|Lateral|Medial|Spring|Peroneal|Achilles|Plantar|Sinus|Soft\s+tissue|Tendon|Ligament|Cartilage|Bone|Muscle|Vascular|Neurovascular)/i;
-  const repeatMatch = impressionText.match(repeatRe);
-  if (repeatMatch) {
-    impressionText = impressionText.slice(0, repeatMatch.index);
+  const markerMatch = text.match(markerRe);
+  if (markerMatch) {
+    let impressionText = text.slice(markerMatch.index);
+    const repeatRe = /;\s*(?:Osseous|Joint|Lateral|Medial|Spring|Peroneal|Achilles|Plantar|Sinus|Soft\s+tissue|Tendon|Ligament|Cartilage|Bone|Muscle|Vascular|Neurovascular)/i;
+    const repeatMatch = impressionText.match(repeatRe);
+    if (repeatMatch) {
+      impressionText = impressionText.slice(0, repeatMatch.index);
+    }
+    return impressionText.trim();
   }
 
-  // Also strip a trailing semicolon and any remaining narrative after it
-  // if the text after ; is longer than 100 chars (likely narrative, not part of impression)
-  const trailingSemi = impressionText.lastIndexOf(';');
-  if (trailingSemi > 0 && trailingSemi > impressionText.length - 200) {
-    const afterSemi = impressionText.slice(trailingSemi + 1).trim();
-    if (afterSemi.length > 100) {
-      // Check if it looks like narrative (contains organ/structure keywords)
-      if (/^(Osseous|Joint|Lateral|Medial|Spring|Peroneal|Achilles|Plantar|Sinus|Soft\s+tissue|Tendon|Ligament|Cartilage|Bone|Muscle|Vascular|Neurovascular|There\s+is|No\s+evidence|The\s+)/i.test(afterSemi)) {
-        impressionText = impressionText.slice(0, trailingSemi);
+  // Pattern 2: no explicit header, but numbered impression list after narrative
+  const numberedStart = text.search(/\(1\)\s/i);
+  if (numberedStart > 50) {
+    let semiPos = text.lastIndexOf(';', numberedStart);
+    if (semiPos < 0) semiPos = 0;
+    const beforeSemi = text.slice(0, semiPos);
+    const organRe = /(?:Osseous|Joint spaces|Lateral collateral|Medial collateral|Spring ligament|Peroneal|Achilles|Plantar|Sinus tars|Soft tissue|Tendon|Ligament|Cartilage|Bone|Muscle|Vascular|Neurovascular)/i;
+    if (organRe.test(beforeSemi)) {
+      const afterNumbered = text.slice(numberedStart);
+      const numCount = (afterNumbered.match(/\(\d+\)\s/g) || []).length;
+      if (numCount >= 3) {
+        return text.slice(semiPos > 0 ? semiPos + 1 : 0).trim();
       }
     }
   }
 
-  return impressionText.trim();
+  return text;
 };
 
 const sanitizeVisits = (visits, patientName) => {
@@ -733,7 +731,7 @@ B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIE
    - If the document says "Independent Medical Examination" or "IME" → practice_setting: "Independent Medical Examination"
    - If the document says "Consultation Report" or "Consultative Evaluation" → practice_setting: "[Facility Name] - Consultation Report" if part of a hospital record, or "Consultation Report" if standalone
    - If the document says "Chart Review" or "Record Review" → practice_setting: "Chart Review"
-   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "[Facility Name] - Radiology Report" if part of a hospital record, or "Radiology Report" if standalone
+   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: the imaging facility name (e.g., "SimonMed NV Northwest"). Do NOT append "Radiology Report" to the facility name. If standalone with no facility name, use "Radiology Report".
    - If the document says "Narrative Report" or "Narrative Summary" → practice_setting: "Narrative Report"
    - If the document says "Agreed Medical Examination" or "AME" → practice_setting: "Agreed Medical Examination"
    - If the document says "Qualified Medical Evaluation" or "QME" → practice_setting: "Qualified Medical Evaluation"
@@ -752,6 +750,18 @@ B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIE
    - treatment_plan: the expert's recommendations or causation opinions
    - imaging_findings: any imaging reviewed or interpreted by the expert
    - visit_date: the date the report was authored or the examination was performed
+
+   RADIOLOGY REPORTS — DEDICATED HANDLING (overrides the generic fields above):
+   When the document is a radiology/imaging report (MRI, CT, X-ray, ultrasound, etc.):
+   - practice_setting: the imaging facility name only (e.g., "SimonMed NV Northwest", "Radiology Partners - Las Vegas"). Do NOT append "Radiology Report" — the facility name alone identifies the encounter type.
+   - rendering_provider: the reading radiologist's name and credential (e.g., "Scott Greenwald, M.D."). Do NOT include the word "Radiologist" — the credential (M.D., D.O., etc.) is sufficient.
+   - chief_complaint: the imaging study type and body part (e.g., "MRI right ankle without contrast", "CT left wrist", "X-ray lumbar spine 2 views")
+   - imaging_findings: the radiologist's final IMPRESSION or CONCLUSION section ONLY. This is the numbered or bulleted list of diagnostic conclusions at the end of the report. Do NOT include the narrative FINDINGS section — the organ-by-organ descriptions, measurements, and technical observations must be omitted. If the report has no explicit IMPRESSION/CONCLUSION section, summarize the key diagnostic conclusions in 2-3 sentences.
+   - impression_diagnosis: leave empty (the imaging_findings field captures the radiologist's conclusions)
+   - hpi_summary: leave empty
+   - treatment_plan: leave empty
+   - physical_exam_findings: leave empty
+   - visit_date: the date the study was performed or the report was dictated
 
 C) POLICE REPORTS:
    Treat as a single entry with:
@@ -804,7 +814,7 @@ The practice_setting for each entry MUST reflect the actual document type:
   - "Discharge Summary" or "Discharge Report" for discharge documents
   - "Hospitalist Progress Note" for inpatient progress notes
   - "[Full Hospital Name] - Emergency Department" for ED visit notes — ALWAYS include the specific hospital name from the document (e.g. "Sunrise Hospital and Medical Center - Emergency Department", "Centennial Hills Hospital Emergency Department"). NEVER just "Emergency Department" alone.
-  - "Radiology Report" for radiologist-signed imaging reports
+  - The imaging facility name (e.g., "SimonMed NV Northwest") for radiologist-signed imaging reports — NOT "Radiology Report"
 
 CONTENT ISOLATION — ABSOLUTE RULE:
 When extracting any single visit/document, you MUST use ONLY the content within that specific document.
@@ -865,7 +875,9 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
    - For operative notes: intraoperative findings, not pre-op exam
    - For consultation notes: the consulting physician's own exam findings only
 
-7. Imaging findings — ONLY if performed or interpreted in THIS document. Do NOT re-report imaging from a co-occurring radiology report.
+7. Imaging findings:
+   - For RADIOLOGY REPORTS: the radiologist's final IMPRESSION/CONCLUSION section ONLY — the numbered diagnostic conclusions at the end of the report. NEVER include the narrative FINDINGS section (organ-by-organ descriptions, measurements, technical observations). If no explicit IMPRESSION section exists, summarize the key diagnostic conclusions in 2-3 sentences.
+   - For NON-RADIOLOGY visits: ONLY if imaging was performed or interpreted in THIS document. Do NOT re-report imaging from a co-occurring radiology report.
 8. Lab findings — return empty string always. Laboratory panels are captured separately and are not needed in the summary.
 9. Impression/diagnosis — from THIS document's own conclusions. ICD-10 codes inline in parentheses.
 10. Treatment Plan — CONCISE, 2-4 items max:
@@ -885,7 +897,7 @@ CRITICAL FORMATTING RULES:
 
 CRITICAL EXTRACTION RULES:
 (1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
-(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports with their own header block (facility, exam type, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry. The radiologist who signed it is the rendering_provider. Do NOT collapse into the ED note. If the knownVisitsChecklist includes a radiologist entry, you MUST produce a separate entry for that radiologist.
+(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports with their own header block (facility, exam type, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry. The radiologist who signed it is the rendering_provider (name + credential, no "Radiologist" label). The practice_setting is the imaging facility name. The imaging_findings field gets ONLY the IMPRESSION/CONCLUSION section, never the narrative FINDINGS. Do NOT collapse into the ED note. If the knownVisitsChecklist includes a radiologist entry, you MUST produce a separate entry for that radiologist.
 (2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists in THIS document.
 (3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
 (4) NEVER hallucinate — only use information explicitly written in THIS document.
