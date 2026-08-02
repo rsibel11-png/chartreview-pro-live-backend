@@ -705,7 +705,7 @@ B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIE
    - physical_exam_findings: examination findings if the expert physically examined the patient, otherwise leave empty
    - impression_diagnosis: the expert's opinions, conclusions, and diagnoses
    - treatment_plan: the expert's recommendations or causation opinions
-   - imaging_findings: any imaging reviewed or interpreted by the expert
+   - imaging_findings: for radiology/imaging reports, this is the ONLY field that matters most here — extract ONLY the radiologist's final IMPRESSION/CONCLUSION (the short numbered summary, usually at the end under a heading like "IMPRESSION:"). Do NOT include the detailed narrative FINDINGS section (organ-by-organ or structure-by-structure descriptions). For non-radiology expert reports that merely reference imaging, a brief 1-sentence mention of what was reviewed is sufficient.
    - visit_date: the date the report was authored or the examination was performed
 
 C) POLICE REPORTS:
@@ -820,7 +820,7 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
    - For operative notes: intraoperative findings, not pre-op exam
    - For consultation notes: the consulting physician's own exam findings only
 
-7. Imaging findings — ONLY if performed or interpreted in THIS document. Do NOT re-report imaging from a co-occurring radiology report.
+7. Imaging findings — ONLY the radiologist's final IMPRESSION/CONCLUSION section (the short numbered summary near the end of the report, typically under "IMPRESSION:"). Do NOT include the detailed narrative FINDINGS text (osseous structures, ligaments, tendons, soft tissues, organ-by-organ descriptions, etc.) — omit that narrative entirely, even if it is long. If the report has no distinct IMPRESSION section, write 1-2 sentences summarizing only the clinically significant conclusions. Do NOT re-report imaging from a co-occurring radiology report.
 8. Lab findings — return empty string always. Laboratory panels are captured separately and are not needed in the summary.
 9. Impression/diagnosis — from THIS document's own conclusions. ICD-10 codes inline in parentheses.
 10. Treatment Plan — CONCISE, 2-4 items max:
