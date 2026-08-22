@@ -52,6 +52,10 @@ jobs:
             "chartreview-pro-prod-redactDocumentWorker"
             "chartreview-pro-prod-redactCaseWorker"
             "chartreview-pro-prod-flattenPdf"
+            "chartreview-pro-prod-getUserCredits"
+            "chartreview-pro-prod-createCheckoutSession"
+            "chartreview-pro-prod-stripeWebhook"
+            "chartreview-pro-prod-deductCredits"
           )
           for FN in "${FUNCTIONS[@]}"; do
             echo "Deploying $FN..."
@@ -78,3 +82,4 @@ jobs:
             aws lambda wait function-updated --function-name "$FN" --region us-east-1
             echo "✅ $FN active"
           done
+
