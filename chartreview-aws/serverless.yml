@@ -20,6 +20,9 @@ provider:
     API_KEY: "ChartReview#2026$ProdKey!Rx"
     WORKER_FUNCTION_NAME: ${self:service}-${self:provider.stage}-processWorker
     AWS_ACCOUNT_ID: !Ref AWS::AccountId
+    USER_CREDITS_TABLE: chartreview-user-credits-${self:provider.stage}
+    STRIPE_SECRET_KEY: ${env:STRIPE_SECRET_KEY, ''}
+    STRIPE_WEBHOOK_SECRET: ${env:STRIPE_WEBHOOK_SECRET, ''}
   iam:
     role:
       statements:
@@ -38,6 +41,7 @@ provider:
             - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-documents-${self:provider.stage}/index/*
             - arn:aws:dynamodb:${self:provider.region}:*:table/${self:service}-summaries-${self:provider.stage}/index/*
             - arn:aws:dynamodb:${self:provider.region}:*:table/chartreview-folder-pii-${self:provider.stage}
+            - arn:aws:dynamodb:${self:provider.region}:*:table/chartreview-user-credits-${self:provider.stage}
         - Effect: Allow
           Action:
             - s3:PutObject
@@ -440,6 +444,56 @@ functions:
       S3_BUCKET: chartreview-documents-prod
       API_KEY: ${env:API_KEY, 'ChartReview#2026$ProdKey!Rx'}
 
+
+  # ── STRIPE PAYMENTS ──
+  getUserCredits:
+    handler: src/handlers/stripe.getUserCredits
+    timeout: 10
+    events:
+      - http:
+          path: /stripe/credits
+          method: get
+          cors: true
+      - http:
+          path: /stripe/credits
+          method: options
+          cors: true
+
+  createCheckoutSession:
+    handler: src/handlers/stripe.createCheckoutSession
+    timeout: 30
+    events:
+      - http:
+          path: /stripe/checkout
+          method: post
+          cors: true
+      - http:
+          path: /stripe/checkout
+          method: options
+          cors: true
+
+  stripeWebhook:
+    handler: src/handlers/stripe.stripeWebhook
+    timeout: 30
+    events:
+      - http:
+          path: /stripe/webhook
+          method: post
+          cors: true
+
+  deductCredits:
+    handler: src/handlers/stripe.deductCredits
+    timeout: 10
+    events:
+      - http:
+          path: /stripe/deduct
+          method: post
+          cors: true
+      - http:
+          path: /stripe/deduct
+          method: options
+          cors: true
+
 resources:
   Resources:
     FolderPiiTable:
@@ -548,3 +602,4 @@ resources:
           path: /documents/{aws_document_id}/flatten
           method: options
           cors: true
+
