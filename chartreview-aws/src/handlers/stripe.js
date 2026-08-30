@@ -1,4 +1,5 @@
 // stripe.js — Stripe checkout + user credit management
+// Updated: 2026-08-30 — Pricing updated to match InPractice AI ($0.10–$0.05/page)
 // Updated: 2026-08-22 — Initial Stripe per-page payment integration
 // Uses Node 20 built-in fetch (no stripe SDK dependency needed)
 
@@ -16,11 +17,11 @@ const FREE_USERS = ['rsibel11@gmail.com'];
 
 // ── Tiered pricing (matches original PagePaymentDialog) ──────────────────────
 function getPricePerPage(pages) {
-  if (pages <= 100) return 0.60;
-  if (pages <= 1000) return 0.55;
-  if (pages <= 5000) return 0.50;
-  if (pages <= 10000) return 0.45;
-  return 0.40;
+  if (pages <= 1000) return 0.10;
+  if (pages <= 5000) return 0.09;
+  if (pages <= 20000) return 0.07;
+  if (pages <= 100000) return 0.06;
+  return 0.05;
 }
 
 // ── Helper: extract user email from API Gateway event ────────────────────────
