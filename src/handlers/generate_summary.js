@@ -1,9 +1,4 @@
-// Updated: 2026-07-27 — Fixed 3 bugs causing missing visits:
-//   (1) max_tokens 8000 → 64000 — prevents silent visit omission on dense clinical records
-//   (2) encounter_index fallback — runs inline Bedrock VI pre-pass when encounter_index is empty
-//   (3) runVerifyInline field name fix — summary visits use visit_date/rendering_provider, not date/provider
-//       + Added missing visit recovery — missingVisits are now extracted and inserted, not just logged
-// Base: deployed v2219 (has SOAP structural rescue + PPR handling)
+// Updated: 2026-08-30 — Restored to 24ea835 baseline + max_tokens 64k (known-good direct-deployed fix)
 // Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
 //   1. base44.integrations.Core.InvokeLLM({ file_urls, prompt, response_json_schema })
@@ -298,7 +293,7 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder, pageScope = nu
 const callBedrockText = async (textContent, prompt, schema, regionOrder) => {
   const bedrockPayload = {
     anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 64000,
+    max_tokens: 8000,
     system: EXTRACTION_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: [
       { type: 'text', text: `DOCUMENT TEXT:\n\`\`\`\n${textContent}\n\`\`\`` },
@@ -534,45 +529,6 @@ const deduplicateVisits = (visits) => {
 
 // correctEdVisitDates removed — replaced by step 3b service-date scan
 
-// Updated: 2026-08-02 — trim imaging_findings to final IMPRESSION/CONCLUSION only
-// Post-processing fix: strips narrative FINDINGS text from radiology reports,
-// keeping only the radiologist's final impression/conclusion section.
-// This is a CODE-LEVEL fix — no prompt changes (prompt changes caused date misreads).
-const trimImagingToImpression = (text) => {
-  if (!text || typeof text !== 'string' || text.length < 20) return text;
-
-  // Pattern 1: explicit IMPRESSION: or CONCLUSION: header
-  const markerRe = /\b(IMPRESSION|CONCLUSION)\s*[:\-]?\s*/i;
-  const markerMatch = text.match(markerRe);
-  if (markerMatch) {
-    let impressionText = text.slice(markerMatch.index);
-    const repeatRe = /;\s*(?:Osseous|Joint|Lateral|Medial|Spring|Peroneal|Achilles|Plantar|Sinus|Soft\s+tissue|Tendon|Ligament|Cartilage|Bone|Muscle|Vascular|Neurovascular)/i;
-    const repeatMatch = impressionText.match(repeatRe);
-    if (repeatMatch) {
-      impressionText = impressionText.slice(0, repeatMatch.index);
-    }
-    return impressionText.trim();
-  }
-
-  // Pattern 2: no explicit header, but numbered impression list after narrative
-  const numberedStart = text.search(/\(1\)\s/i);
-  if (numberedStart > 50) {
-    let semiPos = text.lastIndexOf(';', numberedStart);
-    if (semiPos < 0) semiPos = 0;
-    const beforeSemi = text.slice(0, semiPos);
-    const organRe = /(?:Osseous|Joint spaces|Lateral collateral|Medial collateral|Spring ligament|Peroneal|Achilles|Plantar|Sinus tars|Soft tissue|Tendon|Ligament|Cartilage|Bone|Muscle|Vascular|Neurovascular)/i;
-    if (organRe.test(beforeSemi)) {
-      const afterNumbered = text.slice(numberedStart);
-      const numCount = (afterNumbered.match(/\(\d+\)\s/g) || []).length;
-      if (numCount >= 3) {
-        return text.slice(semiPos > 0 ? semiPos + 1 : 0).trim();
-      }
-    }
-  }
-
-  return text;
-};
-
 const sanitizeVisits = (visits, patientName) => {
   const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
   const validProgressions = ['improved','same','worse','not_documented'];
@@ -585,10 +541,6 @@ const sanitizeVisits = (visits, patientName) => {
       else if (typeof val !== 'string') clean[field] = String(val);
     });
     if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
-    // Trim imaging_findings to final IMPRESSION/CONCLUSION for radiology reports
-    if (clean.imaging_findings) {
-      clean.imaging_findings = trimImagingToImpression(clean.imaging_findings);
-    }
     if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
 
     // Scrub military-time-as-year artifacts: model sometimes writes "10/08/2033" when
@@ -612,14 +564,165 @@ const sanitizeVisits = (visits, patientName) => {
     if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
       clean.practice_setting = '';
     }
+
+    // Updated: 2026-08-31 — strip street address from practice_setting.
+    // The LLM sometimes pulls the full letterhead address (e.g. "Hand Center of
+    // Nevada - 8585 S Eastern Ave") instead of just the facility name. Strip any
+    // trailing "<number> <street words> <street-type>" segment, with its leading
+    // separator (dash/comma), plus any trailing suite/city/state/zip that follows it.
+    // Only matches when a digit + street-type keyword is present — leaves non-address
+    // suffixes like "- Independent Medical Examination" or "- DHPT Sahara" untouched.
+    if (clean.practice_setting) {
+      const streetTypeRe = /\b(Ave|Avenue|St|Street|Blvd|Boulevard|Dr|Drive|Rd|Road|Way|Ln|Lane|Ct|Court|Pl|Place|Pkwy|Parkway|Hwy|Highway|Cir|Circle|Ter|Terrace)\b/i;
+      const addressStripRe = /\s*[-–,]?\s*\d+[\d\s.,'#A-Za-z]*?\b(?:Ave|Avenue|St|Street|Blvd|Boulevard|Dr|Drive|Rd|Road|Way|Ln|Lane|Ct|Court|Pl|Place|Pkwy|Parkway|Hwy|Highway|Cir|Circle|Ter|Terrace)\.?\s*(?:,?\s*(?:Suite|Ste|#)\s*\w+)?\s*(?:,\s*[A-Za-z\s]+,?\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)?\s*$/i;
+      if (streetTypeRe.test(clean.practice_setting) && addressStripRe.test(clean.practice_setting)) {
+        const before = clean.practice_setting;
+        clean.practice_setting = clean.practice_setting.replace(addressStripRe, '').trim();
+        if (before !== clean.practice_setting) {
+          console.log('sanitizeVisits: stripped street address from practice_setting [' + before + '] -> [' + clean.practice_setting + ']');
+        }
+      }
+    }
+
     return clean;
   }).filter(visit => {
+    // Updated: 2026-08-31 — admin check moved BEFORE SOAP rescue
     // Code-level safety net: drop non-clinical document types even if the model extracted them
     const setting = (visit.practice_setting || '').toLowerCase();
     const provider = (visit.rendering_provider || '').toLowerCase();
+    const hpi = (visit.hpi_summary || '').toLowerCase();
+
+    // Updated: 2026-08-31 — content-based override: a Work Status Form mislabeled
+    // as "C-4" by the LLM (e.g. "Form C-4" boilerplate bleeding from an adjacent
+    // page/footer) must NOT get the C-4 exemption. A genuine C-4 documents
+    // claim/injury/employer details; a Work Status Form is short MMI/return-to-work
+    // checkbox language. Content wins over whatever label the LLM assigned.
+    const diagnosisTextC4 = (visit.impression_diagnosis || '').toLowerCase();
+    const treatmentTextC4 = (visit.treatment_plan || '').toLowerCase();
+    const combinedTextC4 = hpi + ' ' + diagnosisTextC4 + ' ' + treatmentTextC4;
+    const hasWorkStatusTemplateC4 =
+      (combinedTextC4.includes('not at maximum medical improvement') ||
+       combinedTextC4.includes('maximum medical improvement')) &&
+      (combinedTextC4.includes('unable to work') ||
+       combinedTextC4.includes('next appointment') ||
+       combinedTextC4.includes('follow-up appointment') ||
+       combinedTextC4.includes('return to work'));
+    const hasGenuineC4Markers =
+      combinedTextC4.includes("employee's claim for compensation") ||
+      combinedTextC4.includes('report of initial treatment') ||
+      combinedTextC4.includes('claim number') ||
+      combinedTextC4.includes('date of injury') ||
+      combinedTextC4.includes('sustained an injury') ||
+      combinedTextC4.includes('average weekly wage') ||
+      combinedTextC4.includes('employer');
+    const isMislabeledWorkStatus = hasWorkStatusTemplateC4 && !hasGenuineC4Markers;
+    if (isMislabeledWorkStatus) {
+      console.log('sanitizeVisits: C-4 label override — content matches Work Status Form template, not a genuine C-4 (' + (visit.visit_date || '') + ' ' + (visit.rendering_provider || '') + ')');
+    }
+
+    // C-4 forms are ALWAYS clinical — exempt before any other check
+    // (unless content-based check above determined this is a mislabeled Work Status Form)
+    const isC4 = !isMislabeledWorkStatus && (setting.includes('c-4') || setting.includes('c4 ') ||
+                 setting.includes("workers' compensation report") ||
+                 (visit.visit_type || '').toLowerCase().includes('c-4'));
+
+    // ── Admin document detection (runs BEFORE SOAP rescue) ───────────────
+    // Admin forms often contain narrative text (HPI about what's being authorized,
+    // treatment plans listing what's requested) but are NOT clinical encounters.
+    // Check admin patterns FIRST so they get filtered even with narrative content.
+    const isPPR = setting.includes("physician's progress report") ||
+                  setting.includes("physicians progress report") ||
+                  setting.includes("physician progress report") ||
+                  setting === 'ppr';
+    const isCodingSummary = setting.includes('coding summary') ||
+                            setting.includes('coding abstract') ||
+                            provider.includes('abstractor') ||
+                            provider.includes('cacuser') ||
+                            provider.includes('coder:');
+    const isAdminOnly = !isC4 && (
+                        setting.includes('appointment reminder') ||
+                        setting.includes('face sheet') ||
+                        setting.includes('authorization request') ||
+                        setting.includes('surgery authorization') ||
+                        setting.includes('surgical authorization') ||
+                        setting.includes('authorization for operative') ||
+                        setting.includes('consent for') ||
+                        setting.includes('surgical consent') ||
+                        setting.includes('informed consent') ||
+                        setting.includes('fax cover') ||
+                        setting.includes('work status form') ||
+                        setting.includes('work status') ||
+                        setting.includes('diagnostic test request') ||
+                        setting.includes('appointment rescheduling') ||
+                        setting.includes('rescheduling notice') ||
+                        setting.includes('written order') ||
+                        setting.includes('post-operative written order') ||
+                        setting.includes('dvt risk assessment') ||
+                        setting.includes('treatment prescription') ||
+                        // Also check HPI for admin keywords the LLM put in HPI instead of setting
+                        (hpi.includes('authorization request submitted') && !isC4) ||
+                        (hpi.includes('authorization requested for') && !isC4) ||
+                        (hpi.includes('surgery authorization requested') && !isC4) ||
+                        (hpi.includes('work status form') && !isC4));
+
+    // Provider = facility detection: admin forms where no real provider signed,
+    // the LLM just put the facility name in both fields (e.g. "Hand Center of Nevada")
+    const providerEqualsFacility = !isC4 && provider.length > 0 &&
+                     provider === setting &&
+                     !provider.includes('dr') && !provider.includes('md') &&
+                     !provider.includes('do') && !provider.includes('pa') &&
+                     !provider.includes('np') && !provider.includes('pt') &&
+                     !provider.includes('ot') && !provider.includes('dc') &&
+                     !provider.includes('dpt') && !provider.includes('otr');
+
+    // HPI template check: Work Status Forms have a distinctive template pattern
+    const isWorkStatusTemplate = !isC4 && (
+      (hpi.includes('patient evaluated at') && hpi.includes('not at maximum medical improvement')) ||
+      (hpi.includes('patient evaluated') && hpi.includes('status:') && hpi.includes('follow-up appointment')));
+
+    const isAdmin = !isC4 && (isPPR || isCodingSummary || isAdminOnly || isMislabeledWorkStatus || (providerEqualsFacility && isWorkStatusTemplate));
+
+    if (isAdmin) {
+      const reason = isPPR ? 'PPR' : isCodingSummary ? 'coding summary' :
+                     isAdminOnly ? 'admin pattern' : isMislabeledWorkStatus ? 'mislabeled C-4 (actually work status form)' :
+                     'provider=facility+work status template';
+      console.log('sanitizeVisits: dropping non-clinical entry [' + (visit.practice_setting || '') + '] (' + (visit.visit_date || '') + ' ' + (visit.rendering_provider || '') + ') — reason: ' + reason);
+      return false;
+    }
+
+    // ── Cross-patient name validation (2026-08-31) ─────────────────────────
+    // Sometimes medical records contain misfiled pages from a DIFFERENT patient
+    // (e.g. a visit for "Jason Sullivan" mixed into a "Sagrario Concepcion" file).
+    // The LLM extracts them as visits because they contain real clinical content.
+    // Drop visits whose HPI explicitly names a different patient by full name.
+    // Uses the ORIGINAL (non-lowercased) HPI text for proper capitalization matching.
+    if (patientName) {
+      const rawHpi = visit.hpi_summary || '';
+      const patientTokens = patientName.toLowerCase().split(/\s+/).filter(t => t.length > 1);
+
+      // Match "FirstName LastName" at start of HPI or after a sentence boundary,
+      // followed by typical clinical intro patterns:
+      //   "Jason Sullivan is a 53-year-old..."
+      //   "Jason Sullivan, 53-year-old..."
+      //   "Jason Sullivan presents for..."
+      //   "Jason Sullivan returns for..."
+      //   "Jason Sullivan, a 41-year-old..."
+      const namePattern = /(?:^|\.\s+)(([A-Z][a-z]+)\s+([A-Z][a-z]+))(?:\s+is\s+a\s+\d|\s*,\s*\d|\s*,\s*a\s+\d|\s+presents|\s+returns)/;
+      const nameMatchRaw = rawHpi.match(namePattern);
+      if (nameMatchRaw) {
+        const foundFirstMatch = nameMatchRaw[2].toLowerCase();
+        const foundLastMatch = nameMatchRaw[3].toLowerCase();
+        // Patient match if ANY token matches first or last (handles nicknames, maiden names)
+        const isPatientName = patientTokens.some(t => t === foundLastMatch || t === foundFirstMatch);
+        if (!isPatientName) {
+          console.log('sanitizeVisits: cross-patient drop — HPI names [' + foundFirstMatch + ' ' + foundLastMatch + '] but patient is [' + patientName + '] (' + (visit.visit_date || '') + ')');
+          return false;
+        }
+      }
+    }
 
     // ── Structural SOAP test (LLM-label-independent) ─────────────────────
-    // A true PPR / admin form has no narrative content.
+    // Only reached for NON-admin visits. A true PPR / admin form was already filtered above.
     // Any visit with substantive SOAP fields is a real clinical encounter
     // regardless of what the LLM put in practice_setting.
     const soapScore =
@@ -631,54 +734,50 @@ const sanitizeVisits = (visits, patientName) => {
       // Has real clinical narrative — keep unconditionally, fix mislabeled setting
       const mislabeled = /physician['s]* progress report|ppr/i.test(visit.practice_setting || '');
       if (mislabeled) {
-        console.log(`sanitizeVisits: structural rescue — SOAP score ${soapScore}, fixing mislabeled setting [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
+        console.log('sanitizeVisits: structural rescue — SOAP score ' + soapScore + ', fixing mislabeled setting [' + (visit.practice_setting || '') + '] (' + (visit.visit_date || '') + ' ' + (visit.rendering_provider || '') + ')');
         visit.practice_setting = (visit.practice_setting || '')
           .replace(/physician['s]* progress report/gi, '')
-          .replace(/ppr/gi, '')
+          .replace(/ppr/gi, '')
           .trim()
-          .replace(/^[-–—,\s]+|[-–—,\s]+$/g, '')
+          .replace(/^[-\u2013\u2014,\s]+|[-\u2013\u2014,\s]+$/g, '')
           .trim() || 'Office Visit';
       }
       return true;
     }
 
-    const isPPR = setting.includes("physician's progress report") ||
-                  setting.includes("physicians progress report") ||
-                  setting.includes("physician progress report") ||
-                  setting === 'ppr';
-    const isCodingSummary = setting.includes('coding summary') ||
-                            setting.includes('coding abstract') ||
-                            provider.includes('abstractor') ||
-                            provider.includes('cacuser') ||
-                            provider.includes('coder:');
-    // C-4 forms are ALWAYS clinical — exempt before any other check
-    const isC4 = setting.includes('c-4') || setting.includes('c4 ') ||
-                 setting.includes("workers' compensation report") ||
-                 (visit.visit_type || '').toLowerCase().includes('c-4');
-    const isAdminOnly = !isC4 && (
-                        setting.includes('appointment reminder') ||
-                        setting.includes('face sheet') ||
-                        setting.includes('authorization request') ||
-                        setting.includes('fax cover') ||
-                        setting.includes('authorization for operative') ||
-                        setting.includes('consent for') ||
-                        setting.includes('surgical consent') ||
-                        setting.includes('informed consent'));
-    const skip = !isC4 && (isPPR || isCodingSummary || isAdminOnly);
-    if (skip) console.log(`sanitizeVisits: dropping non-clinical entry [${visit.practice_setting}] (${visit.visit_date} ${visit.rendering_provider})`);
-    return !skip;
+    // Low SOAP score + not admin — keep
+    return true;
   });
 };
 
 const enforceOneC4 = (visitList) => {
+  // Updated: 2026-08-31 — only dedup C-4s on the SAME date, not across all dates
+  // A patient can have multiple C-4 forms for different injuries (e.g. initial C-4
+  // for wrist injury 2021, subsequent C-4 for thumb surgery 2025). Only dedup
+  // when multiple C-4s appear for the exact same visit_date.
   const c4s = visitList.filter(v => (v.practice_setting || '').toLowerCase().includes('c-4'));
   if (c4s.length <= 1) return visitList;
-  const sorted = [...c4s].sort((a, b) => (a.visit_date || '').localeCompare(b.visit_date || ''));
-  const keepId = sorted[0];
-  return visitList.filter(v => {
-    if ((v.practice_setting || '').toLowerCase().includes('c-4')) return v === keepId;
-    return true;
-  });
+
+  // Group C-4s by date
+  const c4ByDate = {};
+  for (const v of c4s) {
+    const d = v.visit_date || '';
+    if (!c4ByDate[d]) c4ByDate[d] = [];
+    c4ByDate[d].push(v);
+  }
+
+  // For each date with multiple C-4s, keep only the first (by original order)
+  const dropSet = new Set();
+  for (const [date, group] of Object.entries(c4ByDate)) {
+    if (group.length > 1) {
+      console.log(`enforceOneC4: dedup ${group.length} C-4 entries on ${date}, keeping first`);
+      for (let i = 1; i < group.length; i++) {
+        dropSet.add(group[i]);
+      }
+    }
+  }
+
+  return visitList.filter(v => !dropSet.has(v));
 };
 
 
@@ -689,6 +788,8 @@ const EXTRACTION_SYSTEM_PROMPT = `You are a forensic medical document analyst sp
 
 Your operating principles:
 1. DOCUMENT BOUNDARIES ARE ABSOLUTE. Each document in a medical record is a discrete, bounded unit. You extract information from the document you are currently reading — never from an adjacent, co-occurring, or same-date document. If you find yourself writing language that does not appear in the specific document you are extracting, stop and delete it.
+   C-4 EXCEPTION: C-4 forms are often partially illegible scanned images. For C-4 forms ONLY, you MAY cross-reference a same-date office visit from the same document set to fill in illegible fields (provider name, diagnosis, ICD-10 codes). This is the ONLY exception to the document boundary rule.
+   C-4 MISLABELING WARNING: A genuine C-4 form is titled "FORM C-4" / "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT" and documents claim number, date of injury, employer, and accident description. Some pages carry "Form C-4" boilerplate text in a header/footer (e.g. "Complete and attach Release of Information (Form C-4A)...") even though the page itself is a Work Status Form, Progress Report, or other document. Do NOT set practice_setting to "C-4" or "Workers' Compensation Report" unless the page is ACTUALLY the claim/injury form itself. A page whose content is "not at maximum medical improvement... unable to work [date] to [date]... next appointment [date]" is a Work Status Form — label it as such, never as C-4, even if "Form C-4" boilerplate text appears in a footer.
 2. YOU DO NOT INFER. You report only what is explicitly written. If a field is not documented, return an empty string. A missing value is always better than a hallucinated one.
 3. YOU DO NOT MERGE. Two documents on the same date from the same provider are two documents. A consultation note and an operative note are different documents. A History & Physical and a Discharge Summary are different documents. You extract each separately, completely, and independently.
 4. YOU ARE CONSERVATIVE WITH CLINICAL LANGUAGE. Do not paraphrase in ways that change meaning. Do not upgrade or downgrade clinical severity. Report findings as documented.
@@ -725,13 +826,14 @@ A) OFFICE VISIT / CLINICAL NOTES (standard patient visit records):
     - If from "Community Hospital Emergency Department", use "Community Hospital Emergency Department"
     - For ED notes: ALWAYS use "[Hospital Name] - Emergency Department" or "[Hospital Name] Emergency Department" — NEVER just "Emergency Department" alone
     - NEVER label as simply "Office Visit" or "Clinic" — always include the specific facility/provider name from the document header, letterhead, or provider information section
+    - NEVER include the street address, suite number, city, state, or zip code in practice_setting — ONLY the facility/organization name. E.g. if the letterhead reads "Hand Center of Nevada, 8585 S Eastern Ave, Las Vegas, NV 89123", practice_setting should be "Hand Center of Nevada" — NOT "Hand Center of Nevada - 8585 S Eastern Ave" or any variant including the address.
 
 B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIEWS / CONSULTATIONS / RADIOLOGY REPORTS:
    Use the EXACT document type as labeled in the document itself. Do NOT relabel or generalize — use the specific type stated. Examples:
    - If the document says "Independent Medical Examination" or "IME" → practice_setting: "Independent Medical Examination"
    - If the document says "Consultation Report" or "Consultative Evaluation" → practice_setting: "[Facility Name] - Consultation Report" if part of a hospital record, or "Consultation Report" if standalone
    - If the document says "Chart Review" or "Record Review" → practice_setting: "Chart Review"
-   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: the imaging facility name (e.g., "SimonMed NV Northwest"). Do NOT append "Radiology Report" to the facility name. If standalone with no facility name, use "Radiology Report".
+   - If the document says "Radiology Report", "MRI Report", "X-Ray Report", "CT Report" → practice_setting: "[Facility Name] - Radiology Report" if part of a hospital record, or "Radiology Report" if standalone
    - If the document says "Narrative Report" or "Narrative Summary" → practice_setting: "Narrative Report"
    - If the document says "Agreed Medical Examination" or "AME" → practice_setting: "Agreed Medical Examination"
    - If the document says "Qualified Medical Evaluation" or "QME" → practice_setting: "Qualified Medical Evaluation"
@@ -750,18 +852,6 @@ B) EXPERT MEDICAL REPORTS / INDEPENDENT MEDICAL EXAMINATIONS (IME) / CHART REVIE
    - treatment_plan: the expert's recommendations or causation opinions
    - imaging_findings: any imaging reviewed or interpreted by the expert
    - visit_date: the date the report was authored or the examination was performed
-
-   RADIOLOGY REPORTS — DEDICATED HANDLING (overrides the generic fields above):
-   When the document is a radiology/imaging report (MRI, CT, X-ray, ultrasound, etc.):
-   - practice_setting: the imaging facility name only (e.g., "SimonMed NV Northwest", "Radiology Partners - Las Vegas"). Do NOT append "Radiology Report" — the facility name alone identifies the encounter type.
-   - rendering_provider: the reading radiologist's name and credential (e.g., "Scott Greenwald, M.D."). Do NOT include the word "Radiologist" — the credential (M.D., D.O., etc.) is sufficient.
-   - chief_complaint: the imaging study type and body part (e.g., "MRI right ankle without contrast", "CT left wrist", "X-ray lumbar spine 2 views")
-   - imaging_findings: the radiologist's final IMPRESSION or CONCLUSION section ONLY. This is the numbered or bulleted list of diagnostic conclusions at the end of the report. Do NOT include the narrative FINDINGS section — the organ-by-organ descriptions, measurements, and technical observations must be omitted. If the report has no explicit IMPRESSION/CONCLUSION section, summarize the key diagnostic conclusions in 2-3 sentences.
-   - impression_diagnosis: leave empty (the imaging_findings field captures the radiologist's conclusions)
-   - hpi_summary: leave empty
-   - treatment_plan: leave empty
-   - physical_exam_findings: leave empty
-   - visit_date: the date the study was performed or the report was dictated
 
 C) POLICE REPORTS:
    Treat as a single entry with:
@@ -797,10 +887,10 @@ E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
     - chief_complaint: leave empty
     - physical_exam_findings: leave empty
     - treatment_plan: leave empty
-    - CROSS-REFERENCE: If the C-4 date matches an office visit in the same document set, use that visit's rendering provider and/or diagnosis to fill in any illegible C-4 fields. Explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit").
-    - ORDERING: The C-4 entry must use the same visit_date as the corresponding office visit so it appears together in chronological order. In the visits array, place the C-4 entry BEFORE the regular office visit entry of the same date.
+    - CROSS-REFERENCE: This is OPTIONAL and applies ONLY if a genuinely separate, already-documented office visit ALSO exists in the same document set on the C-4's exact date. If such a document exists, you may use its rendering provider and/or diagnosis to fill in illegible C-4 fields, and explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit"). Do NOT invent, synthesize, or backfill a same-date office visit entry that does not exist in the source documents — if the C-4 form is the ONLY document for that date, extract ONLY the C-4 entry and leave any illegible fields as-is (or "illegible").
+    - ORDERING: IF a genuinely separate, distinctly-documented office visit ALSO exists for the same date as the C-4 (i.e., the source contains a separate office note, not just the C-4 form itself), place the C-4 entry BEFORE that office visit entry in the visits array. If NO separate office visit document exists for that date, the C-4 is a standalone entry — do NOT create a companion "Office Visit" entry just to pair with it.
 
-SAME-DATE DOCUMENT ISOLATION — ABSOLUTE RULE:
+SAME-DATE DOCUMENT ISOLATION — ABSOLUTE RULE (C-4 EXCEPTION: see above — C-4 forms may cross-reference same-date office visits for illegible fields):
 A single calendar date can contain MULTIPLE DISTINCT DOCUMENTS that are each their own separate clinical encounter:
 - A Consultation Report and an Operative Report on the same date are TWO separate visits.
 - A History & Physical (H&P) and a Discharge Summary on the same date are TWO separate visits.
@@ -814,9 +904,9 @@ The practice_setting for each entry MUST reflect the actual document type:
   - "Discharge Summary" or "Discharge Report" for discharge documents
   - "Hospitalist Progress Note" for inpatient progress notes
   - "[Full Hospital Name] - Emergency Department" for ED visit notes — ALWAYS include the specific hospital name from the document (e.g. "Sunrise Hospital and Medical Center - Emergency Department", "Centennial Hills Hospital Emergency Department"). NEVER just "Emergency Department" alone.
-  - The imaging facility name (e.g., "SimonMed NV Northwest") for radiologist-signed imaging reports — NOT "Radiology Report"
+  - "Radiology Report" for radiologist-signed imaging reports
 
-CONTENT ISOLATION — ABSOLUTE RULE:
+CONTENT ISOLATION — ABSOLUTE RULE (C-4 EXCEPTION: C-4 forms may import provider/diagnosis from same-date office visits):
 When extracting any single visit/document, you MUST use ONLY the content within that specific document.
 - A Consultation Report's HPI must come ONLY from the consultation document — NOT from the operative note, NOT from the ED note, NOT from any other same-date document.
 - An Operative Report's HPI must come ONLY from the operative note itself.
@@ -866,6 +956,7 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
    - Mechanism of injury (brief, first visit only)
    - Whether symptoms are improved, same, or worse
    - CRITICAL: Only use content from THIS document. Do NOT import language from a same-date consult, operative note, ED note, or any other document.
+   - C-4 EXCEPTION: For C-4 forms only, you may import rendering_provider, impression_diagnosis, and icd10_codes from a same-date office visit when the C-4 form is illegible.
    - Keep to 2-3 sentences maximum. Distill only what is clinically material.
 
 6. Physical Examination Findings — SUMMARIZE KEY PERTINENT POSITIVES ONLY, FROM THIS DOCUMENT:
@@ -875,9 +966,7 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
    - For operative notes: intraoperative findings, not pre-op exam
    - For consultation notes: the consulting physician's own exam findings only
 
-7. Imaging findings:
-   - For RADIOLOGY REPORTS: the radiologist's final IMPRESSION/CONCLUSION section ONLY — the numbered diagnostic conclusions at the end of the report. NEVER include the narrative FINDINGS section (organ-by-organ descriptions, measurements, technical observations). If no explicit IMPRESSION section exists, summarize the key diagnostic conclusions in 2-3 sentences.
-   - For NON-RADIOLOGY visits: ONLY if imaging was performed or interpreted in THIS document. Do NOT re-report imaging from a co-occurring radiology report.
+7. Imaging findings — ONLY if performed or interpreted in THIS document. Do NOT re-report imaging from a co-occurring radiology report.
 8. Lab findings — return empty string always. Laboratory panels are captured separately and are not needed in the summary.
 9. Impression/diagnosis — from THIS document's own conclusions. ICD-10 codes inline in parentheses.
 10. Treatment Plan — CONCISE, 2-4 items max:
@@ -897,7 +986,7 @@ CRITICAL FORMATTING RULES:
 
 CRITICAL EXTRACTION RULES:
 (1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
-(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports with their own header block (facility, exam type, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry. The radiologist who signed it is the rendering_provider (name + credential, no "Radiologist" label). The practice_setting is the imaging facility name. The imaging_findings field gets ONLY the IMPRESSION/CONCLUSION section, never the narrative FINDINGS. Do NOT collapse into the ED note. If the knownVisitsChecklist includes a radiologist entry, you MUST produce a separate entry for that radiologist.
+(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports with their own header block (facility, exam type, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry. The radiologist who signed it is the rendering_provider. Do NOT collapse into the ED note. If the knownVisitsChecklist includes a radiologist entry, you MUST produce a separate entry for that radiologist.
 (2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists in THIS document.
 (3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
 (4) NEVER hallucinate — only use information explicitly written in THIS document.
@@ -908,6 +997,12 @@ CRITICAL EXTRACTION RULES:
 (9) For PT visits: practice_setting should be the full facility name. Do NOT abbreviate to "PT" or "Physical Therapy". Consistent naming is critical.
 (10) LABORATORY REPORTS: Do NOT extract a standalone laboratory report as a visit. Lab panels are not clinical encounters. If you see a document that is solely a laboratory result printout (CBC, BMP, CMP, urinalysis panels, etc.), skip it entirely — do not produce a visit entry for it.
 (11) PHYSICIAN'S PROGRESS REPORTS (PPR): Do NOT extract a true Physician's Progress Report as a visit. A true PPR is a pre-printed workers' comp checkbox form — its title "PHYSICIAN'S PROGRESS REPORT" appears at the very top of the page before any patient header, and it contains checkbox fields for disability status and work restrictions rather than a narrative. If instead the document has a structured patient header (facility, service date, dictating provider) and a full SOAP narrative (Subjective/Objective/Assessment/Plan), it is a dictated office note — extract it normally as a visit, even if the words "Physician Progress Report" appear as a label inside the Notes body. Set practice_setting to the facility name, not to "Physician Progress Report".
+(11a) SURGERY AUTHORIZATION REQUESTS: Do NOT extract surgery authorization request forms as visits. These are administrative paperwork submitted to insurance/claims adjusters — identifiable by "Authorization Request", "Surgery Authorization Request", or "Authorization for" in the document header. They describe a planned surgery but contain no examination or clinical encounter. The actual surgery is captured in the Operative Report. SKIP these entirely.
+(11b) WORK STATUS FORMS: Do NOT extract Work Status Forms as visits. These are pre-printed WC forms with checkboxes and a brief "not at maximum medical improvement" / "follow-up appointment" template — identifiable by "Work Status Form", "Work Status", or "Work Activity Status" in the header, OR a template HPI pattern like "Patient evaluated at [facility]. Status: not at maximum medical improvement. Follow-up appointment set for [date]." They contain no independent clinical encounter. SKIP these entirely.
+(11c) DIAGNOSTIC TEST REQUESTS: Do NOT extract diagnostic test request forms as visits (e.g. "Diagnostic Test Request" ordering NCV/EMG). These are referral orders — the actual diagnostic test results (if performed) are captured in the radiology/neurology report. SKIP these entirely.
+(11d) APPOINTMENT RESCHEDULING NOTICES: Do NOT extract appointment rescheduling/reminders as visits. These are administrative scheduling notices. SKIP these entirely.
+(11e) WRITTEN ORDERS / POST-OPERATIVE WRITTEN ORDERS: Do NOT extract written orders, post-operative written orders, or DVT risk assessment forms as visits. These are administrative paperwork, not clinical encounters. SKIP these entirely.
+(11f) TREATMENT PRESCRIPTIONS: Do NOT extract treatment prescription forms as visits (e.g. Hand therapy prescription listing exercises). These are referral orders — the actual treatment is captured in PT/OT visit notes. SKIP these entirely.
 (12) CONSENT FORMS / AUTHORIZATION FORMS: Do NOT extract surgical consent forms, "Authorization for Operative and Other Procedure(s)" documents, or any other consent signature pages as visits. These are administrative paperwork — the clinical content (the surgery itself) is captured in the Operative Report. Identifiable by headers like "Authorization for Operative and Other Procedures", "Informed Consent", "Surgical Consent Form".
 (13-admin) APPOINTMENT REMINDERS / FACE SHEETS: Do NOT extract appointment reminder slips, return visit scheduling notices, demographic face sheets, or authorization request forms as visits. These contain no clinical encounter content.
 (13) CODING SUMMARIES / BILLING ABSTRACTS: Do NOT extract hospital coding summaries, DRG abstracts, or billing abstraction records as visits. These are administrative billing documents generated by coders (not clinicians) and contain no independent clinical encounter content. Identifiable by headers like "Coding Summary", "Discharge Abstract", "DRG Assignment", or provider listed as "Coder", "Abstractor", or a system name like "Cacuser".
@@ -947,7 +1042,7 @@ For each clinical encounter found, extract:
 RULES:
 - Include EVERY encounter -- office visits, ER, surgery, PT/OT, radiology, C-4 forms, IMEs, ambulance, etc.
 - Each unique date + provider combination is a separate entry.
-- Do NOT include administrative documents (therapy orders, authorization requests, appointment reminders, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
+- Do NOT include administrative documents (therapy orders, authorization requests, surgery authorization requests, work status forms, diagnostic test requests, appointment reminders/rescheduling, written orders, post-operative written orders, treatment prescriptions, fax covers). ALWAYS include radiology visits (MRI, X-ray, CT, bone scan, etc.) -- these are clinical encounters.
 - CRITICAL: The HPI section often mentions the date of injury -- this is NOT the visit date. The visit date is ALWAYS in the document header or vitals table.
 - Do NOT include the date of injury as a visit date unless confirmed by a document header on that exact date.
 - CRITICAL: If a date cannot be determined for an encounter, return an empty string "" for the date field. NEVER use placeholder text like "<UNKNOWN>", "unknown", "N/A", or any non-date string. The date field must be either a valid YYYY-MM-DD string or an empty string "".
@@ -1235,72 +1330,14 @@ const generateSummaryWorker = async (event) => {
     }
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
 
-    // ── 3. Load or build encounter_index ──────────────────────────────────────
-    // Updated: 2026-07-27 — added inline VI pre-pass fallback when encounter_index is empty
-    // If encounter_index is already populated in DynamoDB (from classify), use it.
-    // If not, run an inline VI pre-pass via Bedrock and persist results back to DynamoDB
-    // so subsequent runs skip the Bedrock call entirely.
+    // ── 3. Read encounter_index from DynamoDB (written by classifyJobWorker VI pre-pass) ────
+    // No Bedrock call needed here — classify already ran VI pre-pass and stored results.
     // encounter_index = [{ date, provider, facility, visit_type, pages, source_doc_id? }]
     let knownVisits = [];
     let patientName = patient_name;
     let caseNumber  = '';
     try {
-      await setJobStatus(job_id, 'Loading encounter index...');
-
-      // ── 3a. Check if any part already has encounter_index populated ──────────
-      const partsNeedingVI = allParts.filter(p => !Array.isArray(p.encounter_index) || p.encounter_index.length === 0);
-      if (partsNeedingVI.length > 0) {
-        console.log(`coordinator: ${partsNeedingVI.length} parts missing encounter_index — running inline VI pre-pass`);
-        await setJobStatus(job_id, `Building encounter index (${partsNeedingVI.length} document parts)...`);
-        // Run VI pre-pass on parts that are missing encounter_index
-        const VI_CONCURRENCY_INLINE = 4;
-        const inlineViSchema = {
-          type: 'object',
-          properties: {
-            patient_name: { type: 'string' },
-            visits: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  date: { type: 'string' },
-                  provider: { type: 'string' },
-                  facility: { type: 'string' },
-                  visit_type: { type: 'string' },
-                },
-              },
-            },
-          },
-        };
-        for (let vi = 0; vi < partsNeedingVI.length; vi += VI_CONCURRENCY_INLINE) {
-          const chunk = partsNeedingVI.slice(vi, vi + VI_CONCURRENCY_INLINE);
-          await Promise.all(chunk.map(async (part) => {
-            try {
-              const viResult = await callBedrock([part.file_key], buildVisitIndexPrompt(), inlineViSchema, regionOrder);
-              const visits = Array.isArray(viResult.visits) ? viResult.visits : [];
-              console.log(`coordinator: inline VI pre-pass ${part.label} → ${visits.length} visits`);
-              // Persist to DynamoDB so subsequent runs skip this call
-              await dynamo.send(new UpdateCommand({
-                TableName: DOCS_TABLE,
-                Key: { aws_document_id: part.id },
-                UpdateExpression: 'SET encounter_index = :ei, updated_at = :now',
-                ExpressionAttributeValues: {
-                  ':ei': visits,
-                  ':now': new Date().toISOString(),
-                },
-              }));
-              // Mutate the in-memory part so the read loop below picks it up
-              part.encounter_index = visits;
-              if (viResult.patient_name && !patientName) patientName = viResult.patient_name;
-            } catch (viErr) {
-              console.warn(`coordinator: inline VI pre-pass failed for ${part.label}: ${viErr.message}`);
-              part.encounter_index = [];
-            }
-          }));
-        }
-      } else {
-        console.log(`coordinator: all parts have encounter_index — skipping inline VI pre-pass`);
-      }
+      await setJobStatus(job_id, 'Loading pre-pass encounter index...');
       const normalizeDate = (raw) => {
         let d = (raw || '').trim();
         if (!d) return '';
@@ -1411,7 +1448,7 @@ const generateSummaryWorker = async (event) => {
       });
       // Filter admin visit types
       knownVisits = knownVisits.filter(v =>
-        !/admin|fax|authorization|reminder|order/i.test(v.visit_type || '')
+        !/admin|fax|authorization|reminder|order|work status|reschedul|diagnostic test request|written order|prescription|dvt/i.test(v.visit_type || '')
       );
       console.log(`coordinator: encounter_index loaded — ${knownVisits.length} unique visits across all parts`);
     } catch (viErr) {
@@ -1620,6 +1657,219 @@ const generateSummaryWorker = async (event) => {
       if (!aIsC4 && bIsC4) return 1;
       return 0;
     });
+
+    // ── 8.5. Deterministic C-4 detection ──────────────────────────────────────
+    // Updated: 2026-08-31 — deterministic C-4 scan to overcome LLM variance
+    // The LLM sometimes misses the C-4 form in 50-page parts. This step
+    // scans extracted_text for C-4 keywords and triggers a targeted
+    // extraction call if the C-4 form was missed.
+    {
+      const C4_KEYWORDS = /FORM C-4|EMPLOYEE'?S CLAIM FOR COMPENSATION|WORKERS'? COMPENSATION BOARD|WCB REPORT|DOCTOR'?S REPORT OF INITIAL EXAMINATION/i;
+      const partsWithC4 = allParts.filter(p => C4_KEYWORDS.test(p.extracted_text || ''));
+
+      for (const part of partsWithC4) {
+        // Check if any visit already has C-4 practice_setting from this part
+        const hasC4Visit = allVisits.some(v =>
+          (v.practice_setting || '').toLowerCase().includes('c-4') &&
+          v.source_doc_id === part.id
+        );
+        if (hasC4Visit) {
+          console.log(`C-4 scan: ${part.label} already has C-4 visit — skipping`);
+          continue;
+        }
+
+        console.log(`C-4 scan: ${part.label} has C-4 keywords but no C-4 visit — triggering targeted extraction`);
+        const c4Prompt = `You are reviewing medical-legal documents. This document contains a C-4 FORM (Workers' Compensation Board Doctor's Report / WCB Form C-4 / "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT").\n\nFind the C-4 form in this document and extract it as a single visit entry. The C-4 form may be partially illegible or printed as a scanned image — extract what you can.\n\nFor the C-4 form:\n- rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)\n- practice_setting: "C-4 Workers' Compensation Report"\n- visit_date: the date the form was completed or the examination date — CRITICAL to extract even if the rest is illegible\n- impression_diagnosis: diagnosis only — ICD codes if present, otherwise the written diagnosis\n- hpi_summary: leave empty\n- chief_complaint: leave empty\n- physical_exam_findings: leave empty\n- treatment_plan: leave empty\n\nDo NOT extract any other visits — only the C-4 form.`;
+
+        try {
+          const c4Schema = {
+          type: 'object',
+          properties: {
+            visits: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  visit_date:             { type: 'string' },
+                  rendering_provider:     { type: 'string' },
+                  practice_setting:       { type: 'string' },
+                  chief_complaint:        { type: 'string' },
+                  hpi_summary:            { type: 'string' },
+                  injury_date:            { type: 'string' },
+                  pain_scale:             { type: 'string' },
+                  symptom_progression:    { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
+                  physical_exam_findings: { type: 'string' },
+                  imaging_findings:       { type: 'string' },
+                  lab_findings:           { type: 'string' },
+                  impression_diagnosis:   { type: 'string' },
+                  icd10_codes:            { type: 'array', items: { type: 'string' } },
+                  treatment_plan:         { type: 'string' },
+                },
+              },
+            },
+          },
+        };
+        const c4Result = await callBedrock([part.file_key], c4Prompt, c4Schema, regionOrder);
+          if (Array.isArray(c4Result.visits) && c4Result.visits.length > 0) {
+            const c4Clean = sanitizeVisits(c4Result.visits, patientName);
+            for (const v of c4Clean) v.source_doc_id = part.id;
+            allVisits = allVisits.concat(c4Clean);
+            console.log(`C-4 scan: recovered ${c4Clean.length} C-4 visit(s) from ${part.label}`);
+          } else {
+            console.log(`C-4 scan: no C-4 visit extracted from ${part.label} (LLM returned empty)`);
+          }
+        } catch (c4Err) {
+          console.warn(`C-4 scan failed for ${part.label}: ${c4Err.message}`);
+        }
+      }
+
+      // Re-dedup after C-4 recovery
+      try {
+        allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+      } catch (mergeErr) {
+        console.error('mergeEdVisits error (non-fatal, falling back to dedup only):', mergeErr.message);
+        allVisits = deduplicateVisits(allVisits);
+      }
+      allVisits.sort((a, b) => {
+        if (!a.visit_date) return 1;
+        if (!b.visit_date) return -1;
+        const dateDiff = (a.visit_date||'').localeCompare(b.visit_date||'');
+        if (dateDiff !== 0) return dateDiff;
+        const aIsC4 = (a.practice_setting || '').toLowerCase().includes('c-4');
+        const bIsC4 = (b.practice_setting || '').toLowerCase().includes('c-4');
+        if (aIsC4 && !bIsC4) return -1;
+        if (!aIsC4 && bIsC4) return 1;
+        return 0;
+      });
+    }
+
+    // ── 8.6. enforceOneC4 (dedup multiple C-4 entries) ──────────────────────
+    // Updated: 2026-08-31 — enforceOneC4 was defined but never called
+    allVisits = enforceOneC4(allVisits);
+    if (allVisits.some(v => (v.practice_setting || '').toLowerCase().includes('c-4'))) {
+      console.log(`enforceOneC4: C-4 form present in final summary`);
+    }
+
+    // Helper: normalize dates for comparison (handles both ISO and MM/DD/YYYY)
+    const normalizeDateForC4Compare = (raw) => {
+      let d = (raw || '').trim();
+      if (!d) return '';
+      const iso = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (iso) return iso[1] + '-' + iso[2] + '-' + iso[3];
+      const mdy = d.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+      if (mdy) {
+        const yr = mdy[3].length === 2 ? '20' + mdy[3] : mdy[3];
+        return yr + '-' + mdy[1].padStart(2,'0') + '-' + mdy[2].padStart(2,'0');
+      }
+      return d;
+    };
+
+    // ── 8.7. C-4 cross-reference enrichment ──────────────────────────────────
+    // Updated: 2026-08-31 — fill illegible C-4 fields from same-date office visits
+    // Updated: 2026-08-31 — fix date comparison to use normalizeDateForC4Compare
+    // (was exact string match — failed when C-4 used "11/10/2021" and office visit "2021-11-10")
+    // The C-4 form is often a scanned image with illegible fields. The same-date
+    // office visit (typed text) has the full provider name, diagnosis, and ICD-10 codes.
+    // This step deterministically enriches the C-4 from same-date non-C-4 visits.
+    for (const c4v of allVisits) {
+      const setting = (c4v.practice_setting || '').toLowerCase();
+      if (!setting.includes('c-4')) continue;
+
+      // Find same-date non-C-4 visits (prefer office visits over radiology)
+      const c4DateNorm = normalizeDateForC4Compare(c4v.visit_date);
+      const sameDateVisits = allVisits.filter(v =>
+        v !== c4v &&
+        normalizeDateForC4Compare(v.visit_date) === c4DateNorm &&
+        !(v.practice_setting || '').toLowerCase().includes('c-4')
+      );
+      if (sameDateVisits.length === 0) continue;
+
+      // Prefer office visit (not radiology) as the source
+      const officeVisit = sameDateVisits.find(v =>
+        !(v.practice_setting || '').toLowerCase().includes('radiology')
+      ) || sameDateVisits[0];
+
+      let enriched = [];
+
+      // Enrich rendering_provider if illegible or partial
+      const c4Provider = (c4v.rendering_provider || '').toLowerCase();
+      if (c4Provider.includes('illegible') || c4Provider.includes('partial') ||
+          (c4Provider.length > 0 && c4Provider.length < officeVisit.rendering_provider.length)) {
+        console.log(`C-4 enrich: provider "${c4v.rendering_provider}" -> "${officeVisit.rendering_provider}" (from same-date office visit)`);
+        c4v.rendering_provider = officeVisit.rendering_provider;
+        enriched.push('rendering_provider');
+      }
+
+      // Enrich impression_diagnosis if partially legible
+      const c4Diag = (c4v.impression_diagnosis || '');
+      if (c4Diag.includes('partially legible') || c4Diag.includes('illegible') ||
+          (c4Diag.length > 0 && c4Diag.length < (officeVisit.impression_diagnosis || '').length)) {
+        console.log(`C-4 enrich: diagnosis "${c4v.impression_diagnosis}" -> "${officeVisit.impression_diagnosis}" (from same-date office visit)`);
+        c4v.impression_diagnosis = officeVisit.impression_diagnosis;
+        enriched.push('impression_diagnosis');
+      }
+
+      // Enrich icd10_codes if empty
+      if ((!c4v.icd10_codes || c4v.icd10_codes.length === 0) &&
+          officeVisit.icd10_codes && officeVisit.icd10_codes.length > 0) {
+        console.log(`C-4 enrich: icd10_codes [] -> [${officeVisit.icd10_codes.join(', ')}] (from same-date office visit)`);
+        c4v.icd10_codes = officeVisit.icd10_codes;
+        enriched.push('icd10_codes');
+      }
+
+      // Enrich chief_complaint if empty
+      if (!(c4v.chief_complaint || '').trim() && (officeVisit.chief_complaint || '').trim()) {
+        c4v.chief_complaint = officeVisit.chief_complaint;
+        enriched.push('chief_complaint');
+      }
+
+      // Enrich injury_date if empty but office visit has it
+      if (!(c4v.injury_date || '').trim() && (officeVisit.injury_date || '').trim()) {
+        c4v.injury_date = officeVisit.injury_date;
+        enriched.push('injury_date');
+      }
+
+      if (enriched.length > 0) {
+        console.log(`C-4 enrich: ${c4v.visit_date} enriched fields: ${enriched.join(', ')}`);
+      } else {
+        console.log(`C-4 enrich: ${c4v.visit_date} — no fields needed enrichment (provider/diagnosis already complete)`);
+      }
+    }
+
+    // ── 8.75. Remove phantom "Office Visit" companions to C-4 forms ──────────
+    // Updated: 2026-08-31 — the extraction prompt's C-4/office-visit pairing
+    // language sometimes causes the LLM to fabricate a generic "Office Visit"
+    // entry on the same date as a C-4 form, when no such separate document
+    // actually exists in the source. These phantoms are identifiable by: same
+    // normalized date + same provider as a real C-4 entry, the generic "Office
+    // Visit" label (the LLM's literal fallback string, not a facility/document
+    // type name), and ZERO unique clinical narrative (empty HPI/chief complaint/
+    // exam/plan) — nothing but a diagnosis stub, sometimes with an ICD-10 code
+    // borrowed from an unrelated encounter.
+    const c4EntriesForPhantomCheck = allVisits.filter(v => (v.practice_setting || '').toLowerCase().includes('c-4'));
+    for (const c4v of c4EntriesForPhantomCheck) {
+      const c4DateNorm = normalizeDateForC4Compare(c4v.visit_date);
+      const c4ProviderNorm = (c4v.rendering_provider || '').toLowerCase().trim();
+      if (!c4DateNorm || !c4ProviderNorm) continue;
+
+      allVisits = allVisits.filter(v => {
+        if (v === c4v) return true;
+        const isGenericOfficeVisit = (v.practice_setting || '').trim().toLowerCase() === 'office visit';
+        if (!isGenericOfficeVisit) return true;
+        const sameDate = normalizeDateForC4Compare(v.visit_date) === c4DateNorm;
+        const sameProvider = (v.rendering_provider || '').toLowerCase().trim() === c4ProviderNorm;
+        if (!sameDate || !sameProvider) return true;
+        const hasNoNarrative = !(v.hpi_summary || '').trim() &&
+                                !(v.chief_complaint || '').trim() &&
+                                !(v.physical_exam_findings || '').trim() &&
+                                !(v.treatment_plan || '').trim();
+        if (hasNoNarrative) {
+          console.log('phantom C-4 companion drop: removing generic "Office Visit" duplicate [' + v.visit_date + ' ' + v.rendering_provider + '] — same date+provider as C-4 entry, no unique clinical content');
+          return false;
+        }
+        return true;
+      });
+    }
 
     // ── 9. Recovery pass (same as before) ────────────────────────────────────
     if (knownVisits.length > 0) {
@@ -2182,9 +2432,8 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     }
 
     // 5. Diff: find visits in VI not present in summary (by date+provider+visit_type key)
-    // Updated: 2026-07-27 — FIXED field name mismatch: summary visits use visit_date/rendering_provider
     const summaryKeys = new Set(
-      summaryVisits.map(v => `${normalizeDate(v.visit_date || v.date)}|${normalizeProvider(v.rendering_provider || v.provider || v.provider_name)}`)
+      summaryVisits.map(v => `${normalizeDate(v.date)}|${normalizeProvider(v.provider || v.provider_name)}`)
     );
     // Also build a provider+visit_type → VI date map for targeted date correction below
     const viDateByProviderType = {};
@@ -2195,7 +2444,7 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     const missingVisits = uniqueViVisits.filter(v => {
       const k = `${v.date}|${normalizeProvider(v.provider)}`;
       return !summaryKeys.has(k);
-    }).map(v => ({ date: v.date, provider: v.provider, visit_type: v.visit_type, facility: v.facility || '', _part_id: v._part_id || (v._part && v._part.aws_document_id) || '' }));
+    }).map(v => ({ date: v.date, provider: v.provider, visit_type: v.visit_type }));
 
     // 6. Apply date corrections to summary visits
     // Strategy A: SERVICE DT regex corrections (from findServiceDate)
@@ -2203,7 +2452,7 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     //             but summary has same provider+visit_type on a different date, correct it
     let correctedCount = 0;
     const correctedVisits = summaryVisits.map(sv => {
-      const svProvKey = normalizeProvider(sv.rendering_provider || sv.provider || sv.provider_name || '');
+      const svProvKey = normalizeProvider(sv.provider || sv.provider_name || '');
       const svType    = (sv.practice_setting || sv.visit_type || '').toLowerCase();
 
       // Strategy A: regex correction — match on provider+visit_type to avoid hitting C-4 instead of ED note
@@ -2215,8 +2464,8 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
       });
       if (regexCorrection) {
         correctedCount++;
-        console.log(`verify [regex]: correcting ${sv.rendering_provider || sv.provider} (${svType}) ${sv.visit_date || sv.date} → ${regexCorrection.corrected_date}`);
-        return { ...sv, visit_date: regexCorrection.corrected_date };
+        console.log(`verify [regex]: correcting ${sv.provider} (${svType}) ${sv.date} → ${regexCorrection.corrected_date}`);
+        return { ...sv, date: regexCorrection.corrected_date };
       }
 
       // Strategy B: VI pre-pass direct date comparison
@@ -2236,106 +2485,30 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
         }
       }
 
-      if (viDate && viDate !== normalizeDate(sv.visit_date || sv.date)) {
+      if (viDate && viDate !== normalizeDate(sv.date)) {
         // Sanity: only correct if within 7 days
         // Pure string YYYYMMDD diff — no Date() objects
-        const origInt2 = parseInt((normalizeDate(sv.visit_date || sv.date) || '').replace(/-/g, ''), 10);
+        const origInt2 = parseInt((normalizeDate(sv.date) || '').replace(/-/g, ''), 10);
         const corrInt2 = parseInt((viDate || '').replace(/-/g, ''), 10);
         if (!isNaN(origInt2) && !isNaN(corrInt2) && Math.abs(origInt2 - corrInt2) <= 7) {
           correctedCount++;
-          const origFmt = normalizeDate(sv.visit_date || sv.date);
-          console.log(`verify [VI diff]: correcting ${sv.rendering_provider || sv.provider} (${svType}) ${origFmt} → ${viDate}`);
+          const origFmt = normalizeDate(sv.date);
+          console.log(`verify [VI diff]: correcting ${sv.provider} (${svType}) ${origFmt} → ${viDate}`);
           dateCorrections.push({
-            provider:       sv.rendering_provider || sv.provider || sv.provider_name || '',
+            provider:       sv.provider || sv.provider_name || '',
             original_date:  origFmt,
             corrected_date: viDate,
             method:         'VI_prepass_diff',
           });
-          return { ...sv, visit_date: viDate };
+          return { ...sv, date: viDate };
         }
       }
 
       return sv;
     });
 
-    // 6b. RECOVERY — Insert missing visits found by VI pre-pass
-    // Updated: 2026-07-27 — Previously missingVisits were logged but never added.
-    // Now we send targeted Bedrock requests to extract full visit data for each missing visit.
-    let recoveredVisits = [];
-    if (missingVisits.length > 0) {
-      console.log(`verify: recovering ${missingVisits.length} missing visits via targeted extraction`);
-      const recSchema = {
-        type: 'object',
-        properties: {
-          visits: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                visit_date:             { type: 'string' },
-                rendering_provider:     { type: 'string' },
-                practice_setting:       { type: 'string' },
-                chief_complaint:        { type: 'string' },
-                hpi_summary:            { type: 'string' },
-                injury_date:            { type: 'string' },
-                pain_scale:            { type: 'string' },
-                symptom_progression:    { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
-                physical_exam_findings: { type: 'string' },
-                imaging_findings:       { type: 'string' },
-                lab_findings:          { type: 'string' },
-                impression_diagnosis:   { type: 'string' },
-                icd10_codes:            { type: 'array', items: { type: 'string' } },
-                treatment_plan:        { type: 'string' },
-              },
-            },
-          },
-        },
-      };
-
-      // Group missing visits by source doc
-      const bySourceDoc = {};
-      for (const mv of missingVisits) {
-        const srcId = mv._part_id || mv.source_doc_id || allParts[0]?.id || 'unknown';
-        if (!bySourceDoc[srcId]) bySourceDoc[srcId] = [];
-        bySourceDoc[srcId].push(mv);
-      }
-
-      const recGroups = Object.entries(bySourceDoc);
-      for (const [srcDocId, mvGroup] of recGroups) {
-        const srcPart = allParts.find(p => p.aws_document_id === srcDocId || p.id === srcDocId);
-        const recFileKey = srcPart ? resolveFileKey(srcPart) : (allParts[0] ? resolveFileKey(allParts[0]) : null);
-        if (!recFileKey) continue;
-        const visitList = mvGroup.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''}`).join('\n');
-        const recPrompt = `You are reviewing medical-legal documents. A specific clinical visit is known to exist in these records but was missed in the prior extraction pass.\n\nTARGET VISIT${mvGroup.length > 1 ? 'S' : ''}:\n${visitList}\n\nYour task: Find the above visit${mvGroup.length > 1 ? 's' : ''} in the provided document and extract full clinical details for ${mvGroup.length > 1 ? 'each one' : 'it'}. If you cannot find it, return an empty visits array. Do not extract any other visits.`;
-        try {
-          const recResult = await callBedrock([recFileKey], recPrompt, recSchema, regionOrder);
-          if (Array.isArray(recResult.visits) && recResult.visits.length > 0) {
-            const recClean = sanitizeVisits(recResult.visits, patientName || '');
-            recoveredVisits = recoveredVisits.concat(recClean);
-            console.log(`verify: recovered ${recClean.length} visit(s) from ${srcDocId}`);
-          }
-        } catch (recErr) {
-          console.warn(`verify: recovery failed for ${srcDocId}: ${recErr.message}`);
-        }
-      }
-    }
-
-    // Merge recovered visits into corrected visits
-    let allCorrectedVisits = correctedVisits;
-    if (recoveredVisits.length > 0) {
-      allCorrectedVisits = correctedVisits.concat(recoveredVisits);
-      // Deduplicate merged visits
-      const mergedSeen = new Set();
-      allCorrectedVisits = allCorrectedVisits.filter(v => {
-        const k = `${(v.visit_date || v.date || '').trim()}|${normalizeProvider(v.rendering_provider || v.provider || '')}`;
-        if (mergedSeen.has(k)) return false;
-        mergedSeen.add(k); return true;
-      });
-      console.log(`verify: merged ${recoveredVisits.length} recovered → ${allCorrectedVisits.length} total visits`);
-    }
-
     // 7. Re-sort corrected visits chronologically (proper date comparison)
-    const finalVisits = allCorrectedVisits.sort((a, b) => {
+    const finalVisits = correctedVisits.sort((a, b) => {
       // Pure string YYYYMMDD sort — no Date() objects
       const da = parseInt((normalizeDate(a.date) || '19000101').replace(/-/g, ''), 10);
       const db = parseInt((normalizeDate(b.date) || '19000101').replace(/-/g, ''), 10);
