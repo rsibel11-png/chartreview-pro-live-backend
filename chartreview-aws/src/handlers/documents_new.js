@@ -1,4 +1,8 @@
 // Updated: 2026-09-19 -- per-user data isolation: org_id checks now bypass for admin (event._isAdmin, set in auth.js from verified custom:role claim). listAllHandler/listByPatientHandler skip the org filter for admin (optional ?org_id= query param scopes to one user for QC review). Error messages no longer reference the removed x-org-id header. No other flow touched.
+// Updated: 2026-09-20 -- per-document cost calculator: prices each Assess Relevance call (processWorker inline path + the manual assessRelevanceHandler) and each Classify call (runBedrockClassify/saveClassificationToDoc), persisting processing_usage/processing_cost_usd and classify_usage/classify_cost_usd onto the document record using real Bedrock token counts at Sonnet's per-token rate. Pure observability -- no other flow touched.
+// Updated: 2026-09-16 — PT/OT index v2: pt_visits entries now carry a "type" field (initial evaluation | progress note | treatment note | discharge summary) so the generateSummary coordinator can protect evals and discharge summaries from consolidation. Additive — no other handler or flow touched.
+// Updated: 2026-09-16 — PT/OT index: vision pre-pass (assess + classify) now extracts pt_visits (PT/OT/hand-therapy encounters with local page numbers + dates), persisted as pt_index. Used by generateSummary coordinator for PT/OT pre-consolidation (first+last per facility group). max_tokens 4096→8192 on the 3 vision calls to fit pt_visits arrays. Additive — no other handler or flow touched.
+// Updated: 2026-09-15 — PATCH whitelist: added emr_flagged_pages / emr_platform / emr_assessed_at (EMR Detector result persistence). Additive only — no other handler or flow touched.
 // Updated: 2026-05-16 — improved CLASSIFY_PROMPT: physician-narrative bar, hospital admin/nursing/order page exclusions
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
@@ -26,6 +30,24 @@ const FOLDER_PII_TABLE     = process.env.FOLDER_PII_TABLE || 'chartreview-folder
 const BUCKET               = process.env.S3_BUCKET;
 const BEDROCK_MODEL        = 'us.anthropic.claude-sonnet-4-6'; // PDF vision requires Sonnet
 const WORKER_FUNCTION_NAME = process.env.WORKER_FUNCTION_NAME   || 'chartreview-pro-prod-processWorker';
+
+// Updated: 2026-09-20 -- per-document cost calculator. Assess Relevance and Classify are each single Bedrock calls (unlike
+// generate_summary.js's multi-call coordinator), so no accumulator is needed
+// here -- just price the one InvokeModel response and persist it on the doc
+// record. Same Sonnet per-token rate used in generate_summary.js.
+const SONNET_INPUT_PER_MTOK  = 3.00;
+const SONNET_OUTPUT_PER_MTOK = 15.00;
+const estimateBedrockCost = (usage) => {
+  try {
+    if (!usage) return 0;
+    const inputTokens  = usage.input_tokens || 0;
+    const outputTokens = usage.output_tokens || 0;
+    const cost = (inputTokens / 1e6) * SONNET_INPUT_PER_MTOK + (outputTokens / 1e6) * SONNET_OUTPUT_PER_MTOK;
+    return Math.round(cost * 10000) / 10000;
+  } catch (cErr) {
+    return 0;
+  }
+};
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -234,6 +256,19 @@ const updateHandler = async (event) => {
     if (data.clinical_page_count  !== undefined) { sets.push('clinical_page_count = :cpc');  vals[':cpc'] = data.clinical_page_count; }
     if (data.relevance_assessed   !== undefined) { sets.push('relevance_assessed = :ras');   vals[':ras'] = data.relevance_assessed; }
     if (data.low_relevance_pages  !== undefined) { sets.push('low_relevance_pages = :lrp');  vals[':lrp'] = data.low_relevance_pages; }
+    // EMR Detector results (2026-09-15) — written by EmrDetector.tsx after a detection run.
+    // emr_flagged_pages: array of LOCAL page numbers (1-based, within this part's PDF)
+    // classified as EMR printout pages. Consumed by generateSummary coordinator when
+    // the user runs a narrative-only summary (pageScope exclusion).
+    if (data.emr_flagged_pages !== undefined) { sets.push('emr_flagged_pages = :efp'); vals[':efp'] = data.emr_flagged_pages; }
+    // PT/OT index (2026-09-16) — vision pre-pass output. pt_index: array of
+    // {date, facility, provider, page_numbers[]} with LOCAL 1-based page numbers.
+    // Consumed by generateSummary coordinator for PT/OT pre-consolidation
+    // (first + last per facility group when consolidate_pt is active).
+    if (data.pt_index !== undefined) { sets.push('pt_index = :pti2'); vals[':pti2'] = data.pt_index; }
+    if (data.emr_platform      !== undefined) { sets.push('emr_platform = :epl');      vals[':epl'] = data.emr_platform; }
+    if (data.emr_assessed_at   !== undefined) { sets.push('emr_assessed_at = :eat');    vals[':eat'] = data.emr_assessed_at; }
+
 
     await dynamo.send(new UpdateCommand({
       TableName: TABLE,
@@ -679,6 +714,12 @@ PART 4 - METADATA EXTRACTION:
 CRITICAL: Analyze each page in isolation. A page is ONLY relevant if it contains substantive clinical content ON THAT PAGE ALONE.
 RECHECK YOUR ANSWER: If you flagged no pages, verify every single page contains substantive clinical content.
 
+PART 3 - PHYSICAL THERAPY INDEX (used downstream to consolidate PT series):
+List EVERY physical therapy (PT), occupational therapy (OT), or hand therapy encounter in this document — including initial evaluations, progress notes, and repetitive dated treatment notes. For EACH encounter record: the exact page numbers it appears on (1-based, counting pages within THIS file), the treatment date in YYYY-MM-DD format (empty string if not legible), the facility name, the treating therapist, and the note TYPE — one of "initial evaluation", "progress note", "treatment note", or "discharge summary". Use "initial evaluation" only for the first comprehensive evaluation of a therapy course, "discharge summary" when the note summarizes the full course of therapy and discharges the patient, "treatment note" for routine daily treatment sessions, and "progress note" for periodic re-assessments. Every dated treatment note is its own entry — NEVER merge multiple dates into one entry. If this document contains no PT/OT/hand therapy encounters, return an empty array.
+
+PART 3 - PHYSICAL THERAPY INDEX (used downstream to consolidate PT series):
+List EVERY physical therapy (PT), occupational therapy (OT), or hand therapy encounter in this document — including initial evaluations, progress notes, and repetitive dated treatment notes. For EACH encounter record: the exact page numbers it appears on (1-based, counting pages within THIS file), the treatment date in YYYY-MM-DD format (empty string if not legible), the facility name, the treating therapist, and the note TYPE — one of "initial evaluation", "progress note", "treatment note", or "discharge summary". Use "initial evaluation" only for the first comprehensive evaluation of a therapy course, "discharge summary" when the note summarizes the full course of therapy and discharges the patient, "treatment note" for routine daily treatment sessions, and "progress note" for periodic re-assessments. Every dated treatment note is its own entry — NEVER merge multiple dates into one entry. If this document contains no PT/OT/hand therapy encounters, return an empty array.
+
 Return ONLY a JSON object with these exact fields:
 {
   "category": "medical or legal or uncategorized",
@@ -691,12 +732,13 @@ Return ONLY a JSON object with these exact fields:
   "office_visit_count": 0,
   "page_count": 0,
   "rejection_reason": "string",
-  "low_relevance_pages": [{"page_number": 1, "reason": "string"}]
+  "low_relevance_pages": [{"page_number": 1, "reason": "string"}],
+  "pt_visits": [{"date": "YYYY-MM-DD", "facility": "string", "provider": "string", "type": "initial evaluation | progress note | treatment note | discharge summary", "page_numbers": [1]}]
 }`;
 
       const assessBedrockPayload = {
         anthropic_version: 'bedrock-2023-05-31',
-        max_tokens: 4096,
+        max_tokens: 8192,
         messages: [{
           role: 'user',
           content: [
@@ -719,6 +761,8 @@ Return ONLY a JSON object with these exact fields:
 
       const assessBody = JSON.parse(new TextDecoder().decode(assessResp.body));
       const assessRawText = assessBody.content?.[0]?.text || '';
+      const assessUsage = assessBody.usage || null;
+      const assessCostUsd = estimateBedrockCost(assessUsage);
 
       let assessResult = null;
       try {
@@ -748,7 +792,8 @@ Return ONLY a JSON object with these exact fields:
           UpdateExpression: `SET #cat = :cat, subcategory = :sub, is_rejected = :rejected,
             rejection_reason = :reason, document_date = :ddate,
             provider_name = :provider, office_visit_count = :ovc,
-            page_count = :pc, low_relevance_pages = :lrp, relevance_assessed = :ra, updated_at = :now`,
+            page_count = :pc, low_relevance_pages = :lrp, relevance_assessed = :ra,
+            pt_index = :pti, processing_usage = :pu, processing_cost_usd = :pcost, updated_at = :now`,
           ExpressionAttributeNames: { '#cat': 'category' },
           ExpressionAttributeValues: {
             ':cat':      assessResult.category || 'uncategorized',
@@ -760,6 +805,13 @@ Return ONLY a JSON object with these exact fields:
             ':ovc':      assessResult.office_visit_count || 0,
             ':pc':       assessResult.page_count || doc.page_count || 0,
             ':lrp':      assessResult.low_relevance_pages || [],
+            // pt_index: PT/OT encounters with LOCAL page numbers (1-based within this
+            // part's PDF) — deliberately NOT pageOffset-adjusted; generateSummary
+            // coordinator consumes them per-part for PT/OT pre-consolidation.
+            ':pti':      assessResult.pt_visits || [],
+            // Updated: 2026-09-20 -- per-document cost calculator.
+            ':pu':       assessUsage || {},
+            ':pcost':    assessCostUsd,
             ':ra':       true,
             ':now':      new Date().toISOString(),
           },
@@ -1069,12 +1121,13 @@ Return ONLY a JSON object with these exact fields:
   "office_visit_count": 0,
   "page_count": 0,
   "rejection_reason": "string",
-  "low_relevance_pages": [{"page_number": 1, "reason": "string"}]
+  "low_relevance_pages": [{"page_number": 1, "reason": "string"}],
+  "pt_visits": [{"date": "YYYY-MM-DD", "facility": "string", "provider": "string", "type": "initial evaluation | progress note | treatment note | discharge summary", "page_numbers": [1]}]
 }`;
 
     const bedrockPayload = {
       anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 4096,
+      max_tokens: 8192,
       messages: [{
         role: 'user',
         content: [
@@ -1097,6 +1150,8 @@ Return ONLY a JSON object with these exact fields:
     const bedrockBody = JSON.parse(new TextDecoder().decode(bedrockResp.body));
     const rawText = bedrockBody.content?.[0]?.text || '';
     console.log('assessRelevance raw response (first 500):', rawText.substring(0, 500));
+    const arhUsage = bedrockBody.usage || null;
+    const arhCostUsd = estimateBedrockCost(arhUsage);
 
     let result = null;
     try {
@@ -1117,7 +1172,8 @@ Return ONLY a JSON object with these exact fields:
       UpdateExpression: `SET #cat = :cat, subcategory = :sub, is_rejected = :rejected,
         rejection_reason = :reason, patient_name = :pname, document_date = :ddate,
         provider_name = :provider, case_number = :casenum, office_visit_count = :ovc,
-        page_count = :pc, low_relevance_pages = :lrp, relevance_assessed = :ra, updated_at = :now`,
+        page_count = :pc, low_relevance_pages = :lrp, relevance_assessed = :ra,
+        pt_index = :pti, processing_usage = :pu, processing_cost_usd = :pcost, updated_at = :now`,
       ExpressionAttributeNames: { '#cat': 'category' },
       ExpressionAttributeValues: {
         ':cat':      result.category || 'uncategorized',
@@ -1131,6 +1187,10 @@ Return ONLY a JSON object with these exact fields:
         ':ovc':      result.office_visit_count || 0,
         ':pc':       result.page_count || doc.page_count || 0,
         ':lrp':      result.low_relevance_pages || [],
+        ':pti':      result.pt_visits || [],
+        // Updated: 2026-09-20 -- per-document cost calculator.
+        ':pu':       arhUsage || {},
+        ':pcost':    arhCostUsd,
         ':ra':       true,
         ':now':      new Date().toISOString(),
       },
@@ -1277,6 +1337,9 @@ PART 4 - METADATA EXTRACTION:
 CRITICAL: Each page is ONLY relevant if it contains a substantive clinical narrative authored by a treating provider (physician, PA, NP, radiologist, or therapist). Nursing entries, order sets, protocol bundles, and administrative workflow pages are NOT clinical even if they contain medical terminology.
 RECHECK: If you flagged fewer than 10% of pages in a hospital record, re-examine every page -- hospital records almost always contain large sections of nursing/admin/order pages that should be flagged.
 
+PART 3 - PHYSICAL THERAPY INDEX (used downstream to consolidate PT series):
+List EVERY physical therapy (PT), occupational therapy (OT), or hand therapy encounter in this document — including initial evaluations, progress notes, and repetitive dated treatment notes. For EACH encounter record: the exact page numbers it appears on (1-based, counting pages within THIS file), the treatment date in YYYY-MM-DD format (empty string if not legible), the facility name, the treating therapist, and the note TYPE — one of "initial evaluation", "progress note", "treatment note", or "discharge summary". Use "initial evaluation" only for the first comprehensive evaluation of a therapy course, "discharge summary" when the note summarizes the full course of therapy and discharges the patient, "treatment note" for routine daily treatment sessions, and "progress note" for periodic re-assessments. Every dated treatment note is its own entry — NEVER merge multiple dates into one entry. If this document contains no PT/OT/hand therapy encounters, return an empty array.
+
 Return ONLY a JSON object:
 {
   "category": "medical or legal or uncategorized",
@@ -1289,7 +1352,8 @@ Return ONLY a JSON object:
   "office_visit_count": 0,
   "page_count": 0,
   "rejection_reason": "string",
-  "low_relevance_pages": [{"page_number": 1, "reason": "string"}]
+  "low_relevance_pages": [{"page_number": 1, "reason": "string"}],
+  "pt_visits": [{"date": "YYYY-MM-DD", "facility": "string", "provider": "string", "type": "initial evaluation | progress note | treatment note | discharge summary", "page_numbers": [1]}]
 }`;
 
 // --- Shared: run Bedrock classification on a PDF buffer ----------------------
@@ -1298,7 +1362,7 @@ const runBedrockClassify = async (pdfBase64, aws_document_id) => {
   console.log('runBedrockClassify: PDF size ' + (pdfBase64.length/1024/1024).toFixed(1) + 'MB for', aws_document_id);
   const payload = {
     anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 4096,
+    max_tokens: 8192,
     messages: [{
       role: 'user',
       content: [
@@ -1317,7 +1381,13 @@ const runBedrockClassify = async (pdfBase64, aws_document_id) => {
   const rawText = body.content?.[0]?.text || '';
   const match = rawText.match(/\{[\s\S]*\}/);
   if (!match) throw new Error('No JSON in Bedrock response: ' + rawText.substring(0, 300));
-  return JSON.parse(match[0]);
+  const parsed = JSON.parse(match[0]);
+  // Updated: 2026-09-20 -- per-document cost calculator. Carry the
+  // raw Bedrock usage back to the caller so saveClassificationToDoc can price
+  // and persist it; stripped by the caller before classifyResult is used
+  // for anything else.
+  parsed._usage = body.usage || null;
+  return parsed;
 };
 
 // --- Shared: write classification result to documents table ------------------
@@ -1328,13 +1398,17 @@ const saveClassificationToDoc = async (aws_document_id, result, doc, pageOffset 
     }));
   }
   const isRejected = result.is_relevant_medical_document === false;
+  // Updated: 2026-09-20 -- per-document cost calculator.
+  const classifyUsage = result._usage || null;
+  const classifyCostUsd = estimateBedrockCost(classifyUsage);
   await dynamo.send(new UpdateCommand({
     TableName: TABLE,
     Key: { aws_document_id },
     UpdateExpression: `SET #cat = :cat, subcategory = :sub, is_rejected = :rejected,
       rejection_reason = :reason, patient_name = :pname, document_date = :ddate,
       provider_name = :provider, case_number = :casenum, office_visit_count = :ovc,
-      page_count = :pc, low_relevance_pages = :lrp, relevance_assessed = :ra, updated_at = :now`,
+      page_count = :pc, low_relevance_pages = :lrp, relevance_assessed = :ra,
+      pt_index = :pti, classify_usage = :cu, classify_cost_usd = :ccost, updated_at = :now`,
     ExpressionAttributeNames: { '#cat': 'category' },
     ExpressionAttributeValues: {
       ':cat':      result.category || 'uncategorized',
@@ -1348,6 +1422,9 @@ const saveClassificationToDoc = async (aws_document_id, result, doc, pageOffset 
       ':ovc':      result.office_visit_count || 0,
       ':pc':       result.page_count || (doc && doc.page_count) || 0,
       ':lrp':      result.low_relevance_pages || [],
+      ':pti':      result.pt_visits || [],
+      ':cu':       classifyUsage || {},
+      ':ccost':    classifyCostUsd,
       ':ra':       true,
       ':now':      new Date().toISOString(),
     },

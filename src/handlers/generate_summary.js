@@ -1,5 +1,5 @@
 // Updated: 2026-09-20 (v3) -- Imaging findings vs Physical Exam fix, redone clean from pre-imaging baseline (v1/v2 attempts discarded). Rule 6 excludes radiograph/imaging interpretation from physical_exam_findings. Rule 7 now requires the actual radiographic OBSERVATION (alignment, hardware, healing, displacement) with a concrete good/bad example pair -- explicitly bans substituting the ICD-10 diagnosis description/language (the v2 failure mode Roman caught: model was padding imaging_findings with diagnosis text like "displaced trimalleolar fracture... subsequent encounter" instead of a real finding). If no observation exists in the note, only the study name/view count is written -- no padding from diagnosis or impression text.
-// Updated: 2026-09-19 -- per-user isolation: generateSummaryStart / buildVisitIndexStart now verify every doc_id in the request actually belongs to the caller's org (event._orgId, from verified JWT) before starting a job; admin (event._isAdmin) bypasses. Client-supplied body.org_id is no longer trusted except for admin QC override. No other flow touched.
+// Updated: 2026-09-20 (v4) -- patient_name majority vote (dev): fixes name-spelling instability across runs (e.g. reported "Belk"/"Berk"/"Beck" from the same document set). Root cause: patient_name was decided by whichever batch happened to return first (a race), with no cross-checking -- so a handwritten/ambiguous field (a C-4 claim form) could win over a clear typed spelling elsewhere. Fix: every batch's guess is now collected (not just the first), and the coordinator picks the most common spelling via pickPatientName() once all chunks report in; an explicit user-supplied patient_name at job start still always wins outright. Also added one prompt-level instruction telling the extraction model to prefer a typed/printed spelling over a handwritten one when both appear in the same batch.\n// Updated: 2026-09-20 (v3) -- Cost calculator now covers the WHOLE pipeline: pulls each doc's processing_cost_usd (Assess Relevance) and classify_cost_usd (Classify), persisted by documents_new.js, and adds them to this run's own RUN_USAGE-based summary-generation cost. Persists the breakdown (upload_classify_cost_usd, summary_generation_cost_usd) plus the true total (estimated_cost_usd) and cost_per_page. Verify's write-back recomputes the same way on its superset usage.\n// Updated: 2026-09-20 (v2) -- Per-document cost calculator: threads each generateSummaryChunkWorker's real Bedrock usage back into the coordinator's RUN_USAGE (previously lost -- chunk workers run in separate Lambda invocations), seeds verify's usage from the saved summary so recovery calls add on top instead of replacing, and persists total_pages / estimated_cost_usd / cost_per_page onto the summary record using Sonnet's real per-token Bedrock pricing. Pure observability -- does not change extraction logic, batching, or any LLM prompt.\n// Updated: 2026-09-20 -- Automatic EMR/administrative-printout exclusion: EMR_MARKERS + classifyEmrPage + detectEmrPrintoutPages (ported verbatim from the former frontend EmrDetector) now run INLINE in the coordinator on every summary generation run, unconditionally -- no exclude_emr flag gate, no user-facing toggle, no separate detector step, zero extra LLM cost (pure deterministic regex over part.extracted_text). Library and document display are untouched -- this only affects which pages the summary-generation LLM batches see. Persisted part.emr_flagged_pages (legacy manual detector runs) is used only as a fallback when extracted_text is unavailable.\n// Updated: 2026-09-19 -- per-user isolation: generateSummaryStart / buildVisitIndexStart now verify every doc_id in the request actually belongs to the caller's org (event._orgId, from verified JWT) before starting a job; admin (event._isAdmin) bypasses. Client-supplied body.org_id is no longer trusted except for admin QC override. No other flow touched.
 // Updated: 2026-09-16 — PT/OT consolidation v2.1: (a) normFacilityPt strips parentheticals/commas/slashes FIRST then dash-suffixes (incl. - Las Vegas), so all address + naming variants form ONE group; (b) same-date dedup is per normalized PROVIDER — billing-sheet "Unknown (billed as ...)" entries never outrank named notes; (c) initial evaluations and discharge summaries (pt_index "type") are never consolidated away; (d) runBatch subtracts ptExclude pages AFTER the ±1 encounter-edge buffer so excluded PT pages can never be resurrected. Additive to the v1 consolidation block; no other stage touched.
 // Updated: 2026-09-16 — PT/OT consolidation v2: (a) normFacilityPt strips comma-addresses and collapses ALL whitespace so "ATI Physical Therapy, 7301..." and "Mountain View"/"Mountainview" variants merge into one group; (b) same-date multi-part duplicate copies deduped (richest kept, other copies' pages excluded); (c) initial evaluations and discharge summaries (pt_index "type") are never consolidated away; (d) runBatch subtracts ptExclude pages AFTER the ±1 encounter-edge buffer so excluded PT pages can never be resurrected. Additive to the v1 consolidation block; no other stage touched.
 // Updated: 2026-09-15 — Radiology exam disambiguation in deduplicateVisits (ZSolis
@@ -220,6 +220,51 @@ const recordUsage = (kind, modelId, usage) => {
   } catch (uErr) { /* non-fatal */ }
 };
 
+// Merge a chunk worker's (or a prior run's) usage totals into this process's
+// RUN_USAGE. Used to (a) fold each chunk worker's Bedrock usage back into the
+// coordinator's total (chunk workers run in separate Lambda invocations and
+// their usage would otherwise be lost), and (b) seed verify's RUN_USAGE from
+// the already-saved summary so its write-back is a superset, not a replacement.
+// Guarded — usage threading must never break the main extraction flow.
+const mergeRunUsage = (u) => {
+  try {
+    if (!u || typeof u !== 'object') return;
+    RUN_USAGE.calls += u.calls || 0;
+    RUN_USAGE.vision_calls += u.vision_calls || 0;
+    RUN_USAGE.text_calls += u.text_calls || 0;
+    RUN_USAGE.vision_input_tokens += u.vision_input_tokens || 0;
+    RUN_USAGE.text_input_tokens += u.text_input_tokens || 0;
+    RUN_USAGE.output_tokens += u.output_tokens || 0;
+    RUN_USAGE.pages_sent += u.pages_sent || 0;
+    const models = u.models || {};
+    for (const m of Object.keys(models)) {
+      RUN_USAGE.models[m] = (RUN_USAGE.models[m] || 0) + (models[m] || 0);
+    }
+  } catch (muErr) { /* non-fatal */ }
+};
+
+// Updated: 2026-09-20 -- per-document cost calculator. Bedrock/Claude Sonnet
+// pricing (the only model actually in production use for classify + summary
+// generation as of this date -- Haiku was A/B tested twice and rejected both
+// times on accuracy grounds; see saved decisions). RUN_USAGE tracks call
+// counts per model but not per-model token splits, so this blends all tokens
+// at the Sonnet rate -- accurate as long as Sonnet remains the only model in
+// use. If a second model is ever mixed in, RUN_USAGE would need a token
+// breakdown per model to price this precisely.
+const SONNET_INPUT_PER_MTOK  = 3.00;
+const SONNET_OUTPUT_PER_MTOK = 15.00;
+const computeUsageCost = (usage) => {
+  try {
+    if (!usage) return { estimated_cost_usd: 0 };
+    const inputTokens  = (usage.vision_input_tokens || 0) + (usage.text_input_tokens || 0);
+    const outputTokens = usage.output_tokens || 0;
+    const cost = (inputTokens / 1e6) * SONNET_INPUT_PER_MTOK + (outputTokens / 1e6) * SONNET_OUTPUT_PER_MTOK;
+    return { estimated_cost_usd: Math.round(cost * 10000) / 10000 };
+  } catch (cErr) {
+    return { estimated_cost_usd: 0 };
+  }
+};
+
 // Pick the region with the lowest token usage today.
 // Time-of-day heuristic: deprioritize US regions during US business hours (13:00-23:00 UTC = 9am-7pm ET)
 const selectBestRegions = (usage) => {
@@ -351,6 +396,113 @@ const keptPagesOf = (pleadingPages, partPageCount) => {
   }
   return kept;
 };
+
+// ── EMR printout detection (inlined engine — automatic, 2026-09-20) ──────────
+// Ported VERBATIM from the frontend detector (chartreview-native-frontend
+// src/utils/emrDetector.ts). Computes EMR/administrative printout page flags
+// LIVE from part.extracted_text at summary-generation time — no separate
+// detector run, no user-facing toggle, no LLM cost (pure deterministic regex).
+// NOTE: extracted_text is used ONLY for page-flagging. LLM input remains the
+// raw S3 PDF (Rule 9). Page split convention: processWorker writes Textract
+// text with "--- PAGE N ---" markers; 1-based pages map 1:1 to PDF pages.
+// A marker is 'strong' (classifies a page alone) or 'medium' (needs 2+ hits).
+const EMR_MARKERS = [
+  // ── Meditech IDEV order/pharmacy dumps ──────────────────────────────────────
+  { label: 'MEDITECH FACILITY header',   platform: 'meditech', strength: 'strong', re: /meditech\s+facility/i },
+  { label: 'IDEV report header',         platform: 'meditech', strength: 'strong', re: /idev/i },
+  { label: "Order's Audit Trail",         platform: 'meditech', strength: 'strong', re: /order's\s+audit\s+trail/i },
+  { label: 'Order ENTER in POM',          platform: 'meditech', strength: 'strong', re: /order\s+enter\s+in\s+pom/i },
+  { label: 'Order from set:',             platform: 'meditech', strength: 'strong', re: /order\s+from\s+set:/i },
+  { label: 'Rx Indication',              platform: 'meditech', strength: 'strong', re: /rx\s+indication/i },
+  { label: 'Sig Lv provider field',      platform: 'meditech', strength: 'strong', re: /sig\s+lv/i },
+  { label: 'NUR.PHYS order category',    platform: 'meditech', strength: 'strong', re: /nur\.phys/i },
+  { label: 'Order Details prompt',        platform: 'meditech', strength: 'strong', re: /press\s+\*enter\*\s+for\s+order\s+details/i },
+  { label: 'Order grid (Pri/Qty/Ord)',   platform: 'generic',  strength: 'strong', re: /pri\s+qty\s+ord/i },
+  { label: 'Category/Procedure grid',     platform: 'generic',  strength: 'strong', re: /category\s+procedure\s+name/i },
+  // ── Epic order/MAR printouts ────────────────────────────────────────────────
+  { label: 'Medication Administration Record', platform: 'epic', strength: 'strong', re: /medication\s+administration\s+record/i },
+  { label: 'Orders & Results grid',      platform: 'epic',     strength: 'strong', re: /\borders?\s*&\s*results\b/i },
+  { label: 'Epic Hyperspace header',    platform: 'epic',      strength: 'strong', re: /epic\s*®\s*(hyperspace|care\s+everywhere)/i },
+  // ── Cerner ──────────────────────────────────────────────────────────────────
+  { label: 'PowerOrders',                platform: 'cerner', strength: 'strong', re: /powerorders?/i },
+  { label: 'PowerForm',                  platform: 'cerner', strength: 'strong', re: /powerform/i },
+  { label: 'MPages',                     platform: 'cerner', strength: 'strong', re: /\bmpages?\b/i },
+  // ── Generic order-entry boilerplate ────────────────────────────────────────
+  { label: 'Order acknowledged',         platform: 'generic', strength: 'strong', re: /order\s+acknowledged/i },
+  { label: 'Order source: EPOM',         platform: 'generic', strength: 'strong', re: /order\s+source:\s*epom/i },
+  // ── Nursing flowsheet / Clinical Documentation Record ──────────────────────
+  { label: 'Clinical Documentation Record', platform: 'meditech', strength: 'strong', re: /clinical\s+documentation\s+record/i },
+  { label: 'Patient Care *LIVE* header',  platform: 'meditech', strength: 'strong', re: /patient\s+care\s*\*live\*/i },
+  { label: 'Diagnosis/Problem/Outcome/Intervention grid', platform: 'meditech', strength: 'strong', re: /diagnos[ie]s\/problem\/outcome\/intervention/i },
+  // ── Discharge instructions provided to patient ──────────────────────────────
+  { label: 'Discharge Instructions (patient-facing)', platform: 'generic', strength: 'strong', re: /discharge\s+instructions\b/i },
+  { label: 'After Visit Summary',        platform: 'epic',    strength: 'strong', re: /after\s+visit\s+summary/i },
+  { label: 'Patient Discharge Instructions header', platform: 'generic', strength: 'strong', re: /instructions\s+(for|to)\s+(the\s+)?patient/i },
+  // ── ER patient-education discharge packet (ExitCare/Krames-style boilerplate) ─
+  { label: 'Patient Visit Information header', platform: 'generic', strength: 'strong', re: /patient\s+visit\s+information/i },
+  { label: '"Comfortable as possible" canned phrase', platform: 'generic', strength: 'strong', re: /comfortable\s+as\s+possible/i },
+  { label: 'Diagnosis and Treatment Reviewed',  platform: 'generic', strength: 'strong', re: /diagnosis\s+and\s+treatment\s+reviewed/i },
+  { label: 'Patient Instructions Reviewed',      platform: 'generic', strength: 'strong', re: /patient\s+instructions\s+reviewed/i },
+  { label: 'Danger signs at home',               platform: 'generic', strength: 'strong', re: /danger\s+signs?\s+at\s+home/i },
+  { label: 'Go to the ER if / nearest ER',        platform: 'generic', strength: 'strong', re: /go\s+to\s+the\s+(nearest\s+)?(er|emergency\s+room)\s+if/i },
+  // MEDIUM: generic patient-education Q&A headers — need 2+
+  { label: 'How is this diagnosed?',             platform: 'generic', strength: 'medium', re: /how\s+is\s+this\s+diagnosed/i },
+  { label: 'How is this treated?',                platform: 'generic', strength: 'medium', re: /how\s+is\s+this\s+treated/i },
+  { label: 'What are the symptoms of this condition?', platform: 'generic', strength: 'medium', re: /what\s+are\s+the\s+symptoms\s+of\s+this\s+condition/i },
+  { label: 'What increases my risk of complications?', platform: 'generic', strength: 'medium', re: /increases?\s+my\s+risk\s+of\s+complications/i },
+  { label: 'What are the causes?',                platform: 'generic', strength: 'medium', re: /what\s+are\s+the\s+causes\?/i },
+  { label: 'What increases the risk?',            platform: 'generic', strength: 'medium', re: /what\s+increases\s+the\s+risk\?/i },
+  { label: 'What are the signs or symptoms?',     platform: 'generic', strength: 'medium', re: /what\s+are\s+the\s+signs?\s+or\s+symptoms/i },
+  { label: 'Follow these instructions at home',   platform: 'generic', strength: 'medium', re: /follow\s+these\s+instructions\s+at\s+home/i },
+  { label: 'Follow these Precautions',            platform: 'generic', strength: 'medium', re: /follow\s+these\s+precautions/i },
+  { label: 'Patient Signature Page',              platform: 'generic', strength: 'strong', re: /patient\s+signature\s+page/i },
+  { label: 'Managing pain, stiffness, and swelling', platform: 'generic', strength: 'strong', re: /managing\s+pain,?\s+stiffness,?\s+and\s+swelling/i },
+  { label: 'CareNow marketing tagline',           platform: 'generic', strength: 'strong', re: /the\s+convenience\s+you\s+need,?\s+the\s+care\s+you\s+deserve/i },
+  { label: 'Removable splint or boot instructions', platform: 'generic', strength: 'medium', re: /removable\s+splint\s+or\s+boot/i },
+  { label: 'Skin/toenails turn blue or gray (danger sign)', platform: 'generic', strength: 'medium', re: /turn(s)?\s+blue\s+or\s+gray/i },
+  { label: 'Krames/ExitCare "not intended" disclaimer', platform: 'generic', strength: 'strong', re: /this\s+information\s+is\s+not\s+(intended|meant)/i },
+  { label: 'Take this sheet with you (AVS handout)', platform: 'generic', strength: 'strong', re: /take\s+this\s+sheet\s+with\s+you/i },
+  { label: 'Studies Done in the Emergency Department', platform: 'generic', strength: 'medium', re: /studies\s+done\s+in\s+the\s+emergency\s+department/i },
+  // ── Meditech MAR / medication-discharge narrative (timestamped entries) ────
+  { label: 'Admin Criterion Entered',    platform: 'meditech', strength: 'strong', re: /admin\s+criterion\s+entered/i },
+  { label: 'Pharmacy Edit or Verification', platform: 'meditech', strength: 'strong', re: /pharmacy\s+edit\s+or\s+verification/i },
+  { label: 'Nurse Acknowledged Order',   platform: 'meditech', strength: 'strong', re: /nurse\s+acknowledged\s+order/i },
+  { label: 'File Document by:',          platform: 'meditech', strength: 'strong', re: /file\s+document\s+by:/i },
+  { label: 'Medication Discharge Summary', platform: 'meditech', strength: 'strong', re: /medication\s+discharge\s+summary/i },
+  // ── MEDIUM: EMR dump boilerplate — need 2+ distinct hits ────────────────────
+  { label: 'RUN DATE',                   platform: 'generic',  strength: 'medium', re: /run\s+date/i },
+  { label: 'RUN TIME',                   platform: 'generic',  strength: 'medium', re: /run\s+time/i },
+  { label: 'RUN USER',                   platform: 'generic',  strength: 'medium', re: /run\s+user/i },
+  { label: 'Order Date grid',            platform: 'generic',  strength: 'medium', re: /order\s+date:\s*\d/i },
+  { label: 'Order Number/Date grid',     platform: 'generic',  strength: 'medium', re: /order\s+number\s+date/i },
+  { label: 'Costign/cosign required field', platform: 'meditech', strength: 'medium', re: /cos[t]?ign\s+required/i },
+  { label: 'RX # dispensing number',     platform: 'meditech', strength: 'medium', re: /\brx\s*#:\s*\d/i },
+  { label: 'Electronically signed stamp', platform: 'generic', strength: 'medium', re: /electronically\s+signed\s+by\s+.*\s+on\s+\d{2}\/\d{2}\/\d{2}\s+at\s+\d{4}/i },
+];
+
+// Classify a single page's text.
+const classifyEmrPage = (pageText) => {
+  if (!pageText) return { flagged: false, platform: '', matched: [] };
+  const matched = EMR_MARKERS.filter(m => m.re.test(pageText));
+  const strong = matched.filter(m => m.strength === 'strong');
+  const medium = matched.filter(m => m.strength === 'medium');
+  const flagged = strong.length > 0 || medium.length >= 2;
+  const platform = strong.length > 0 ? strong[0].platform : (flagged ? 'generic' : '');
+  return { flagged, platform, matched };
+};
+
+// Split extracted text on processWorker page markers; return flagged 1-based page numbers.
+const detectEmrPrintoutPages = (extractedText) => {
+  const flaggedPages = [];
+  if (!extractedText || typeof extractedText !== 'string') return flaggedPages;
+  const chunks = extractedText.split('--- PAGE ');
+  for (let i = 1; i < chunks.length; i++) {
+    const body = chunks[i].replace(/^\s*\d+\s*---/, '');
+    if (classifyEmrPage(body).flagged) flaggedPages.push(i);
+  }
+  return flaggedPages;
+};
+
 
 // ─── AWS swap #1: replaces InvokeLLM ─────────────────────────────────────────
 // Original: base44.integrations.Core.InvokeLLM({ prompt, file_urls, response_json_schema })
@@ -846,6 +998,41 @@ const stripBillingContamination = (text) => {
   out = kept.join(' ').trim();
   out = out.replace(/\s+([,;])\s*$/, '$1').replace(/\s*,\s*$/, '').replace(/\s*\.\s*$/, '.').trim();
   return out;
+};
+
+// Updated: 2026-09-20 -- patient-name majority vote. inputName (explicit
+// user-supplied patient_name at job start) always wins outright if present.
+// Otherwise, tally every candidate string collected across all batches/chunks
+// (case/punctuation/whitespace-normalized for grouping) and return the most
+// frequent group's most common exact-cased variant. Ties break on the longer
+// normalized key (a more complete name beats a shorter partial match).
+const pickPatientName = (inputName, candidates) => {
+  const trimmedInput = (inputName || '').trim();
+  if (trimmedInput) return trimmedInput;
+  const clean = (candidates || []).map(c => (c || '').trim()).filter(Boolean);
+  if (!clean.length) return '';
+  const groups = {};
+  for (const raw of clean) {
+    const normKey = raw.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+    if (!normKey) continue;
+    if (!groups[normKey]) groups[normKey] = { count: 0, variants: {} };
+    groups[normKey].count++;
+    groups[normKey].variants[raw] = (groups[normKey].variants[raw] || 0) + 1;
+  }
+  let bestKey = null, bestGroup = null;
+  for (const [key, g] of Object.entries(groups)) {
+    if (!bestGroup || g.count > bestGroup.count || (g.count === bestGroup.count && key.length > bestKey.length)) {
+      bestKey = key; bestGroup = g;
+    }
+  }
+  if (!bestGroup) return clean[0] || '';
+  let bestVariant = null, bestVariantCount = -1;
+  for (const [variant, count] of Object.entries(bestGroup.variants)) {
+    if (count > bestVariantCount || (count === bestVariantCount && variant.length > (bestVariant || '').length)) {
+      bestVariant = variant; bestVariantCount = count;
+    }
+  }
+  return bestVariant || clean[0] || '';
 };
 
 const sanitizeVisits = (visits, patientName) => {
@@ -1412,7 +1599,7 @@ CRITICAL EXTRACTION RULES:
 Return ALL entries found across ALL documents as separate entries in the visits array.
 
 Also extract:
-- Patient name (should be consistent across documents)
+- Patient name (should be consistent across documents). If the patient's name is handwritten in one place (e.g. filled in on a claim form) but appears TYPED or PRINTED elsewhere in this same batch (e.g. a transcription header, insurer letterhead, typed intake form, or dictated note byline), use the typed/printed spelling — handwritten cursive is frequently misread (e.g. l/r/c confusion), typed text is not. Only fall back to your best reading of the handwriting if no typed occurrence of the name exists anywhere in this batch.
 - Case number (should be consistent across documents)
 
 ${chunkText ? `DOCUMENT TEXT:\n\`\`\`\n${chunkText}\n\`\`\`` : ''}
@@ -1547,6 +1734,10 @@ const generateSummaryChunkWorker = async (event) => {
 
   console.log(`chunkWorker[${chunkIndex}] start: ${batches.length} batches, chunk_job_id=${chunk_job_id}`);
 
+  // Updated: 2026-09-20 -- reset usage accumulator so this chunk's Bedrock
+  // usage isn't polluted by a warm-container leftover from a prior invocation.
+  resetRunUsage();
+
   // Pre-fetch region order once for this chunk worker (avoids DynamoDB read per batch)
   const regionOrder = await getRegionOrder();
   console.log(`chunkWorker[${chunkIndex}] regionOrder: ${regionOrder.map(r => r.region).join(' → ')}`);
@@ -1554,6 +1745,14 @@ const generateSummaryChunkWorker = async (event) => {
   const chunkVisits = [];
   let patientName   = patientNameHint || '';
   let caseNumber    = '';
+  // Updated: 2026-09-20 -- patient-name majority vote (fixes name spelling
+  // instability across runs, e.g. "Belk"/"Berk"/"Beck" from the same
+  // documents). Every batch independently guesses patient_name from
+  // whatever it can see; a handwritten field (like a C-4 claim form) can be
+  // misread differently batch to batch. Track EVERY non-empty guess here
+  // instead of keeping only the first -- the coordinator tallies all
+  // chunks' candidates and picks the most common spelling.
+  const patientNameCandidates = [];
 
   const fullSchema = {
     type: 'object',
@@ -1701,6 +1900,7 @@ const generateSummaryChunkWorker = async (event) => {
       for (const result of results) {
         if (!result) continue;
         if (!patientName && result.patient_name) patientName = result.patient_name;
+        if (result.patient_name) patientNameCandidates.push(result.patient_name);
         if (!caseNumber  && result.case_number)  caseNumber  = result.case_number;
         const clean = sanitizeVisits(result.visits || [], patientName);
         chunkVisits.push(...clean);
@@ -1717,7 +1917,7 @@ const generateSummaryChunkWorker = async (event) => {
       ExpressionAttributeNames: { '#s': 'status', '#res': 'result' },
       ExpressionAttributeValues: {
         ':s': 'complete',
-        ':r': { visits: chunkVisits, patient_name: patientName, case_number: caseNumber },
+        ':r': { visits: chunkVisits, patient_name: patientName, patient_name_candidates: patientNameCandidates, case_number: caseNumber, usage: { ...RUN_USAGE } },
         ':now': new Date().toISOString(),
       },
     }));
@@ -1738,7 +1938,7 @@ const generateSummaryChunkWorker = async (event) => {
 const generateSummaryWorker = async (event) => {
   const { job_id, doc_ids, patient_name = '', org_id, exclude_emr = false, include_all_pt = false } = event;
   const consolidate_pt = !include_all_pt;  // UI default: "Include all PT sessions" unchecked = first & last only
-  console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length}${exclude_emr ? ' [NARRATIVE-ONLY: EMR pages excluded]' : ''}${consolidate_pt ? ' [PT/OT PRE-CONSOLIDATION: first+last per facility group]' : ' [ALL PT SESSIONS INCLUDED]'}`);
+  console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length} [AUTOMATIC NARRATIVE-ONLY: EMR/administrative pages excluded]${consolidate_pt ? ' [PT/OT PRE-CONSOLIDATION: first+last per facility group]' : ' [ALL PT SESSIONS INCLUDED]'}`);
 
   // ── Idempotency guard — Lambda async invocation has at-least-once delivery.
   // If this job_id already has a summary_id stamped on it, a previous invocation
@@ -2111,15 +2311,29 @@ const generateSummaryWorker = async (event) => {
       // Narrative-only runs subtract pages classified as EMR printouts by the
       // EMR Detector (saved on the part record as emr_flagged_pages — LOCAL
       // 1-based page numbers within this part's PDF). Gated by the run's
-      // exclude_emr flag: baseline runs are completely untouched.
+      // Updated: 2026-09-20 -- automatic EMR/administrative-printout exclusion.
+      // No longer gated behind exclude_emr (there is no user-facing toggle --
+      // this runs on every summary generation, live and dev, unconditionally).
+      // Live detection (detectEmrPrintoutPages, same regex engine as the former
+      // frontend EmrDetector) is computed fresh from the part's extracted_text
+      // so this is fully self-contained -- no detector run, no persisted flags,
+      // no extra LLM cost required. Persisted part.emr_flagged_pages (from any
+      // legacy manual detector run) is used only as a fallback when
+      // extracted_text is unavailable.
       const emrPages = new Set();
-      if (exclude_emr && Array.isArray(part.emr_flagged_pages)) {
-        for (const p of part.emr_flagged_pages) {
-          const n = parseInt(p, 10);
-          if (!isNaN(n) && n >= 1) emrPages.add(n);
+      {
+        let liveFlagged = [];
+        if (part.extracted_text) liveFlagged = detectEmrPrintoutPages(part.extracted_text);
+        if (liveFlagged.length > 0) {
+          liveFlagged.forEach(p => emrPages.add(p));
+        } else if (Array.isArray(part.emr_flagged_pages) && part.emr_flagged_pages.length > 0) {
+          for (const p of part.emr_flagged_pages) {
+            const n = parseInt(p, 10);
+            if (!isNaN(n) && n >= 1) emrPages.add(n);
+          }
         }
         if (emrPages.size > 0) {
-          console.log(`coordinator: part ${part.label} — excluding ${emrPages.size} EMR printout pages (narrative-only run)`);
+          console.log(`coordinator: part ${part.label} — excluding ${emrPages.size} EMR/administrative printout pages (automatic narrative-only filtering)`);
         }
       }
       const partVisits = knownVisits.filter(v => v.source_doc_id === part.id && Array.isArray(v.pages) && v.pages.length > 0);
@@ -2262,16 +2476,32 @@ const generateSummaryWorker = async (event) => {
     let allVisits = [];
     await setJobStatus(job_id, 'Merging results...');
 
+    // Updated: 2026-09-20 -- collect every chunk's full patient_name candidate
+    // list (not just its first guess) so the final name can be a majority
+    // vote across the WHOLE run, computed once all chunks are in.
+    const patientNameCandidates = [];
     for (const cjid of chunkJobIds) {
       const r = await dynamo.send(new GetCommand({ TableName: JOBS_TABLE, Key: { job_id: cjid } }));
       const chunkResult = r.Item?.result;
       if (!patientName && chunkResult?.patient_name) patientName = chunkResult.patient_name;
+      if (Array.isArray(chunkResult?.patient_name_candidates)) {
+        patientNameCandidates.push(...chunkResult.patient_name_candidates);
+      }
       if (!caseNumber  && chunkResult?.case_number)  caseNumber  = chunkResult.case_number;
       if (Array.isArray(chunkResult?.visits)) {
         allVisits = allVisits.concat(chunkResult.visits);
         console.log(`coordinator: merged ${chunkResult.visits.length} visits from chunk ${cjid.slice(0,8)}`);
       }
+      // Fold this chunk's Bedrock usage into the coordinator's running total --
+      // extraction calls happen in the chunk worker's own Lambda invocation, so
+      // this is the only place that usage data can be recovered.
+      mergeRunUsage(chunkResult?.usage);
     }
+    const votedPatientName = pickPatientName(patient_name, patientNameCandidates);
+    if (votedPatientName && votedPatientName !== patientName) {
+      console.log(`coordinator: patient_name majority vote -- candidates=${JSON.stringify(patientNameCandidates)} -> picked "${votedPatientName}" (first-seen was "${patientName}")`);
+    }
+    patientName = votedPatientName || patientName;
 
     // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
@@ -2628,6 +2858,21 @@ const generateSummaryWorker = async (event) => {
     // Save summary record as 'draft' — immediately visible in UI
     const aws_summary_id = require('crypto').randomUUID();
     const org_id = docRecords[0]?.org_id || '';
+    // Updated: 2026-09-20 (v2) -- per-document cost calculator now covers the
+    // WHOLE pipeline, not just summary generation. total_pages is the
+    // ORIGINAL document page count (sum across every uploaded doc, including
+    // any part skipped as fully non-clinical) -- that's the number relevant
+    // to a future per-page price, not the (smaller) page count actually sent
+    // to the LLM after EMR filtering. upload_classify_cost_usd sums each
+    // doc's Assess Relevance + Classify cost (persisted by documents_new.js
+    // at upload/classify time); summary_generation_cost_usd is this run's
+    // RUN_USAGE (main pass + chunk workers). estimated_cost_usd is the total
+    // of both -- that total, divided by total_pages, is the real cost/page.
+    const totalPagesForCost = docRecords.reduce((sum, d) => sum + (d.page_count || 0), 0);
+    const uploadClassifyCostUsd = docRecords.reduce((sum, d) => sum + (d.processing_cost_usd || 0) + (d.classify_cost_usd || 0), 0);
+    const summaryGenCostUsd = computeUsageCost(RUN_USAGE).estimated_cost_usd;
+    const totalCostUsd = Math.round((uploadClassifyCostUsd + summaryGenCostUsd) * 10000) / 10000;
+    const costPerPage = totalPagesForCost > 0 ? Math.round((totalCostUsd / totalPagesForCost) * 10000) / 10000 : 0;
     await dynamo.send(new PutCommand({
       TableName: SUMMARIES_TABLE,
       Item: {
@@ -2639,7 +2884,12 @@ const generateSummaryWorker = async (event) => {
         doc_count:     docRecords.length,
         visit_count:   allVisits.length,
         usage:         { ...RUN_USAGE },
-        narrative_only: !!exclude_emr,
+        total_pages:                totalPagesForCost,
+        upload_classify_cost_usd:   Math.round(uploadClassifyCostUsd * 10000) / 10000,
+        summary_generation_cost_usd: summaryGenCostUsd,
+        estimated_cost_usd:         totalCostUsd,
+        cost_per_page:              costPerPage,
+        narrative_only: true, // automatic as of 2026-09-20 -- no longer conditional on exclude_emr
         pt_consolidated: !!consolidate_pt,
         status:        'draft',
         created_at:    new Date().toISOString(),
@@ -3032,6 +3282,12 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     const patientName = summary.patient_name || '';
     const regionOrder = null; // callBedrock/callBedrockVI resolve regions internally when null
 
+    // Updated: 2026-09-20 -- seed usage from the already-saved main-pass total
+    // (and clear any warm-container leftover first) so this run's write-back
+    // is a superset: main pass + whatever recovery calls verify makes below.
+    resetRunUsage();
+    mergeRunUsage(summary.usage);
+
     // 2. Load document parts (need file_key + extracted_text)
     const docRecords = [];
     for (const doc_id of (doc_ids || [])) {
@@ -3304,10 +3560,22 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     // Stale-guard: skip the write-back if the user saved the summary while verify was
     // running, so verify never clobbers manual edits.
     try {
+      // Updated: 2026-09-20 (v2) -- recompute cost fields on the superset
+      // RUN_USAGE (main pass + this verify run's recovery calls), PLUS the
+      // same upload/classify cost this doc set already carries, so the
+      // persisted estimated_cost_usd/cost_per_page reflect the TRUE full
+      // pipeline cost, not summary-generation alone.
+      const verifyTotalPages = (summary.total_pages || 0) || docRecords.reduce((sum, d) => sum + (d.page_count || 0), 0);
+      const verifyUploadClassifyCostUsd = (summary.upload_classify_cost_usd != null)
+        ? summary.upload_classify_cost_usd
+        : docRecords.reduce((sum, d) => sum + (d.processing_cost_usd || 0) + (d.classify_cost_usd || 0), 0);
+      const verifySummaryGenCostUsd = computeUsageCost(RUN_USAGE).estimated_cost_usd;
+      const verifyTotalCostUsd = Math.round((verifyUploadClassifyCostUsd + verifySummaryGenCostUsd) * 10000) / 10000;
+      const verifyCostPerPage = verifyTotalPages > 0 ? Math.round((verifyTotalCostUsd / verifyTotalPages) * 10000) / 10000 : 0;
       await dynamo.send(new UpdateCommand({
         TableName: SUMMARIES_TABLE,
         Key: { aws_summary_id },
-        UpdateExpression: 'SET visits = :v, visit_count = :vc, verification_result = :vr, #st = :st, #usg = :usg, updated_at = :now',
+        UpdateExpression: 'SET visits = :v, visit_count = :vc, verification_result = :vr, #st = :st, #usg = :usg, total_pages = :tp, upload_classify_cost_usd = :ucc, summary_generation_cost_usd = :sgc, estimated_cost_usd = :cost, cost_per_page = :cpp, updated_at = :now',
         ConditionExpression: 'attribute_not_exists(updated_at) OR updated_at = :expected_updated',
         ExpressionAttributeNames: { '#st': 'status', '#usg': 'usage' },
         ExpressionAttributeValues: {
@@ -3316,6 +3584,11 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
           ':vr': verification_result,
           ':st': verification_result.status,
           ':usg': { ...RUN_USAGE, through: 'verify' },
+          ':tp': verifyTotalPages,
+          ':ucc': Math.round(verifyUploadClassifyCostUsd * 10000) / 10000,
+          ':sgc': verifySummaryGenCostUsd,
+          ':cost': verifyTotalCostUsd,
+          ':cpp': verifyCostPerPage,
           ':now': new Date().toISOString(),
           ':expected_updated': (summary.updated_at || ''),
         },
