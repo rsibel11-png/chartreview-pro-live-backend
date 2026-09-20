@@ -2898,6 +2898,25 @@ const generateSummaryWorker = async (event) => {
     }));
     console.log(`coordinator: summary saved as draft — aws_summary_id=${aws_summary_id}`);
 
+    // Updated: 2026-09-20 -- LIVE-ONLY: stamp already_summarized on every doc used in
+    // this run so a future re-run of the same document(s) can be detected and charged
+    // again. Pages are only paid for once at upload time; a repeat summary generation
+    // on documents that already produced a completed summary needs its own page
+    // deduction (see MedicalSummaries.tsx generateSummary()/handleRerunPaymentProceed(),
+    // which reads this flag and gates behind PagePaymentDialog + POST /stripe/deduct).
+    // Fire-and-forget per doc -- a failed stamp here must never fail the summary run.
+    for (const doc of docRecords) {
+      try {
+        await dynamo.send(new UpdateCommand({
+          TableName: DOCS_TABLE, Key: { aws_document_id: doc.aws_document_id },
+          UpdateExpression: 'SET already_summarized = :t, already_summarized_at = :now',
+          ExpressionAttributeValues: { ':t': true, ':now': new Date().toISOString() },
+        }));
+      } catch (stampDocErr) {
+        console.warn(`coordinator: failed to stamp already_summarized on doc ${doc.aws_document_id} (non-fatal):`, stampDocErr.message);
+      }
+    }
+
     // Stamp summary_id onto the job record — idempotency guard for duplicate Lambda invocations
     try {
       await dynamo.send(new UpdateCommand({
