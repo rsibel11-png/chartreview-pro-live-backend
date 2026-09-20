@@ -10,6 +10,7 @@
     "@aws-sdk/client-textract": "3.370.0",
     "@aws-sdk/lib-dynamodb": "3.370.0",
     "@aws-sdk/s3-request-presigner": "3.370.0",
+    "aws-jwt-verify": "^5.2.1",
     "pdf-lib": "^1.17.1",
     "uuid": "^9.0.0"
   }
