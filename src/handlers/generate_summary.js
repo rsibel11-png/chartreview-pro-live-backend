@@ -1,4 +1,58 @@
+// Updated: 2026-09-20 (v3) -- Imaging findings vs Physical Exam fix, redone clean from pre-imaging baseline (v1/v2 attempts discarded). Rule 6 excludes radiograph/imaging interpretation from physical_exam_findings. Rule 7 now requires the actual radiographic OBSERVATION (alignment, hardware, healing, displacement) with a concrete good/bad example pair -- explicitly bans substituting the ICD-10 diagnosis description/language (the v2 failure mode Roman caught: model was padding imaging_findings with diagnosis text like "displaced trimalleolar fracture... subsequent encounter" instead of a real finding). If no observation exists in the note, only the study name/view count is written -- no padding from diagnosis or impression text.
 // Updated: 2026-09-19 -- per-user isolation: generateSummaryStart / buildVisitIndexStart now verify every doc_id in the request actually belongs to the caller's org (event._orgId, from verified JWT) before starting a job; admin (event._isAdmin) bypasses. Client-supplied body.org_id is no longer trusted except for admin QC override. No other flow touched.
+// Updated: 2026-09-16 — PT/OT consolidation v2.1: (a) normFacilityPt strips parentheticals/commas/slashes FIRST then dash-suffixes (incl. - Las Vegas), so all address + naming variants form ONE group; (b) same-date dedup is per normalized PROVIDER — billing-sheet "Unknown (billed as ...)" entries never outrank named notes; (c) initial evaluations and discharge summaries (pt_index "type") are never consolidated away; (d) runBatch subtracts ptExclude pages AFTER the ±1 encounter-edge buffer so excluded PT pages can never be resurrected. Additive to the v1 consolidation block; no other stage touched.
+// Updated: 2026-09-16 — PT/OT consolidation v2: (a) normFacilityPt strips comma-addresses and collapses ALL whitespace so "ATI Physical Therapy, 7301..." and "Mountain View"/"Mountainview" variants merge into one group; (b) same-date multi-part duplicate copies deduped (richest kept, other copies' pages excluded); (c) initial evaluations and discharge summaries (pt_index "type") are never consolidated away; (d) runBatch subtracts ptExclude pages AFTER the ±1 encounter-edge buffer so excluded PT pages can never be resurrected. Additive to the v1 consolidation block; no other stage touched.
+// Updated: 2026-09-15 — Radiology exam disambiguation in deduplicateVisits (ZSolis
+// Gardner case). Root cause: the dedup key was date+provider+setting-BUCKET, and
+// "radiology report" is one bucket regardless of what was imaged — so same-day,
+// same-reading-radiologist studies of DIFFERENT body parts (ankle vs femur) or at
+// DIFFERENT exam times (pre-reduction vs post-reduction) collapsed into one merged,
+// content-contaminated entry (a "post-reduction" entry that showed pre-reduction
+// fracture findings; the femur film disappeared entirely). Fix: for radiology-report-
+// bucket visits only, extend the dedup key with a body-part token (parsed from
+// imaging_findings/hpi/chief_complaint/treatment_plan) and an exam-phase/time token
+// (explicit pre-reduction/post-reduction language, else a literal clock time if the
+// documentation states one). Two radiology entries only collapse when BOTH the body
+// part AND the phase/time signal agree (or neither is present at all, preserving the
+// old behavior for genuine same-report duplicate extractions). This does not touch
+// non-radiology dedup — same-day judgment-call duplicates elsewhere remain the user's
+// call per standing instruction.
+// Updated: 2026-09-15 — Conservative dedup hardening + billing-statement visit veto
+// (post-narrative-only validation): (1) mergeEdVisits now groups ED entries by date +
+// FULL normalized facility string instead of its first word — "Mountain View Hospital"
+// vs "Mountainview Hospital" spelling variants previously split one ED encounter into
+// two entries; (2) normalizeSettingForDedup fallback strips non-alphanumerics so
+// punctuation/space variants of the same facility dedup; (3) sanitizeVisits vetoes
+// visit entries minted from billing statements (setting markers, or all narrative
+// fields empty after the billing scrub) — C-4 exempt; (4) prompt rule 6 extended:
+// a billing statement is not an encounter — never create a visit entry from it.
+// Same-day duplicate JUDGMENT CALLS remain for the user — only unambiguous duplicates
+// (same date + same provider + same facility modulo spelling) auto-merge.
+// Updated: 2026-09-12 — Async verify handoff (900s coordinator timeout fix): coordinator now fires
+// verifySummaryWorker via async Event invoke after markJobComplete instead of running verify inline
+// (chunks consume ~9+ of the coordinator's 15 min on large corpora, so inline verify was TASK-killed
+// mid-loop and recovery never ran). Verify worker VI pre-pass parallelized (concurrency 4).
+// Updated: 2026-09-12 — Keep-richest dedup fix (ZSolis/Hillock): deduplicateVisits now keeps the
+// entry with the most clinical content per date+provider+setting key instead of the first arrival,
+// merging longer field values from dropped duplicates (billing-stub entries from clinic charge
+// statements previously out-raced the real History & Physical notes in batch order).
+// Also fixed mergeEdVisits wrong field name: 'physical_examination' → 'physical_exam_findings'.
+// Updated: 2026-09-15 — EMR narrative-only runs: generateSummaryStart accepts
+// exclude_emr flag (job record + worker payload); coordinator subtracts each
+// part's saved emr_flagged_pages (EMR Detector output, local page numbers) from
+// encounter-scoped batches and the full-doc fallback (union with pleading-paper
+// exclusion). Summary record gains narrative_only flag. Baseline runs
+// (exclude_emr absent/false) are byte-identical in behavior to before.
+// Updated: 2026-09-15 — Per-run Bedrock usage capture: callBedrock/callBedrockText
+// now record ACTUAL input/output tokens from each Bedrock response into RUN_USAGE
+// (reset per coordinator run, persisted on the summary record 'usage' field at draft
+// save and verify write-back). runBatch tracks pages_sent per attempt. Enables
+// real cost comparison of whole-doc baseline vs EMR-narrative-only runs. No changes
+// to extraction prompts, batch building, or visit logic — capture only.
+// Updated: 2026-09-07 — Pleading-paper page exclusion (2-step): detect numbered pleading paper per page via Textract text (sequential margin numbers >= 25, step 1) AND confirm no EMR print-header signature (step 2 veto). Exclude those pages from LLM input at batch build. Legal-only parts skipped entirely; medical records attached inside discovery docs are kept page-by-page.
+// Updated: 2026-09-07 — Encounter-level cleanup: (a) discharge documents now date to the DISCHARGE date (DATE/REP SRV DT/DISCH), never the ADMIT date — fixes 03/15-labeled discharge summary that is actually the 03/19 discharge; (b) nursing Clinical Documentation Records (per-shift assessments), implant/vendor supply logs, and discharge medication lists excluded in extraction prompt, VI census prompt, AND deterministic sanitizeVisits drop layer.
+// Updated: 2026-09-07 — Junk-class cleanup pass 2: (a) case management / discharge planning notes, expert reports, and care-coordination-only calls excluded in prompt rules (11j)-(11l) AND deterministic sanitizeVisits drops (clinical-content calls kept via marker check); (b) court case number harvested from extracted_text at coordinator (pleading captions no longer reach the LLM).
+// Updated: 2026-09-07 — Resident/cosign merge: a resident-authored note cosigned by an attending is ONE encounter. New mergeResidentCosignVisits pass merges attending-solo duplicates of resident notes (same date + facility + matching cosigning attending), absorbing richest content per field. Prompt rule (14) added: co-signature/attestation is never a separate visit.
 // Updated: 2026-08-30 — Restored to 24ea835 baseline + max_tokens 64k (known-good direct-deployed fix)
 // Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
@@ -133,6 +187,39 @@ const saturateRegion = async (region) => {
   }
 };
 
+// ─── Per-run Bedrock usage capture (2026-09-15) ──────────────────────────────
+// Captures ACTUAL input/output token counts from every Bedrock response so runs
+// can be cost-compared (e.g., whole-document baseline vs EMR-narrative-only).
+// resetRunUsage() is called at coordinator start; the accumulated totals are
+// persisted on the summary record (usage field) at draft save and at verify
+// write-back (superset — verify's own calls included). Non-fatal by design:
+// usage tracking must never break the main flow.
+const RUN_USAGE = {
+  calls: 0, vision_calls: 0, text_calls: 0,
+  vision_input_tokens: 0, text_input_tokens: 0, output_tokens: 0,
+  pages_sent: 0, models: {},
+};
+const resetRunUsage = () => {
+  RUN_USAGE.calls = 0; RUN_USAGE.vision_calls = 0; RUN_USAGE.text_calls = 0;
+  RUN_USAGE.vision_input_tokens = 0; RUN_USAGE.text_input_tokens = 0;
+  RUN_USAGE.output_tokens = 0; RUN_USAGE.pages_sent = 0; RUN_USAGE.models = {};
+};
+const recordUsage = (kind, modelId, usage) => {
+  try {
+    if (!usage) return;
+    RUN_USAGE.calls++;
+    if (kind === 'vision') {
+      RUN_USAGE.vision_calls++;
+      RUN_USAGE.vision_input_tokens += usage.input_tokens || 0;
+    } else {
+      RUN_USAGE.text_calls++;
+      RUN_USAGE.text_input_tokens += usage.input_tokens || 0;
+    }
+    RUN_USAGE.output_tokens += usage.output_tokens || 0;
+    RUN_USAGE.models[modelId] = (RUN_USAGE.models[modelId] || 0) + 1;
+  } catch (uErr) { /* non-fatal */ }
+};
+
 // Pick the region with the lowest token usage today.
 // Time-of-day heuristic: deprioritize US regions during US business hours (13:00-23:00 UTC = 9am-7pm ET)
 const selectBestRegions = (usage) => {
@@ -201,6 +288,70 @@ const slicePdfPages = async (fileKey, pages) => {
   return Buffer.from(slicedBytes);
 };
 
+// ─── Pleading-paper page detection (2026-09-07) ───────────────────────────────
+// Numbered pleading paper (CA CRC 2.100 / NV district courts / most federal
+// courts) = court-filing format: sequential line numbers 1-28 down the left
+// margin, on every legal filing (pleadings, discovery responses, motions).
+// It never appears in medical records. Detected from the Textract page text:
+// standalone integer lines forming a long sequential run.
+// Validated on the full Wheat corpus (2026-09-07): every legal filing page
+// runs exactly 28 (one 36-line template); the worst clinical pages — MEDITECH
+// pharmacy audit trails, which are numbered event logs — max out at 23. The
+// margin column in pleading paper ALWAYS spans the full 1-28 template, while
+// numbered clinical lists stop where the list ends. Threshold 25 sits 2 above
+// the worst clinical page and 3 below nominal pleading. Pages that don't reach
+// it are ALWAYS sent to Bedrock (fail-safe direction: an undetected legal page
+// only costs tokens, never drops content).
+const PLEADING_MIN_SEQ = 25;
+
+// Second-step verification (2026-09-07): a page carrying an EMR print-header
+// signature is NEVER excluded, even if its margin-number run crosses the
+// pleading threshold. EMR export headers (MEDITECH RUN DATE blocks, Epic,
+// Cerner, etc.) appear only on medical-system pages — pleading filings never
+// print them. This veto can only KEEP a page (fail-safe), never drop one:
+// clinical numbered lists that happen to cross the threshold are protected
+// structurally. A vetoed pleading page is merely sent to Bedrock (token cost).
+// Note: headerless clinical continuation sheets are unaffected — the veto
+// guards against exclusion, it never triggers one.
+const EMR_PRINT_HEADER_RE = /RUN\s+DATE\s*:|MEDITECH|RUN\s+TIME|EPIC\b|CERNER|ALLSCRIPTS|MYCHART|E\.?C\.?W\.?\b|NEXTGEN\b|ATHENAHEALTH/i;
+
+const pleadingSeqRun = (pageText) => {
+  let seqRun = 0;
+  let expect = 1;
+  for (const rawLine of pageText.split('\n')) {
+    const t = rawLine.trim();
+    if (/^\d{1,2}$/.test(t)) {
+      const n = parseInt(t, 10);
+      if (n === expect) { seqRun += 1; expect += 1; }
+    }
+  }
+  return seqRun;
+};
+
+// Returns a Set of 1-based page numbers (within this part) that exhibit
+// pleading-paper formatting. Empty set if extracted_text is unavailable.
+const detectPleadingPages = (extractedText) => {
+  const out = new Set();
+  if (!extractedText || typeof extractedText !== 'string') return out;
+  const pages = extractedText.split('--- PAGE ');
+  for (let i = 1; i < pages.length; i++) {
+    // strip the leading "N ---" page marker remnant
+    const body = pages[i].replace(/^\s*\d+\s*---/, '');
+    if (pleadingSeqRun(body) >= PLEADING_MIN_SEQ && !EMR_PRINT_HEADER_RE.test(body)) out.add(i);
+  }
+  return out;
+};
+
+// All 1-based pages of a part (1..partPageCount) minus pleading pages.
+// Only called when partPageCount > 0.
+const keptPagesOf = (pleadingPages, partPageCount) => {
+  const kept = [];
+  for (let p = 1; p <= partPageCount; p++) {
+    if (!pleadingPages.has(p)) kept.push(p);
+  }
+  return kept;
+};
+
 // ─── AWS swap #1: replaces InvokeLLM ─────────────────────────────────────────
 // Original: base44.integrations.Core.InvokeLLM({ prompt, file_urls, response_json_schema })
 // New: fetch each PDF from S3 as base64, send to Bedrock with same prompt + schema
@@ -263,6 +414,8 @@ const callBedrock = async (fileKeys, prompt, schema, regionOrder, pageScope = nu
         if (!toolUse) throw new Error('Bedrock returned no tool_use block');
         console.log(`callBedrock: success region=${region} model=${modelId}`);
         console.log('callBedrock input keys: ' + Object.keys(toolUse.input || {}).join(','));
+        // Capture ACTUAL token usage for run cost reporting
+        recordUsage('vision', modelId, parsed && parsed.usage);
         // Increment usage counter (estimate ~5000 tokens per call)
         await incrementRegionUsage(region, 5000);
         return toolUse.input;
@@ -327,6 +480,8 @@ const callBedrockText = async (textContent, prompt, schema, regionOrder) => {
         const toolUse = parsed.content?.find(b => b.type === 'tool_use');
         if (!toolUse) throw new Error('Bedrock returned no tool_use block');
         console.log(`callBedrockText: success region=${region} model=${modelId}`);
+        // Capture ACTUAL token usage for run cost reporting
+        recordUsage('text', modelId, parsed && parsed.usage);
         await incrementRegionUsage(region, 2000); // text-only calls are cheaper
         return toolUse.input;
       } catch (err) {
@@ -439,7 +594,10 @@ const normalizeSettingForDedup = (raw) => {
   if (s.includes('radiology report') || s.includes('radiology')) return 'radiology report';
   if (s.includes('c-4') || s.includes('c4 ') || s.includes("employee's claim")) return 'c4';
   // For office visits and anything else, use full normalized string so same-date same-provider office visits dedup
-  return s.replace(/\s+/g, ' ').trim();
+  // Updated: 2026-09-15 — strip ALL non-alphanumerics so punctuation/space variants of
+  // the same facility ("Mountain View" vs "Mountainview") collapse to one dedup key.
+  // Only reaches this fallback for non-bucketed settings; bucketed types are unchanged.
+  return s.replace(/[^a-z0-9]/g, '');
 };
 
 
@@ -458,9 +616,12 @@ const mergeEdVisits = (visits) => {
                  s.includes('emergency provider');
     if (!isED || !v.visit_date) { nonEd.push(v); return; }
 
-    // Group by date + first word of facility (e.g. "Sunrise")
-    const facilityWord = (v.practice_setting || '').split(/[\s\-–—,]/)[0].toLowerCase();
-    const groupKey = `${v.visit_date}|${facilityWord}`;
+    // Updated: 2026-09-15 — group by date + FULL facility string, lowercased with all
+    // non-alphanumerics removed. The old first-word key failed on spelling variants:
+    // "Mountain View Hospital - ED" keyed on "mountain" while "Mountainview Hospital -
+    // ED" keyed on "mountainview", so the same ED encounter stayed as two entries.
+    const facilityNorm = (v.practice_setting || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const groupKey = `${v.visit_date}|${facilityNorm}`;
     if (!edGroups[groupKey]) edGroups[groupKey] = [];
     edGroups[groupKey].push(v);
   });
@@ -480,7 +641,8 @@ const mergeEdVisits = (visits) => {
 
     // Merge: for each field, keep the longer value
     const result = { ...base };
-    const textFields = ['hpi_summary','treatment_plan','impression_diagnosis','chief_complaint','physical_examination','pain_scale'];
+    // Updated: 2026-09-12 — fixed wrong field name ('physical_examination' is not a schema field; exam findings were never merged across ED entries)
+    const textFields = ['hpi_summary','treatment_plan','impression_diagnosis','chief_complaint','physical_exam_findings','pain_scale'];
     group.forEach(other => {
       if (other === base) return;
       textFields.forEach(f => {
@@ -508,27 +670,183 @@ const mergeEdVisits = (visits) => {
 const deduplicateVisits = (visits) => {
   const visitList = visits || [];
 
-  // Exact dedup: same date + normalized-provider + canonical-setting-type
-  const exactKeys = new Set();
-  const deduped = visitList.filter((visit) => {
+  // Updated: 2026-09-12 — KEEP THE RICHEST ENTRY, NOT THE FIRST (ZSolis/Hillock fix).
+  // Root cause: for the same date+provider+setting, an entry extracted from a clinic
+  // charge-statement (billing stub) arrived in an earlier batch than the real
+  // History & Physical note; first-wins dedup silently discarded the rich clinical
+  // note (wound exam, radiograph review, Keflex course all lost — logged as
+  // "dropping duplicate 2023-09-26 Ronald W. Hillock, MD"). New behavior: per key,
+  // the entry with the most clinical content is the base, and longer field values
+  // are merged in from every dropped duplicate (same strategy as mergeEdVisits).
+  // The merged result is emitted at the FIRST occurrence's position, so output
+  // ordering is unchanged. Cross-date merging is still impossible — the key
+  // includes the date, so brief same-provider follow-ups on different dates are
+  // never merged (standing requirement, 2026-07-27).
+
+  const CONTENT_FIELDS = ['hpi_summary','chief_complaint','impression_diagnosis','treatment_plan','physical_exam_findings','imaging_findings','lab_findings','symptom_progression','pain_scale','injury_date'];
+  const contentScore = (v) => CONTENT_FIELDS.reduce((s, f) => s + ((v && v[f]) ? String(v[f]).length : 0), 0);
+
+  // Updated: 2026-09-15 — radiology exam disambiguator + shared key builder.
+  // A body part or explicit exam-phase/time signal, when present, is added to the
+  // dedup key so distinct radiology studies never collapse just because they share
+  // a date and reading radiologist. Returns '' (no extra signal) when neither is
+  // found, which preserves prior behavior for true duplicate extractions.
+  const BODY_PART_TERMS = ['ankle','femur','tibia','fibula','tibia/fibula','knee','patella','hip','pelvis','wrist','forearm','radius','ulna','elbow','humerus','shoulder','clavicle','scapula','hand','finger','thumb','foot','toe','calcaneus','chest','ribs','rib','abdomen','cervical spine','thoracic spine','lumbar spine','spine','skull','head','facial','sacrum','coccyx'];
+  const radiologyExamSignature = (visit) => {
+    const text = [visit.imaging_findings, visit.hpi_summary, visit.chief_complaint, visit.treatment_plan]
+      .filter(Boolean).join(' ').toLowerCase();
+    if (!text) return '';
+    let bodyPart = '';
+    let bestIdx = Infinity;
+    BODY_PART_TERMS.forEach((term) => {
+      const idx = text.indexOf(term);
+      if (idx !== -1 && idx < bestIdx) { bestIdx = idx; bodyPart = term; }
+    });
+    let phase = '';
+    if (/post[\s-]?reduction/.test(text)) phase = 'post';
+    else if (/pre[\s-]?reduction/.test(text)) phase = 'pre';
+    else {
+      const timeMatch = text.match(/\b(\d{1,2}):(\d{2})\s*(am|pm)?\b/);
+      if (timeMatch) phase = `${timeMatch[1]}:${timeMatch[2]}${timeMatch[3] || ''}`;
+    }
+    if (!bodyPart && !phase) return '';
+    return `${bodyPart}::${phase}`;
+  };
+
+  const computeDedupKey = (visit) => {
     const dateKey     = (visit.visit_date || '').trim();
     const providerKey = normalizeProviderForDedup(visit.rendering_provider);
     const settingKey  = normalizeSettingForDedup(visit.practice_setting);
-    if (!dateKey && !providerKey) return true;
-    const key = `${dateKey}|${providerKey}|${settingKey}`;
-    if (exactKeys.has(key)) {
-      console.log(`deduplicateVisits: dropping duplicate ${dateKey} ${visit.rendering_provider} [${visit.practice_setting}]`);
-      return false;
+    if (!dateKey && !providerKey) return null; // passthrough — never grouped
+    let key = `${dateKey}|${providerKey}|${settingKey}`;
+    if (settingKey === 'radiology report') {
+      const sig = radiologyExamSignature(visit);
+      if (sig) key += `|${sig}`;
     }
-    exactKeys.add(key);
-    return true;
+    return key;
+  };
+
+  // Group by exact key, preserving first-occurrence order
+  const groups = new Map();
+  const keyOrder = [];
+  visitList.forEach((visit) => {
+    const key = computeDedupKey(visit);
+    if (key === null) return; // passthrough handled at emit time
+    if (!groups.has(key)) { groups.set(key, []); keyOrder.push(key); }
+    groups.get(key).push(visit);
   });
 
-  return deduped;
-};
+  // Pre-compute the merged (richest) result per multi-entry key
+  const mergedByKey = new Map();
+  keyOrder.forEach((key) => {
+    const group = groups.get(key);
+    if (group.length === 1) return; // single entry — no merge needed
+    // Stable sort: highest content score wins; ties keep first-occurrence order
+    const base = group.slice().sort((a, b) => contentScore(b) - contentScore(a))[0];
+    const result = { ...base };
+    group.forEach((other) => {
+      if (other === base) return;
+      CONTENT_FIELDS.forEach((f) => {
+        if (String(other[f] || '').length > String(result[f] || '').length) result[f] = other[f];
+      });
+      const codes = new Set([].concat(result.icd10_codes || []).concat(other.icd10_codes || []));
+      result.icd10_codes = Array.from(codes);
+    });
+    console.log(`deduplicateVisits: merged ${group.length} duplicates [${key}] — kept richest entry (content score ${contentScore(base)})`);
+    mergedByKey.set(key, result);
+  });
+
+  // Emit in original order: passthrough entries stay in place; the first
+  // occurrence of each dedup key carries the merged-richest entry; later
+  // duplicates are skipped.
+  const emitted = new Set();
+  const out = [];
+  visitList.forEach((visit) => {
+    const key = computeDedupKey(visit);
+    if (key === null) { out.push(visit); return; }
+    if (emitted.has(key)) return;
+    emitted.add(key);
+    out.push(mergedByKey.get(key) || visit);
+  });
+  return out;
+};;
 
 
 // correctEdVisitDates removed — replaced by step 3b service-date scan
+
+// ── Merge resident-note / attending-duplicate pairs ──────────────────────────
+// A resident-authored note co-signed by an attending is ONE encounter. The LLM
+// sometimes emits TWO entries for it: one "[Resident] (Resident); Cosigned
+// [Attending]" and a second "[Attending]" solo entry from the same note's
+// attestation/addendum. Merge them: keep the resident entry, absorb richer
+// content from the attending duplicate, drop the duplicate. (2026-09-07)
+const _lastNameOfProvider = (raw) => {
+  const s = (raw || '').trim();
+  if (!s) return '';
+  const comma = s.split(',')[0].trim();
+  const parts = comma.split(/\s+/);
+  return (parts.length > 1 ? parts[parts.length - 1] : comma).replace(/[^A-Za-z'-]/g, '').toLowerCase();
+};
+
+const mergeResidentCosignVisits = (visits) => {
+  const visitList = visits || [];
+  if (!Array.isArray(visitList)) return visitList;
+  const RESIDENT_RE = /resident|fellow/i;
+  const COSIGN_RE = /co-?sign(?:ed|ature)?\s*(?:by)?\s*([A-Za-z'-]+)/i;
+  const dropIdx = new Set();
+  const contentFields = ['hpi_summary','chief_complaint','impression_diagnosis','treatment_plan','physical_exam_findings','imaging_findings','lab_findings','symptom_progression','pain_scale','injury_date'];
+
+  for (let i = 0; i < visitList.length; i++) {
+    const a = visitList[i];
+    if (dropIdx.has(i)) continue;
+    const aProv = a.rendering_provider || '';
+    if (!RESIDENT_RE.test(aProv)) continue;
+    const m = COSIGN_RE.exec(aProv) || COSIGN_RE.exec(a.hpi_summary || '');
+    if (!m) continue;
+    const attLast = m[1].replace(/[^A-Za-z'-]/g, '').toLowerCase();
+    if (!attLast) continue;
+    for (let j = 0; j < visitList.length; j++) {
+      if (i === j || dropIdx.has(j)) continue;
+      const b = visitList[j];
+      if ((b.visit_date || '') !== (a.visit_date || '')) continue;
+      if (normalizeSettingForDedup(b.practice_setting) !== normalizeSettingForDedup(a.practice_setting)) continue;
+      const bProv = b.rendering_provider || '';
+      if (RESIDENT_RE.test(bProv)) continue; // resident entries never merge into each other
+      if (_lastNameOfProvider(bProv) !== attLast) continue; // must be the same attending
+      // Absorb richer content from the attending duplicate into the resident entry
+      for (const f of contentFields) {
+        const aVal = (a[f] || '').trim();
+        const bVal = (b[f] || '').trim();
+        if (!aVal && bVal) a[f] = bVal;
+      }
+      dropIdx.add(j);
+      console.log(`mergeResidentCosign: dropped attending duplicate [${bProv}] (${b.visit_date || ''}) — same note as resident entry [${aProv}]`);
+    }
+  }
+  return visitList.filter((_, idx) => !dropIdx.has(idx));
+};
+
+// Updated: 2026-09-12 — Billing-content contamination scrub (ZSolis/Hillock case).
+// The LLM sometimes grafts CPT codes and copay/dollar figures from billing ledgers
+// that share the same 50-page part with a clinic note (e.g. "Right ankle 2 views
+// (CPT 73600)..." or "Self-pay co-pay $5.00."). Extraction prompt rule 6 now bans
+// this at the source; this deterministic net catches anything that slips through:
+// (a) strip inline CPT/HCPCS references, (b) drop sentences that are purely
+// financial. If a field was ONLY billing content it becomes empty.
+const BILLING_CPT_RE = /\(?\s*(?:CPT|HCPCS)\s*(?:code)?\s*[:#]?\s*[A-Za-z]?\d{4,5}[A-Za-z]{0,2}\s*\)?/gi;
+const BILLING_SENTENCE_RE = /(?:\$\s*\d[\d,]*(?:\.\d{2})?|\b(?:co-?pay|self-?pay|deductible|coinsurance|balance due|past due|remit payment)\b)/i;
+const stripBillingContamination = (text) => {
+  if (!text) return text;
+  let out = String(text).replace(BILLING_CPT_RE, ' ');
+  out = out.replace(/\s*:\s*([A-Za-z])/g, ': $1'); // tidy " :" left by CPT removal
+  out = out.replace(/\s{2,}/g, ' ').trim();
+  const parts = out.split(/(?<=[.!?])\s+/);
+  const kept = parts.filter((p) => !BILLING_SENTENCE_RE.test(p));
+  if (!kept.length) return ''; // entire field was billing content
+  out = kept.join(' ').trim();
+  out = out.replace(/\s+([,;])\s*$/, '$1').replace(/\s*,\s*$/, '').replace(/\s*\.\s*$/, '.').trim();
+  return out;
+};
 
 const sanitizeVisits = (visits, patientName) => {
   const stringFields = ['visit_date','rendering_provider','practice_setting','chief_complaint','hpi_summary','injury_date','pain_scale','symptom_progression','physical_exam_findings','imaging_findings','lab_findings','impression_diagnosis','treatment_plan'];
@@ -541,6 +859,20 @@ const sanitizeVisits = (visits, patientName) => {
       else if (typeof val === 'object') clean[field] = JSON.stringify(val);
       else if (typeof val !== 'string') clean[field] = String(val);
     });
+    // Updated: 2026-09-16 — normalize US-format dates (M/D/YYYY) to ISO (YYYY-MM-DD)
+    // early in sanitize. Bedrock occasionally returns MM/DD/YYYY despite the prompt's
+    // YYYY-MM-DD requirement; mixed formats defeat dedup (same visit stored as
+    // '09/17/2025' vs '2025-09-17' never merges, breaking same-date pairing and C-4
+    // cross-referencing) and break the visitYear slice below.
+    const normalizeDateField = (val) => {
+      if (!val) return val;
+      const m = String(val).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (!m) return val;
+      return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+    };
+    clean.visit_date = normalizeDateField(clean.visit_date);
+    clean.injury_date = normalizeDateField(clean.injury_date);
+
     if (!Array.isArray(clean.icd10_codes)) clean.icd10_codes = [];
     if (!validProgressions.includes(clean.symptom_progression)) clean.symptom_progression = 'not_documented';
 
@@ -560,6 +892,11 @@ const sanitizeVisits = (visits, patientName) => {
         }
       });
     }
+
+    // Updated: 2026-09-12 — apply billing-content scrub to all narrative fields
+    ['hpi_summary','treatment_plan','physical_exam_findings','imaging_findings','impression_diagnosis','chief_complaint'].forEach((field) => {
+      if (clean[field]) clean[field] = stripBillingContamination(clean[field]);
+    });
 
     const patientLower = patientName?.toLowerCase();
     if (clean.practice_setting && patientLower && clean.practice_setting.toLowerCase().includes(patientLower)) {
@@ -660,8 +997,31 @@ const sanitizeVisits = (visits, patientName) => {
                         setting.includes('post-operative written order') ||
                         setting.includes('dvt risk assessment') ||
                         setting.includes('treatment prescription') ||
+                        setting.includes('clinical documentation record') ||
+                        setting.includes('medication list') ||
+                        setting.includes('medication administration') ||
+                        setting.includes('implant/vendor') ||
+                        setting.includes('implant / vendor') ||
+                        setting.includes('brought supplies') ||
+                        // Updated: 2026-09-07 — case management / discharge planning notes,
+                        // expert reports, and care-coordination-only calls excluded per
+                        // encounter-level policy.
+                        setting.includes('discharge planning') ||
+                        setting.includes('case management') ||
+                        /\bexpert\b/i.test(visit.practice_setting || '') ||
+                        // Care-coordination-only calls: pure protocol/scheduling logs with
+                        // no clinical assessment (call attempts, callbacks, condition-
+                        // management protocol follow-ups). A call WITH clinical content
+                        // (symptom reports, medication discussion) is KEPT — verified by
+                        // the clinical-marker check below. (2026-09-07)
+                        ((((visit.chief_complaint || '').toLowerCase()).includes('care coordination') ||
+                          hpi.includes('care coordination')) && !isC4 &&
+                         !/(reports pain|pain \d|oxycodone|symptom|injury|fracture|wound|swelling|edema|radiograph|x-ray|medication (change|adjust|restart))/.test(hpi)) ||
                         // Also check HPI for admin keywords the LLM put in HPI instead of setting
                         (hpi.includes('authorization request submitted') && !isC4) ||
+                        (hpi.includes('assessments completed at') && !isC4) ||
+                        (hpi.includes('assessments documented at') && !isC4) ||
+                        (hpi.includes('shift assessments') && !isC4) ||
                         (hpi.includes('authorization requested for') && !isC4) ||
                         (hpi.includes('surgery authorization requested') && !isC4) ||
                         (hpi.includes('work status form') && !isC4));
@@ -682,6 +1042,26 @@ const sanitizeVisits = (visits, patientName) => {
       (hpi.includes('patient evaluated') && hpi.includes('status:') && hpi.includes('follow-up appointment')));
 
     const isAdmin = !isC4 && (isPPR || isCodingSummary || isAdminOnly || isMislabeledWorkStatus || (providerEqualsFacility && isWorkStatusTemplate));
+
+    // Updated: 2026-09-15 — billing-statement visit veto (ZSolis case). Charge statements
+    // and remittance pages sometimes mint phantom visit entries (e.g. "Radiology
+    // Specialists Ltd - Radiology Report" built from the group's patient statement,
+    // "CenterWell / Conviva - Billing Record"). The field-level billing scrub strips
+    // CPT/$ content but cannot prevent the ENTRY itself from existing. Veto an entry
+    // when (a) its setting names a billing artifact, or (b) every narrative field is
+    // empty after the billing scrub (pure billing content, no clinical substance).
+    // C-4 forms are exempt — they legitimately contain claim numbers. Judgment-call
+    // same-day duplicates are NOT touched here; those stay for the user to decide.
+    const isBillingArtifact = !isC4 && (
+      /billing record|billing statement|charge statement|account inquiry|itemized bill|statement of account|remittance|explanation of benefits|claim voucher/.test(setting) ||
+      (!(visit.hpi_summary || visit.chief_complaint) &&
+       !(visit.impression_diagnosis || visit.treatment_plan) &&
+       !(visit.physical_exam_findings || visit.imaging_findings) &&
+       !(visit.symptom_progression || '')));
+    if (isBillingArtifact) {
+      console.log('sanitizeVisits: dropping billing-statement entry [' + (visit.practice_setting || '') + '] (' + (visit.visit_date || '') + ' ' + (visit.rendering_provider || '') + ')');
+      return false;
+    }
 
     if (isAdmin) {
       const reason = isPPR ? 'PPR' : isCodingSummary ? 'coding summary' :
@@ -788,13 +1168,14 @@ const enforceOneC4 = (visitList) => {
 const EXTRACTION_SYSTEM_PROMPT = `You are a forensic medical document analyst specializing in workers' compensation and personal injury litigation. Your work product is read by attorneys and used in legal proceedings — precision and fidelity to the source document are paramount.
 
 Your operating principles:
-1. DOCUMENT BOUNDARIES ARE ABSOLUTE. Each document in a medical record is a discrete, bounded unit. You extract information from the document you are currently reading — never from an adjacent, co-occurring, or same-date document. If you find yourself writing language that does not appear in the specific document you are extracting, stop and delete it.
+1. DOCUMENT BOUNDARIES ARE ABSOLUTE. Each document in a medical record is a discrete, bounded unit. A document means ONE clinical note or report — never a file, never a batch, never a page range. A single PDF file or batch may contain MANY unrelated documents: clinic notes, hospital records, billing ledgers, insurance statements, legal filings. File boundaries and page boundaries are NOT document boundaries — a new document begins wherever a distinct note, report, or statement begins. You extract information from the single document you are currently reading — never from an adjacent, co-occurring, or same-date document elsewhere in the same file or batch. If you find yourself writing language that does not appear in the specific document you are extracting, stop and delete it.
    C-4 EXCEPTION: C-4 forms are often partially illegible scanned images. For C-4 forms ONLY, you MAY cross-reference a same-date office visit from the same document set to fill in illegible fields (provider name, diagnosis, ICD-10 codes). This is the ONLY exception to the document boundary rule.
    C-4 MISLABELING WARNING: A genuine C-4 form is titled "FORM C-4" / "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT" and documents claim number, date of injury, employer, and accident description. Some pages carry "Form C-4" boilerplate text in a header/footer (e.g. "Complete and attach Release of Information (Form C-4A)...") even though the page itself is a Work Status Form, Progress Report, or other document. Do NOT set practice_setting to "C-4" or "Workers' Compensation Report" unless the page is ACTUALLY the claim/injury form itself. A page whose content is "not at maximum medical improvement... unable to work [date] to [date]... next appointment [date]" is a Work Status Form — label it as such, never as C-4, even if "Form C-4" boilerplate text appears in a footer.
 2. YOU DO NOT INFER. You report only what is explicitly written. If a field is not documented, return an empty string. A missing value is always better than a hallucinated one.
 3. YOU DO NOT MERGE. Two documents on the same date from the same provider are two documents. A consultation note and an operative note are different documents. A History & Physical and a Discharge Summary are different documents. You extract each separately, completely, and independently.
 4. YOU ARE CONSERVATIVE WITH CLINICAL LANGUAGE. Do not paraphrase in ways that change meaning. Do not upgrade or downgrade clinical severity. Report findings as documented.
-5. YOU SELF-CHECK FOR BLEED. Before finalizing any visit entry, ask yourself: "Does any language in this entry come from a document other than the one I am currently extracting?" If yes, remove it.`;
+5. YOU SELF-CHECK FOR BLEED. Before finalizing any visit entry, ask yourself: "Does any language in this entry come from a document other than the one I am currently extracting?" If yes, remove it.
+6. BILLING CONTENT IS NEVER CLINICAL CONTENT. Charge ledgers, claim vouchers, payment postings, remittance advice, and itemized bills describe money, not medicine. CPT/HCPCS codes, charge or payment dollar amounts, copay/self-pay figures, claim or voucher numbers, payor names, and "Your Co-Pay is due at time of service" style boilerplate must NEVER appear in any clinical field — imaging_findings, treatment_plan, hpi_summary, chief_complaint, or any other — even if the billing pages sit in the same file or the same page range as the visit's own note. A CPT code printed in a charge ledger belongs to that ledger's row (its own date of service), never to the note you are extracting. The ONLY cross-document exception remains the C-4 cross-reference described above. A charge statement, itemized bill, account inquiry, remittance advice, EOB, or provider billing statement is NOT an encounter: never create a visit entry from these pages, even if they name a provider and a date of service.`;
 
 const buildPrompt = (rawChunkText, docCount, chunkLabel = '', knownVisitsChecklist = [], skipPages = []) => {
   const chunkText = String(rawChunkText || '').replace(/`/g, "'").split('${').join('(');
@@ -883,7 +1264,7 @@ E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
     - rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)
     - practice_setting: "C-4 Workers' Compensation Report"
     - impression_diagnosis: diagnosis only — ICD codes if present, otherwise the written diagnosis
-    - visit_date: the date the form was completed or the examination date — this is CRITICAL to extract even if the rest of the form is illegible
+    - visit_date: the DATE OF EXAMINATION — the date the form was completed / the provider signed it — this is CRITICAL to extract even if the rest of the form is illegible. Priority order: the form's "DATE OF EXAMINATION" or exam "DATE" field → provider signature date → form completion date. The form's "DATE OF INJURY" field goes in injury_date ONLY — NEVER use the injury date as visit_date. The injury date and the exam date are usually DIFFERENT days on a C-4 (the form documents the initial treatment visit, which may be days after the injury).
     - hpi_summary: leave empty
     - chief_complaint: leave empty
     - physical_exam_findings: leave empty
@@ -964,10 +1345,15 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
    - ONLY findings documented in THIS specific document
    - Abnormal findings only — omit normal/unremarkable results
    - 3 key findings maximum
+   - EXCLUDE imaging/radiograph interpretation results (e.g., "radiographs show...", "x-ray reveals...", "reduction maintained") even if the source note lists them under its own physical exam section — that content belongs exclusively in imaging_findings (rule 7), never here
    - For operative notes: intraoperative findings, not pre-op exam
    - For consultation notes: the consulting physician's own exam findings only
 
-7. Imaging findings — ONLY if performed or interpreted in THIS document. Do NOT re-report imaging from a co-occurring radiology report.
+7. Imaging findings — ONLY if performed or interpreted in THIS document. Capture the RADIOGRAPHIC OBSERVATION itself, as the treating provider describes it — alignment/reduction status, hardware position, healing, displacement, effusion, loss of fixation, etc.
+   GOOD example: "Right ankle XR: reduction maintained, no hardware breakage or migration, mortise reestablished."
+   BAD example — NEVER do this: "Right ankle X-ray 2 views: displaced trimalleolar fracture of right lower leg, subsequent encounter." That sentence is the ICD-10 diagnosis description, not a radiographic finding, and must NEVER appear in this field — diagnosis language belongs exclusively in impression_diagnosis.
+   If the note ONLY states a study was performed/reviewed without describing any observation, write the study name and view count only (e.g., "Right ankle X-ray, 2 views.") — do NOT borrow diagnosis or impression wording to fill this field.
+   Do NOT re-report imaging from a co-occurring radiology report. NEVER include CPT/HCPCS codes, charge amounts, or any billing-ledger language.
 8. Lab findings — return empty string always. Laboratory panels are captured separately and are not needed in the summary.
 9. Impression/diagnosis — from THIS document's own conclusions. ICD-10 codes inline in parentheses.
 10. Treatment Plan — CONCISE, 2-4 items max:
@@ -975,6 +1361,7 @@ IMPORTANT: Summarize and condense — do NOT transcribe. Extract only the most r
    - Medications (name, dose).
    - Activity restrictions
    - Follow-up plan
+   - NEVER billing content: CPT codes, dollar amounts, copay/self-pay figures, insurance or payment details
 
 Be RUTHLESSLY CONCISE. Every field reads like a tight medical-legal summary. No filler. No restating headers.
 
@@ -983,6 +1370,13 @@ CRITICAL FORMATTING RULES:
 - If information is not available for a field, return an empty string "".
 - The icd10_codes field must always be an array of strings (can be empty []).
 - visit_date MUST be in YYYY-MM-DD format always (e.g. 2026-01-20). Never return any other date format.
+- source_page: the page number WITHIN THIS PDF FILE (not the original larger document — just this file, first page = 1) where this visit's content BEGINS. Count every page of the file you were given, including cover/blank pages. Return it as a plain integer. If a visit's content spans multiple pages, return the page where it starts. This must always be filled in — never leave it blank or 0.
+
+DATE SELECTION RULES:
+- DISCHARGE DOCUMENTS ("Discharge Summary", "Discharge Report", "Hospitalist Discharge Summary", "IDEV Discharge Report"): visit_date = the DISCHARGE date. Use the note's own date field in this priority order: DATE: / REP SRV DT: / "DATE OF DISCHARGE" / DISCH / DISCH/DEP. NEVER use the ADMIT, ADM DT, or REG date for a discharge document — a discharge summary is written at the END of the stay and belongs to the discharge date, even though the header also shows the admission date.
+
+- C-4 FORMS: visit_date = the DATE OF EXAMINATION / date the form was completed — NEVER the form's DATE OF INJURY (that goes in injury_date only). The injury date and the exam date are usually different days.
+- Consultation notes: prefer DATE OF CONSULTATION / REP SRV DT over general header dates (e.g. ADMIT DT).
 - ICD codes must ALWAYS appear inline in parentheses at the end of impression_diagnosis only — NEVER as a numbered list, NEVER on separate lines.
 
 CRITICAL EXTRACTION RULES:
@@ -1004,8 +1398,15 @@ CRITICAL EXTRACTION RULES:
 (11d) APPOINTMENT RESCHEDULING NOTICES: Do NOT extract appointment rescheduling/reminders as visits. These are administrative scheduling notices. SKIP these entirely.
 (11e) WRITTEN ORDERS / POST-OPERATIVE WRITTEN ORDERS: Do NOT extract written orders, post-operative written orders, or DVT risk assessment forms as visits. These are administrative paperwork, not clinical encounters. SKIP these entirely.
 (11f) TREATMENT PRESCRIPTIONS: Do NOT extract treatment prescription forms as visits (e.g. Hand therapy prescription listing exercises). These are referral orders — the actual treatment is captured in PT/OT visit notes. SKIP these entirely.
+(11g) NURSING CLINICAL DOCUMENTATION RECORDS / PER-SHIFT NURSING NOTES: Do NOT extract nursing shift-assessment documents as visits — identifiable by titles like "Clinical Documentation Record", "CPCS", or by a series of timestamped nursing assessments (e.g. "Assessments completed at 0000, 0400, 0800...", "Shift assessments [date]"). These are nursing documentation of an inpatient stay already captured by the physician documents (H&P, consults, operative reports, hospitalist notes, discharge summary). SKIP these entirely.
+(11h) IMPLANT / VENDOR SUPPLY LOGS: Do NOT extract implant or vendor brought-supplies records as visits (e.g. "Implant/Vendor Brought Supplies Record" listing implant part numbers, lot numbers, and expiration dates). Implant details are captured in the Operative Report. SKIP these entirely.
+(11i) MEDICATION LISTS: Do NOT extract discharge patient medication lists, medication administration records (MAR), or medication reconciliation printouts as visits. These are medication paperwork — the clinical encounter is captured by the physician documents. SKIP these entirely.
+(11j) CASE MANAGEMENT / DISCHARGE PLANNING: Do NOT extract case management reports, discharge planning notes, social work assessments, or insurance verification notes as visits. These are administrative coordination documents. SKIP these entirely.
+(11k) EXPERT REPORTS: Do NOT extract expert witness reports, engineering reports, or accident-reconstruction reports (e.g. "Expert Engineering Report" analyzing premises liability) as visits — they are legal case documents, not medical records. SKIP these entirely.
+(11l) SCHEDULING-ONLY CALLS: Do NOT extract telephone encounters that are purely care-coordination or scheduling logs (call attempts, callbacks, condition-management protocol follow-ups with no clinical assessment). A telephone call WITH clinical content (symptom reports, medication discussion, clinical advice) IS a valid visit and must be extracted.
 (12) CONSENT FORMS / AUTHORIZATION FORMS: Do NOT extract surgical consent forms, "Authorization for Operative and Other Procedure(s)" documents, or any other consent signature pages as visits. These are administrative paperwork — the clinical content (the surgery itself) is captured in the Operative Report. Identifiable by headers like "Authorization for Operative and Other Procedures", "Informed Consent", "Surgical Consent Form".
 (13-admin) APPOINTMENT REMINDERS / FACE SHEETS: Do NOT extract appointment reminder slips, return visit scheduling notices, demographic face sheets, or authorization request forms as visits. These contain no clinical encounter content.
+(14) RESIDENT NOTES CO-SIGNED BY AN ATTENDING: When a clinical note is authored by a resident (or fellow) and co-signed or attested by an attending physician (identifiable by markers like "Author Type: Resident", "Cosigner: [Attending]", "Attestation signed by [Attending]", or an attending addendum appended to a resident note), extract ONE entry with rendering_provider = "[Resident Author] (Resident), cosigned by [Attending]". The attending's co-signature, attestation, or addendum is NOT a separate clinical encounter — NEVER create a second entry for the attending from the same note.
 (13) CODING SUMMARIES / BILLING ABSTRACTS: Do NOT extract hospital coding summaries, DRG abstracts, or billing abstraction records as visits. These are administrative billing documents generated by coders (not clinicians) and contain no independent clinical encounter content. Identifiable by headers like "Coding Summary", "Discharge Abstract", "DRG Assignment", or provider listed as "Coder", "Abstractor", or a system name like "Cacuser".
 
 Return ALL entries found across ALL documents as separate entries in the visits array.
@@ -1100,7 +1501,7 @@ const CHUNK_FN          = process.env.GENERATE_CHUNK_WORKER_FUNCTION_NAME || 'ch
 // ─── generateSummaryStart — receives API call, creates job, fires worker async ─
 const generateSummaryStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
-  const { doc_ids, patient_name = '' } = body;
+  const { doc_ids, patient_name = '', exclude_emr = false, include_all_pt = false } = body;
   const callerOrgId = event._orgId || '';
   const org_id = (event._isAdmin && body.org_id) ? body.org_id : callerOrgId;
 
@@ -1116,16 +1517,16 @@ const generateSummaryStartHandler = async (event) => {
   const job_id = randomUUID();
   await dynamo.send(new UpdateCommand({
     TableName: JOBS_TABLE, Key: { job_id },
-    UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t, org_id = :oid',
+    UpdateExpression: 'SET #s = :s, created_at = :now, updated_at = :now, job_type = :t, org_id = :oid, exclude_emr = :eer, include_all_pt = :iapt',
     ExpressionAttributeNames: { '#s': 'status' },
-    ExpressionAttributeValues: { ':s': 'running', ':now': new Date().toISOString(), ':t': 'generate_summary', ':oid': org_id },
+    ExpressionAttributeValues: { ':s': 'running', ':now': new Date().toISOString(), ':t': 'generate_summary', ':oid': org_id, ':eer': !!exclude_emr, ':iapt': !!include_all_pt },
   }));
 
   // Fire the coordinator worker asynchronously
   await lambda.send(new InvokeCommand({
     FunctionName: WORKER_FN,
     InvocationType: 'Event',
-    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id })),
+    Payload: Buffer.from(JSON.stringify({ job_id, doc_ids, patient_name, org_id, exclude_emr: !!exclude_emr, include_all_pt: !!include_all_pt })),
   }));
 
   console.log(`generateSummaryStart: job_id=${job_id} docs=${doc_ids.length}`);
@@ -1178,6 +1579,7 @@ const generateSummaryChunkWorker = async (event) => {
             impression_diagnosis:  { type: 'string' },
             icd10_codes:           { type: 'array', items: { type: 'string' } },
             treatment_plan:        { type: 'string' },
+            source_page:           { type: 'integer' },
           },
         },
       },
@@ -1198,6 +1600,7 @@ const generateSummaryChunkWorker = async (event) => {
             hpi_summary:          { type: 'string' },
             impression_diagnosis: { type: 'string' },
             treatment_plan:       { type: 'string' },
+            source_page:          { type: 'integer' },
           },
         },
       },
@@ -1213,18 +1616,63 @@ const generateSummaryChunkWorker = async (event) => {
     const globalBatchNum = batchOffset + batchIndex + 1;
     const batchLabel = totalBatches > 1 ? ` [Batch ${globalBatchNum} of ${totalBatches}]` : '';
     // Add ±1 page buffer so we don't miss content at encounter edges
-    const scopeWithBuffer = pageScope && pageScope.length > 0
+    let scopeWithBuffer = pageScope && pageScope.length > 0
       ? [...new Set(pageScope.flatMap(p => [p - 1, p, p + 1]).filter(p => p > 0))].sort((a, b) => a - b)
       : null;
+    // v2 (2026-09-16): PT/OT consolidation — pages the coordinator explicitly dropped
+    // are NEVER resurrected by the ±1 buffer. The buffer exists for encounter-edge
+    // context, not to undo explicit exclusions.
+    const ptExclPages = (batch[0] && Array.isArray(batch[0].ptExclude)) ? new Set(batch[0].ptExclude) : null;
+    if (scopeWithBuffer && ptExclPages) {
+      const beforeBuf = scopeWithBuffer.length;
+      scopeWithBuffer = scopeWithBuffer.filter(p => !ptExclPages.has(p));
+      if (beforeBuf !== scopeWithBuffer.length) {
+        console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: ${beforeBuf - scopeWithBuffer.length} PT/OT-excluded pages removed after ±1 buffer`);
+      }
+    }
     if (scopeWithBuffer) console.log(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: page scope [${scopeWithBuffer.join(',')}]`);
+    // Track pages actually sent (per attempt) for run cost reporting.
+    // Full-doc batches (pageScope null) use the part's page_count.
+    try {
+      const partPages = (batch[0] && batch[0].page_count) || 0;
+      RUN_USAGE.pages_sent += (scopeWithBuffer ? scopeWithBuffer.length : partPages);
+    } catch (puErr) { /* non-fatal */ }
+    // Updated: 2026-09-19 — page citations. The model reports source_page as the
+    // LOCAL page number within the PDF it was actually sent (1 = first page of
+    // that file). When pageScope/scopeWithBuffer sliced the PDF before sending
+    // (slicePdfPages), local page N corresponds to the REAL page scopeWithBuffer[N-1]
+    // in the original part; when the whole part was sent (pageScope null), local
+    // page N IS the real page. Only attach when this batch is exactly one part —
+    // with multiple parts in one Bedrock call the model's page numbering is
+    // ambiguous across files, so those visits are left without a citation rather
+    // than risk mislabeling.
+    const attachSourcePages = (res) => {
+      if (!res || !Array.isArray(res.visits) || batch.length !== 1) return res;
+      const partId = batch[0] && batch[0].id;
+      const partLabel = batch[0] && batch[0].label;
+      if (!partId) return res;
+      res.visits = res.visits.map((v) => {
+        const rawPage = Number(v.source_page);
+        let actualPage = null;
+        if (Number.isFinite(rawPage) && rawPage >= 1) {
+          actualPage = (scopeWithBuffer && scopeWithBuffer.length > 0)
+            ? (scopeWithBuffer[rawPage - 1] || null)
+            : rawPage;
+        }
+        return actualPage
+          ? { ...v, source_page: actualPage, source_doc_id: partId, source_part_label: partLabel || null }
+          : { ...v, source_page: null };
+      });
+      return res;
+    };
     try {
       const result = await callBedrock(fileKeys, buildPrompt('', 1, batchLabel, knownVisitsChecklist), fullSchema, regionOrder, scopeWithBuffer);
-      return result;
+      return attachSourcePages(result);
     } catch (err) {
       console.warn(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: JSON error, retrying with simplified schema...`, err.message);
       try {
         const result = await callBedrock(fileKeys, buildPrompt('', 1, batchLabel, knownVisitsChecklist), simplifiedSchema, regionOrder, scopeWithBuffer);
-        return result;
+        return attachSourcePages(result);
       } catch (retryErr) {
         console.error(`Chunk[${chunkIndex}] Batch ${batchIndex + 1}: retry also failed:`, retryErr.message);
         return null;
@@ -1288,8 +1736,9 @@ const generateSummaryChunkWorker = async (event) => {
 
 // ── generateSummaryWorker (coordinator) ──────────────────────────────────────
 const generateSummaryWorker = async (event) => {
-  const { job_id, doc_ids, patient_name = '', org_id } = event;
-  console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length}`);
+  const { job_id, doc_ids, patient_name = '', org_id, exclude_emr = false, include_all_pt = false } = event;
+  const consolidate_pt = !include_all_pt;  // UI default: "Include all PT sessions" unchecked = first & last only
+  console.log(`generateSummaryWorker (coordinator) start: job_id=${job_id} docs=${doc_ids?.length}${exclude_emr ? ' [NARRATIVE-ONLY: EMR pages excluded]' : ''}${consolidate_pt ? ' [PT/OT PRE-CONSOLIDATION: first+last per facility group]' : ' [ALL PT SESSIONS INCLUDED]'}`);
 
   // ── Idempotency guard — Lambda async invocation has at-least-once delivery.
   // If this job_id already has a summary_id stamped on it, a previous invocation
@@ -1304,6 +1753,9 @@ const generateSummaryWorker = async (event) => {
     console.warn(`coordinator: idempotency check failed (non-fatal):`, guardErr.message);
     // Continue — better to risk a duplicate than to silently fail
   }
+
+  // Reset per-run usage accumulator (cost capture starts fresh for this run)
+  resetRunUsage();
 
   // Pre-fetch region order once for entire coordinator run
   const regionOrder = await getRegionOrder();
@@ -1335,6 +1787,8 @@ const generateSummaryWorker = async (event) => {
         page_classifications: partClassif,
         extracted_text: doc.extracted_text || '',  // kept for fallback reference
         encounter_index: Array.isArray(doc.encounter_index) ? doc.encounter_index : [],  // from classify VI pre-pass
+        emr_flagged_pages: Array.isArray(doc.emr_flagged_pages) ? doc.emr_flagged_pages : [],  // from EMR Detector run (local page numbers)
+        pt_index: Array.isArray(doc.pt_index) ? doc.pt_index : [],  // from vision pre-pass (PT/OT encounters, local page numbers)
       });
     }
     if (!allParts.length) { await markJobFailed(job_id, 'All documents are non-clinical'); return; }
@@ -1345,6 +1799,26 @@ const generateSummaryWorker = async (event) => {
     let knownVisits = [];
     let patientName = patient_name;
     let caseNumber  = '';
+
+    // ── Court case number harvest (2026-09-07) ────────────────────────────────
+    // Pleading-paper legal captions are excluded from LLM input by the pleading
+    // filter, so chunk results can no longer supply the court case number.
+    // Harvest it directly from Textract extracted_text instead.
+    try {
+      const CASE_NUM_RE = /\b[A-Z]-\d{2}-\d{5,7}-[A-Z]\b/;
+      for (const doc of docRecords) {
+        const txt = doc.extracted_text || '';
+        if (!txt) continue;
+        const m = txt.match(CASE_NUM_RE);
+        if (m) {
+          caseNumber = m[0];
+          console.log('coordinator: harvested court case number ' + caseNumber + ' from ' + doc.file_name);
+          break;
+        }
+      }
+    } catch (cnErr) {
+      console.warn('coordinator: case number harvest failed (non-fatal):', (cnErr && cnErr.message) || cnErr);
+    }
     try {
       await setJobStatus(job_id, 'Loading pre-pass encounter index...');
       const normalizeDate = (raw) => {
@@ -1514,37 +1988,189 @@ const generateSummaryWorker = async (event) => {
       return { ...v, date: corrected };
     });
 
+    // ── 3c. PT/OT pre-consolidation via vision pt_index (2026-09-16) ─────────
+    // The vision pre-pass (assessRelevance at processing time, or Re-classify)
+    // reads each part's raw PDF as a whole and writes pt_index: one entry per
+    // PT/OT/hand-therapy encounter with LOCAL page numbers and dates. Unlike
+    // the 50-page extraction windows or 90k-char VI chunks, the vision pass
+    // sees a PT series in one piece — so first/last by date are true chronology.
+    // Facility groups (across ALL parts) with 3+ dated encounters keep only the
+    // first and last; middle encounters' pages are excluded from LLM input
+    // entirely and never reach Bedrock. Gated by consolidate_pt = !include_all_pt
+    // (UI checkbox "Include all PT sessions" unchecked = consolidate).
+    // Fail-safes: parts without pt_index contribute nothing; undated encounters
+    // are never dropped (can't be ordered); groups smaller than 3 are untouched.
+    const ptExcludedByPart = {};  // doc id -> Set of LOCAL page numbers
+    let ptDroppedEncounters = 0;
+    if (consolidate_pt) {
+      // v2 (2026-09-16): also strip street addresses after a comma and collapse ALL
+      // whitespace — vision output varies between "ATI Physical Therapy, 7301 Peak Drive..."
+      // (comma form) and "ATI Physical Therapy - 7301 Peak Drive..." (dash form), and
+      // "Mountain View Hospital" vs "Mountainview Hospital". Both must form ONE group.
+      // v2.1 (2026-09-16): order matters — strip parentheticals, commas, and slashes
+      // FIRST, then dash-suffixes, so "ATI Physical Therapy - Las Vegas, NV 89128" and
+      // "ATI Physical Therapy / New Century Rehabilitation LLC" and every address
+      // variant all normalize to the same group key.
+      const normFacilityPt = (f) => String(f || '').toLowerCase().trim()
+        .replace(/\s*\(.*?\)\s*$/, '')
+        .replace(/\s*,.*$/, '')
+        .replace(/\s*\/.*$/i, '')
+        .replace(/\s*[-\u2013\u2014]\s*(blue diamond|lake mead|nw|ne|se|sw|north|south|east|west|suite|ste|bldg|building|floor|fl|las vegas|vegas|nv|nevada|henderson|summerlin|\d+).*$/i, '')
+        .replace(/\s*[-\u2013\u2014]\s*[a-z0-9 ]{1,30}$/i, '')
+        .replace(/\s+/g, '')
+        .trim();
+      const normDatePt = (d) => {
+        const m = String(d || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (!m) return String(d || '').trim();
+        return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+      };
+      let ptSeenTotal = 0;
+      const ptGroups = {};
+      for (const part of allParts) {
+        const idx = part.pt_index;
+        if (!Array.isArray(idx) || idx.length === 0) continue;
+        for (const e of idx) {
+          if (!e) continue;
+          const pages = Array.isArray(e.page_numbers)
+            ? e.page_numbers.map(Number).filter(n => !isNaN(n) && n >= 1) : [];
+          if (pages.length === 0) continue;
+          ptSeenTotal += 1;
+          if (!e.date) continue;  // undated encounters can't be ordered — always kept
+          const key = normFacilityPt(e.facility || e.provider || 'pt');
+          (ptGroups[key] = ptGroups[key] || []).push({ partId: part.id, partLabel: part.label, date: normDatePt(e.date), facility: e.facility || '', provider: e.provider || '', type: String(e.type || ''), pages });
+        }
+      }
+      const richestOfPt = (copies) => copies.reduce((best, c) => (c.pages.length > best.pages.length ? c : best), copies[0]);
+      const normProviderPt = (p) => String(p || '').toLowerCase().replace(/[^a-z]/g, '');
+      const isUnknownProviderPt = (e) => !e.provider || /unknown|billed as|not documented/i.test(e.provider);
+      for (const key of Object.keys(ptGroups)) {
+        let g = ptGroups[key];
+        // v2.1 (2026-09-16): the same encounter often appears in multiple parts of a
+        // litigation package, and billing-sheet lines list the same sessions as
+        // "Unknown (billed as ...)" providers. Per DATE within a facility group:
+        //  - named-provider entries: one representative per normalized provider
+        //    (richest copy — same note duplicated across parts)
+        //  - Unknown-provider entries: billing lines — they only represent the date
+        //    if NO named entry exists for that date
+        // All other copies are excluded so the LLM never sees the same encounter twice.
+        const byDate = {};
+        for (const e of g) (byDate[e.date] = byDate[e.date] || []).push(e);
+        const dateReps = {};
+        for (const d of Object.keys(byDate)) {
+          const copies = byDate[d];
+          const named = copies.filter(c => !isUnknownProviderPt(c));
+          const pool = named.length > 0 ? named : copies;
+          const byProv = {};
+          for (const c of pool) (byProv[normProviderPt(c.provider)] = byProv[normProviderPt(c.provider)] || []).push(c);
+          const reps = Object.keys(byProv).map(pk => richestOfPt(byProv[pk]));
+          dateReps[d] = reps;
+          for (const c of copies) {
+            if (reps.includes(c)) continue;
+            if (!ptExcludedByPart[c.partId]) ptExcludedByPart[c.partId] = new Set();
+            c.pages.forEach(p => ptExcludedByPart[c.partId].add(p));
+            ptDroppedEncounters += 1;
+            console.log(`coordinator: PT/OT pre-consolidation — dropping duplicate copy of ${c.date} ${c.provider || '(no provider)'} @ ${c.facility || key} [${c.pages.length} pages, part ${c.partLabel}] (same-encounter duplicate in group "${key}")`);
+          }
+        }
+        // v2: representative list, then first+last by date, with eval/discharge protection
+        g = Object.keys(dateReps).sort().flatMap(d => dateReps[d]);
+        if (g.length < 3) continue;
+        g.sort((a, b) => a.date.localeCompare(b.date));
+        const keptFirst = g[0];
+        const keptLast = g[g.length - 1];
+        // v2: initial evaluations and discharge summaries are clinically meaningful —
+        // never consolidated away regardless of position in the series
+        const isProtectedPt = (e) => /eval|discharge/i.test(e.type || '');
+        for (const e of g) {
+          if (e.date === keptFirst.date || e.date === keptLast.date || isProtectedPt(e)) continue;
+          if (!ptExcludedByPart[e.partId]) ptExcludedByPart[e.partId] = new Set();
+          e.pages.forEach(p => ptExcludedByPart[e.partId].add(p));
+          ptDroppedEncounters += 1;
+          console.log(`coordinator: PT/OT pre-consolidation — dropping ${e.date} ${e.provider || '(no provider)'} @ ${e.facility || key} [${e.pages.length} pages, part ${e.partLabel}] (group "${key}" keeps ${keptFirst.date} + ${keptLast.date})`);
+        }
+      }
+      const droppedPages = Object.keys(ptExcludedByPart).reduce((n, k) => n + ptExcludedByPart[k].size, 0);
+      console.log(`coordinator: PT/OT pre-consolidation — ${ptSeenTotal} PT/OT encounters indexed by vision pre-pass, ${ptDroppedEncounters} middle encounters (${droppedPages} pages) excluded from LLM input${ptSeenTotal === 0 ? ' (no pt_index data — run Classify to populate)' : ''}`);
+    }
+
     // ── 4. Build encounter-scoped batches using VI page data ─────────────────
     // Each VI visit with page data → its own scoped batch for that doc part.
     // Parts with no VI page data → full-document batch (safe fallback).
     const batches = [];
     for (const part of allParts) {
+      // ── Pleading-paper exclusion (2026-09-07) ──────────────────────────────
+      // Legal filings on numbered pleading paper are excluded from LLM input at
+      // the page level. Pages without the format are always kept — including
+      // medical records attached at the end of a discovery document.
+      const pleadingPages = detectPleadingPages(part.extracted_text);
+      if (pleadingPages.size > 0) {
+        console.log(`coordinator: part ${part.label} — ${pleadingPages.size} of ${part.page_count || '?'} pages exhibit pleading-paper (legal filing) formatting`);
+      }
+
+      // ── EMR printout exclusion (2026-09-15) ──────────────────────────────
+      // Narrative-only runs subtract pages classified as EMR printouts by the
+      // EMR Detector (saved on the part record as emr_flagged_pages — LOCAL
+      // 1-based page numbers within this part's PDF). Gated by the run's
+      // exclude_emr flag: baseline runs are completely untouched.
+      const emrPages = new Set();
+      if (exclude_emr && Array.isArray(part.emr_flagged_pages)) {
+        for (const p of part.emr_flagged_pages) {
+          const n = parseInt(p, 10);
+          if (!isNaN(n) && n >= 1) emrPages.add(n);
+        }
+        if (emrPages.size > 0) {
+          console.log(`coordinator: part ${part.label} — excluding ${emrPages.size} EMR printout pages (narrative-only run)`);
+        }
+      }
       const partVisits = knownVisits.filter(v => v.source_doc_id === part.id && Array.isArray(v.pages) && v.pages.length > 0);
       if (partVisits.length > 0) {
+        let skippedEncounters = 0;
         for (const encounter of partVisits) {
-          batches.push([{ ...part, pageScope: encounter.pages }]);
+          const ptExcl = ptExcludedByPart[part.id];
+          const scopedPages = encounter.pages.filter(p => !pleadingPages.has(p) && !emrPages.has(p) && !(ptExcl && ptExcl.has(p)));
+          if (scopedPages.length === 0) {
+            skippedEncounters += 1;
+            console.log(`coordinator: part ${part.label} — skipping encounter batch (${(encounter.provider || '?')} ${encounter.date || ''}) — all its pages are pleading-paper legal filings`);
+            continue;
+          }
+          batches.push([{ ...part, pageScope: scopedPages, ptExclude: Array.from(ptExcludedByPart[part.id] || []) }]);
         }
-        console.log(`coordinator: part ${part.label} → ${partVisits.length} encounter-scoped batches`);
+        console.log(`coordinator: part ${part.label} → ${partVisits.length - skippedEncounters} encounter-scoped batches${skippedEncounters > 0 ? ` (${skippedEncounters} skipped as legal-only)` : ''}`);
       } else {
         // No VI page data — fall back to full-document extraction.
         // Bedrock hard limit: 100 pages per PDF. If the part exceeds that,
         // split into sub-100-page window batches so Bedrock never rejects.
         const MAX_BEDROCK_PAGES = 95; // small buffer below 100
         const partPageCount = part.page_count || 0;
-        if (partPageCount > MAX_BEDROCK_PAGES) {
-          const windows = [];
-          for (let pg = 1; pg <= partPageCount; pg += MAX_BEDROCK_PAGES) {
-            const windowPages = [];
-            for (let p = pg; p < pg + MAX_BEDROCK_PAGES && p <= partPageCount; p++) windowPages.push(p);
-            windows.push(windowPages);
-          }
-          for (const windowPages of windows) {
-            batches.push([{ ...part, pageScope: windowPages }]);
-          }
-          console.log(`coordinator: part ${part.label} (${partPageCount} pages) → ${windows.length} windowed full-doc batches (>100 page limit)`);
-        } else {
+        // If page_count is unknown, we cannot map pleading pages to real PDF
+        // pages — send the full document unchanged (fail-safe).
+        if (partPageCount <= 0) {
           batches.push([{ ...part, pageScope: null }]);
-          console.log(`coordinator: part ${part.label} → full-document batch (no VI page data)`);
+          console.log(`coordinator: part ${part.label} → full-document batch (no page_count, pleading filter bypassed)`);
+        } else {
+          // Union exclusion: pleading pages + EMR printout pages (narrative-only runs)
+          const excludedUnion = new Set(pleadingPages);
+          for (const p of emrPages) excludedUnion.add(p);
+          if (ptExcludedByPart[part.id]) for (const p of ptExcludedByPart[part.id]) excludedUnion.add(p);
+          const keptPages = keptPagesOf(excludedUnion, partPageCount);
+          if (keptPages.length === 0) {
+            console.log(`coordinator: part ${part.label} — skipping ENTIRE part (${excludedUnion.size} of ${partPageCount} pages fully excluded: ${pleadingPages.size} pleading + ${emrPages.size} EMR, no VI page data)`);
+          } else if (partPageCount > MAX_BEDROCK_PAGES) {
+            const windows = [];
+            for (let i = 0; i < keptPages.length; i += MAX_BEDROCK_PAGES) {
+              windows.push(keptPages.slice(i, i + MAX_BEDROCK_PAGES));
+            }
+            for (const windowPages of windows) {
+              batches.push([{ ...part, pageScope: windowPages, ptExclude: Array.from(ptExcludedByPart[part.id] || []) }]);
+            }
+            console.log(`coordinator: part ${part.label} (${partPageCount} pages, ${excludedUnion.size} excluded: ${pleadingPages.size} pleading + ${emrPages.size} EMR) → ${windows.length} windowed full-doc batches (>100 page limit)`);
+          } else if (excludedUnion.size > 0) {
+            batches.push([{ ...part, pageScope: keptPages, ptExclude: Array.from(ptExcludedByPart[part.id] || []) }]);
+            console.log(`coordinator: part ${part.label} → full-doc batch with ${excludedUnion.size} pages excluded (${pleadingPages.size} pleading + ${emrPages.size} EMR)`);
+          } else {
+            batches.push([{ ...part, pageScope: null }]);
+            console.log(`coordinator: part ${part.label} → full-document batch (no VI page data)`);
+          }
         }
       }
     }
@@ -1650,10 +2276,10 @@ const generateSummaryWorker = async (event) => {
     // ── 8. Merge + dedup + sort ───────────────────────────────────────────────
     await setJobStatus(job_id, 'Merging and deduplicating visits...');
     try {
-      allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+      allVisits = mergeEdVisits(mergeResidentCosignVisits(deduplicateVisits(allVisits)));
     } catch (mergeErr) {
       console.error('mergeEdVisits error (non-fatal, falling back to dedup only):', mergeErr.message);
-      allVisits = deduplicateVisits(allVisits);
+      allVisits = mergeResidentCosignVisits(deduplicateVisits(allVisits));
     }
     allVisits.sort((a, b) => {
       if (!a.visit_date) return 1;
@@ -1688,7 +2314,7 @@ const generateSummaryWorker = async (event) => {
         }
 
         console.log(`C-4 scan: ${part.label} has C-4 keywords but no C-4 visit — triggering targeted extraction`);
-        const c4Prompt = `You are reviewing medical-legal documents. This document contains a C-4 FORM (Workers' Compensation Board Doctor's Report / WCB Form C-4 / "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT").\n\nFind the C-4 form in this document and extract it as a single visit entry. The C-4 form may be partially illegible or printed as a scanned image — extract what you can.\n\nFor the C-4 form:\n- rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)\n- practice_setting: "C-4 Workers' Compensation Report"\n- visit_date: the date the form was completed or the examination date — CRITICAL to extract even if the rest is illegible\n- impression_diagnosis: diagnosis only — ICD codes if present, otherwise the written diagnosis\n- hpi_summary: leave empty\n- chief_complaint: leave empty\n- physical_exam_findings: leave empty\n- treatment_plan: leave empty\n\nDo NOT extract any other visits — only the C-4 form.`;
+        const c4Prompt = `You are reviewing medical-legal documents. This document contains a C-4 FORM (Workers' Compensation Board Doctor's Report / WCB Form C-4 / "EMPLOYEE'S CLAIM FOR COMPENSATION/REPORT OF INITIAL TREATMENT").\n\nFind the C-4 form in this document and extract it as a single visit entry. The C-4 form may be partially illegible or printed as a scanned image — extract what you can.\n\nFor the C-4 form:\n- rendering_provider: the treating physician's name (look for signature block or printed name at bottom of form)\n- practice_setting: "C-4 Workers' Compensation Report"\n- visit_date: the date the form was completed or the examination date — CRITICAL to extract even if the rest is illegible\n- impression_diagnosis: diagnosis only — ICD codes if present, otherwise the written diagnosis\n- hpi_summary: leave empty\n- chief_complaint: leave empty\n- physical_exam_findings: leave empty\n- treatment_plan: leave empty\n- source_page: the page number within this PDF file (first page = 1) where the C-4 form begins. Always fill this in as a plain integer.\n\nDo NOT extract any other visits — only the C-4 form.`;
 
         try {
           const c4Schema = {
@@ -1713,6 +2339,7 @@ const generateSummaryWorker = async (event) => {
                   impression_diagnosis:   { type: 'string' },
                   icd10_codes:            { type: 'array', items: { type: 'string' } },
                   treatment_plan:         { type: 'string' },
+                  source_page:            { type: 'integer' },
                 },
               },
             },
@@ -1721,7 +2348,12 @@ const generateSummaryWorker = async (event) => {
         const c4Result = await callBedrock([part.file_key], c4Prompt, c4Schema, regionOrder);
           if (Array.isArray(c4Result.visits) && c4Result.visits.length > 0) {
             const c4Clean = sanitizeVisits(c4Result.visits, patientName);
-            for (const v of c4Clean) v.source_doc_id = part.id;
+            for (const v of c4Clean) {
+              v.source_doc_id = part.id;
+              // Single-part call, no pageScope slicing — model's local page IS the real page.
+              const rawPage = Number(v.source_page);
+              v.source_page = (Number.isFinite(rawPage) && rawPage >= 1) ? rawPage : null;
+            }
             allVisits = allVisits.concat(c4Clean);
             console.log(`C-4 scan: recovered ${c4Clean.length} C-4 visit(s) from ${part.label}`);
           } else {
@@ -1734,10 +2366,10 @@ const generateSummaryWorker = async (event) => {
 
       // Re-dedup after C-4 recovery
       try {
-        allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+        allVisits = mergeEdVisits(mergeResidentCosignVisits(deduplicateVisits(allVisits)));
       } catch (mergeErr) {
         console.error('mergeEdVisits error (non-fatal, falling back to dedup only):', mergeErr.message);
-        allVisits = deduplicateVisits(allVisits);
+        allVisits = mergeResidentCosignVisits(deduplicateVisits(allVisits));
       }
       allVisits.sort((a, b) => {
         if (!a.visit_date) return 1;
@@ -1944,10 +2576,10 @@ const generateSummaryWorker = async (event) => {
           }));
         }
         try {
-      allVisits = mergeEdVisits(deduplicateVisits(allVisits));
+      allVisits = mergeEdVisits(mergeResidentCosignVisits(deduplicateVisits(allVisits)));
     } catch (mergeErr) {
       console.error('mergeEdVisits error (non-fatal, falling back to dedup only):', mergeErr.message);
-      allVisits = deduplicateVisits(allVisits);
+      allVisits = mergeResidentCosignVisits(deduplicateVisits(allVisits));
     }
         allVisits.sort((a, b) => {
           if (!a.visit_date) return 1;
@@ -2006,6 +2638,9 @@ const generateSummaryWorker = async (event) => {
         visits:        allVisits,
         doc_count:     docRecords.length,
         visit_count:   allVisits.length,
+        usage:         { ...RUN_USAGE },
+        narrative_only: !!exclude_emr,
+        pt_consolidated: !!consolidate_pt,
         status:        'draft',
         created_at:    new Date().toISOString(),
         updated_at:    new Date().toISOString(),
@@ -2035,20 +2670,30 @@ const generateSummaryWorker = async (event) => {
       aws_summary_id,
     });
 
-    // ── Run verify post-completion — updates summary if correctedVisits differ ──
+    // ── Updated: 2026-09-12 — ASYNC VERIFY HANDOFF (900s coordinator timeout fix) ──
+    // Root cause: the coordinator's 900s Lambda budget must cover chunk polling
+    // (~9+ min on large corpora) BEFORE verify starts, so the inline verify pass was
+    // killed mid-loop by the TASK timeout — recovery never ran at all. Evidence:
+    // 2026-09-12 ZSolis run: verify started at T+9min, burned ~6min re-running the
+    // VI pre-pass sequentially, hit 'Status: timeout' at 17:23:20.
+    // Fix: hand verify to the dedicated verifySummaryWorker via async Event invoke.
+    // It gets its own FRESH 900s budget, so verify + recovery actually complete.
+    // Job status/summary are already complete at this point — verify remains
+    // best-effort post-processing that updates the saved summary in place.
     try {
-      const verifyResult = await runVerifyInline({
-        job_id,
-        aws_summary_id,
-        doc_ids,
-        org_id: docRecords[0] && docRecords[0].org_id ? docRecords[0].org_id : '',
-        precomputedViVisits: knownVisits,
-      });
-      if (verifyResult && Array.isArray(verifyResult.correctedVisits) && verifyResult.correctedVisits.length > 0) {
-        console.log('coordinator: verify returned correctedVisits — summary already saved, verify runs post-completion');
-      }
+      await lambda.send(new InvokeCommand({
+        FunctionName: VERIFY_FN,
+        InvocationType: 'Event',
+        Payload: Buffer.from(JSON.stringify({
+          job_id,
+          aws_summary_id,
+          doc_ids,
+          org_id: docRecords[0] && docRecords[0].org_id ? docRecords[0].org_id : '',
+        })),
+      }));
+      console.log(`coordinator: verify handed off to ${VERIFY_FN} (async) — exiting within budget`);
     } catch (verifyErr) {
-      console.warn('coordinator: inline verify failed (non-fatal):', verifyErr.message);
+      console.warn('coordinator: verify handoff failed (non-fatal):', verifyErr.message);
     }
 
   } catch (err) {
@@ -2275,7 +2920,7 @@ For each encounter return:
 - pages: page numbers in this PDF where the encounter appears
 
 INCLUDE: ED notes, consultation reports, operative reports, radiology reports, office visits, H&P notes, discharge summaries, C-4/Workers Comp forms.
-EXCLUDE: nursing flowsheets, MAR, anesthesia records, coding summaries, consent forms, lab printouts, appointment reminders, PPRs, PACU records, pre-op checklists.`;
+EXCLUDE: nursing flowsheets, MAR, anesthesia records, coding summaries, consent forms, lab printouts, appointment reminders, PPRs, PACU records, pre-op checklists, Clinical Documentation Records (nursing shift assessments), implant/vendor supply logs, discharge patient medication lists.`;
 
 const callBedrockVI = async (fileKey, regionOrder) => {
   const pdfBytes = await fetchPdfBytes(fileKey);
@@ -2384,6 +3029,8 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     const summary = summaryResp.Item;
     if (!summary) throw new Error(`Summary not found: ${aws_summary_id}`);
     const summaryVisits = Array.isArray(summary.visits) ? summary.visits : [];
+    const patientName = summary.patient_name || '';
+    const regionOrder = null; // callBedrock/callBedrockVI resolve regions internally when null
 
     // 2. Load document parts (need file_key + extracted_text)
     const docRecords = [];
@@ -2407,21 +3054,28 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
         viVisits.push({ ...v, date: normalizeDate(v.date), _part: part });
       });
     } else {
-      console.log('verify: no precomputed VI visits — running Bedrock VI pre-pass (fallback)');
-      for (const part of allParts) {
-        if (!part.file_key) continue;
-        try {
-          const result = await callBedrockVI(part.file_key);
-          if (Array.isArray(result.visits)) {
-            result.visits
-              .map(v => ({ ...v, date: normalizeDate(v.date), _part: part }))
-              .filter(v => v.date)
-              .forEach(v => viVisits.push(v));
+      // Updated: 2026-09-12 — parallelize the VI pre-pass (was sequential).
+      // Sequential took ~20s per part (~6 min for 15 parts) and blew the verify
+      // budget before recovery could run. At concurrency 4: ~1.5 min, leaving
+      // ~7+ minutes of the verify worker's fresh 900s for the recovery pass.
+      console.log('verify: no precomputed VI visits — running Bedrock VI pre-pass (fallback, concurrency 4)');
+      const VI_PARALLEL = 4;
+      const viParts = allParts.filter(function(p) { return !!p.file_key; });
+      for (let i = 0; i < viParts.length; i += VI_PARALLEL) {
+        const group = viParts.slice(i, i + VI_PARALLEL);
+        const groupResults = await Promise.all(group.map(async function(part) {
+          try {
+            const result = await callBedrockVI(part.file_key);
+            console.log(`verify: VI pre-pass ${part.label || part.aws_document_id} → ${(result.visits||[]).length} visits`);
+            return (Array.isArray(result.visits) ? result.visits : [])
+              .map(function(v) { return { ...v, date: normalizeDate(v.date), _part: part }; })
+              .filter(function(v) { return v.date; });
+          } catch (e) {
+            console.warn(`verify: VI pre-pass failed for part ${part.aws_document_id}: ${e.message}`);
+            return [];
           }
-          console.log(`verify: VI pre-pass ${part.label || part.aws_document_id} → ${(result.visits||[]).length} visits`);
-        } catch (e) {
-          console.warn(`verify: VI pre-pass failed for part ${part.aws_document_id}: ${e.message}`);
-        }
+        }));
+        groupResults.forEach(function(rv) { rv.forEach(function(v) { viVisits.push(v); }); });
       }
     }
 
@@ -2449,8 +3103,13 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     }
 
     // 5. Diff: find visits in VI not present in summary (by date+provider+visit_type key)
+    // Updated: 2026-09-12 — FIELD NAME FIX: summary visits are stored with
+    // visit_date/rendering_provider, but this compared v.date/v.provider (always
+    // undefined) — the same bug class fixed 2026-08-30 in the coordinator. Result:
+    // essentially every VI visit was falsely flagged missing ('83 missing' on runs
+    // where most were present), and date corrections could never match.
     const summaryKeys = new Set(
-      summaryVisits.map(v => `${normalizeDate(v.date)}|${normalizeProvider(v.provider || v.provider_name)}`)
+      summaryVisits.map(v => `${normalizeDate(v.visit_date)}|${normalizeProvider(v.rendering_provider)}`)
     );
     // Also build a provider+visit_type → VI date map for targeted date correction below
     const viDateByProviderType = {};
@@ -2458,10 +3117,12 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
       const k = `${normalizeProvider(v.provider)}|${(v.visit_type || '').toLowerCase()}`;
       viDateByProviderType[k] = v.date;
     }
+    // Updated: 2026-09-12 — keep _part + source_doc_id on missing entries so the
+    // recovery pass below can locate the right document part for extraction.
     const missingVisits = uniqueViVisits.filter(v => {
       const k = `${v.date}|${normalizeProvider(v.provider)}`;
       return !summaryKeys.has(k);
-    }).map(v => ({ date: v.date, provider: v.provider, visit_type: v.visit_type }));
+    }).map(v => ({ date: v.date, provider: v.provider, visit_type: v.visit_type, source_doc_id: v.source_doc_id, _part: v._part }));
 
     // 6. Apply date corrections to summary visits
     // Strategy A: SERVICE DT regex corrections (from findServiceDate)
@@ -2469,10 +3130,11 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     //             but summary has same provider+visit_type on a different date, correct it
     let correctedCount = 0;
     const correctedVisits = summaryVisits.map(sv => {
-      const svProvKey = normalizeProvider(sv.provider || sv.provider_name || '');
+      const svProvKey = normalizeProvider(sv.rendering_provider || '');
       const svType    = (sv.practice_setting || sv.visit_type || '').toLowerCase();
 
       // Strategy A: regex correction — match on provider+visit_type to avoid hitting C-4 instead of ED note
+      // Updated: 2026-09-12 — sv.provider → sv.rendering_provider, sv.date → sv.visit_date
       const regexCorrection = dateCorrections.find(c => {
         if (normalizeProvider(c.provider) !== svProvKey) return false;
         // If visit_type available on correction, require it to match
@@ -2481,8 +3143,8 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
       });
       if (regexCorrection) {
         correctedCount++;
-        console.log(`verify [regex]: correcting ${sv.provider} (${svType}) ${sv.date} → ${regexCorrection.corrected_date}`);
-        return { ...sv, date: regexCorrection.corrected_date };
+        console.log(`verify [regex]: correcting ${sv.rendering_provider} (${svType}) ${sv.visit_date} → ${regexCorrection.corrected_date}`);
+        return { ...sv, visit_date: regexCorrection.corrected_date };
       }
 
       // Strategy B: VI pre-pass direct date comparison
@@ -2502,22 +3164,22 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
         }
       }
 
-      if (viDate && viDate !== normalizeDate(sv.date)) {
+      if (viDate && viDate !== normalizeDate(sv.visit_date)) {
         // Sanity: only correct if within 7 days
         // Pure string YYYYMMDD diff — no Date() objects
-        const origInt2 = parseInt((normalizeDate(sv.date) || '').replace(/-/g, ''), 10);
+        const origInt2 = parseInt((normalizeDate(sv.visit_date) || '').replace(/-/g, ''), 10);
         const corrInt2 = parseInt((viDate || '').replace(/-/g, ''), 10);
         if (!isNaN(origInt2) && !isNaN(corrInt2) && Math.abs(origInt2 - corrInt2) <= 7) {
           correctedCount++;
-          const origFmt = normalizeDate(sv.date);
-          console.log(`verify [VI diff]: correcting ${sv.provider} (${svType}) ${origFmt} → ${viDate}`);
+          const origFmt = normalizeDate(sv.visit_date);
+          console.log(`verify [VI diff]: correcting ${sv.rendering_provider} (${svType}) ${origFmt} → ${viDate}`);
           dateCorrections.push({
-            provider:       sv.provider || sv.provider_name || '',
+            provider:       sv.rendering_provider || '',
             original_date:  origFmt,
             corrected_date: viDate,
             method:         'VI_prepass_diff',
           });
-          return { ...sv, date: viDate };
+          return { ...sv, visit_date: viDate };
         }
       }
 
@@ -2525,10 +3187,11 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
     });
 
     // 7. Re-sort corrected visits chronologically (proper date comparison)
-    const finalVisits = correctedVisits.sort((a, b) => {
+    let finalVisits = correctedVisits.sort((a, b) => {
       // Pure string YYYYMMDD sort — no Date() objects
-      const da = parseInt((normalizeDate(a.date) || '19000101').replace(/-/g, ''), 10);
-      const db = parseInt((normalizeDate(b.date) || '19000101').replace(/-/g, ''), 10);
+      // Updated: 2026-09-12 — a.date → a.visit_date (summary schema field)
+      const da = parseInt((normalizeDate(a.visit_date) || '19000101').replace(/-/g, ''), 10);
+      const db = parseInt((normalizeDate(b.visit_date) || '19000101').replace(/-/g, ''), 10);
       return da - db;
     });
 
@@ -2543,23 +3206,128 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
         : 'verified',
     };
 
-    console.log(`verify: complete — ${dateCorrections.length} corrections, ${missingVisits.length} missing`);
-    return { correctedVisits: finalVisits, correctedCount };
+    console.log(`verify: ${dateCorrections.length} corrections, ${missingVisits.length} missing (after field-name fix)`);
 
-    // 9. Write back to summary record
-    await dynamo.send(new UpdateCommand({
-      TableName: SUMMARIES_TABLE,
-      Key: { aws_summary_id },
-      UpdateExpression: 'SET visits = :v, visit_count = :vc, verification_result = :vr, #st = :st, updated_at = :now',
-      ExpressionAttributeNames: { '#st': 'status' },
-      ExpressionAttributeValues: {
-        ':v':  finalVisits,
-        ':vc': finalVisits.length,
-        ':vr': verification_result,
-        ':st': verification_result.status,
-        ':now': new Date().toISOString(),
-      },
-    }));
+    // ── 8b. Updated: 2026-09-12 — REAL RECOVERY PASS (ported from the coordinator's
+    // chunk-level recovery). Previously missing visits were only recorded as metadata
+    // and never extracted. Now each genuinely-missing visit is targeted-extracted from
+    // its source part and appended to the summary. Runs at concurrency 3.
+    let recoveredCount = 0;
+    if (missingVisits.length > 0) {
+      const recSchema = {
+        type: 'object',
+        properties: {
+          visits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                visit_date:             { type: 'string' },
+                rendering_provider:     { type: 'string' },
+                practice_setting:       { type: 'string' },
+                chief_complaint:        { type: 'string' },
+                hpi_summary:            { type: 'string' },
+                injury_date:            { type: 'string' },
+                pain_scale:             { type: 'string' },
+                symptom_progression:    { type: 'string', enum: ['improved', 'same', 'worse', 'not_documented'] },
+                physical_exam_findings: { type: 'string' },
+                imaging_findings:       { type: 'string' },
+                lab_findings:           { type: 'string' },
+                impression_diagnosis:   { type: 'string' },
+                icd10_codes:            { type: 'array', items: { type: 'string' } },
+                treatment_plan:         { type: 'string' },
+              },
+            },
+          },
+        },
+      };
+      // Group missing visits by source part so one Bedrock call can recover
+      // several visits from the same part.
+      const byPart = {};
+      for (const mv of missingVisits) {
+        const pid = (mv._part && (mv._part.aws_document_id || mv._part.id)) || 'unknown';
+        if (!byPart[pid]) byPart[pid] = [];
+        byPart[pid].push(mv);
+      }
+      const recGroups = Object.entries(byPart);
+      console.log(`verify: recovery — ${missingVisits.length} missing visits across ${recGroups.length} parts`);
+      const REC_CONCURRENCY = 3;
+      for (let rg = 0; rg < recGroups.length; rg += REC_CONCURRENCY) {
+        const recChunk = recGroups.slice(rg, rg + REC_CONCURRENCY);
+        const recResults = await Promise.all(recChunk.map(async ([partId, mvGroup]) => {
+          const recPart    = mvGroup[0]._part || allParts.find(p => p.aws_document_id === partId || p.id === partId);
+          const recFileKey = (recPart && recPart.file_key) || (allParts[0] && allParts[0].file_key);
+          if (!recFileKey) return [];
+          const visitList = mvGroup.map(v => `- ${v.date} | ${v.provider || 'Unknown'} | ${v.facility || ''}`).join('\n');
+          const recPrompt = 'You are reviewing medical-legal documents. A specific clinical visit is known to exist in these records but was missed in the prior extraction pass.\n\nTARGET VISIT' + (mvGroup.length > 1 ? 'S' : '') + ':\n' + visitList + '\n\nYour task: Find the above visit' + (mvGroup.length > 1 ? 's' : '') + ' in the provided document and extract full clinical details for ' + (mvGroup.length > 1 ? 'each one' : 'it') + '. If you cannot find it, return an empty visits array. Do not extract any other visits.';
+          try {
+            const recResult = await callBedrock([recFileKey], recPrompt, recSchema, regionOrder);
+            if (Array.isArray(recResult.visits) && recResult.visits.length > 0) {
+              const recClean = sanitizeVisits(recResult.visits || [], patientName);
+              console.log(`verify: recovered ${recClean.length} visit(s) from part ${partId}`);
+              return recClean;
+            }
+          } catch (recErr) {
+            console.warn(`verify: recovery failed for part ${partId}:`, recErr.message);
+          }
+          return [];
+        }));
+        recResults.forEach(rv => { finalVisits.push(...rv); recoveredCount += rv.length; });
+      }
+      if (recoveredCount > 0) {
+        // Re-dedup against the merged set, then re-sort chronologically
+        try {
+          finalVisits = mergeResidentCosignVisits(deduplicateVisits(finalVisits));
+        } catch (dedupErr) {
+          console.warn('verify: recovery dedup failed (non-fatal):', dedupErr.message);
+        }
+        finalVisits.sort((a, b) => {
+          const da = parseInt((normalizeDate(a.visit_date) || '19000101').replace(/-/g, ''), 10);
+          const db = parseInt((normalizeDate(b.visit_date) || '19000101').replace(/-/g, ''), 10);
+          return da - db;
+        });
+      }
+    }
+
+    // 8c. finalize verification result with recovery info
+    verification_result.recovered_count = recoveredCount;
+    verification_result.missing_visits   = missingVisits.map(v => ({ date: v.date, provider: v.provider, visit_type: v.visit_type }));
+    if (recoveredCount > 0) {
+      verification_result.status = 'verified_with_corrections';
+    }
+
+    console.log(`verify: complete — ${dateCorrections.length} corrections, ${recoveredCount} recovered, ${missingVisits.length - recoveredCount} still missing`);
+
+    // ── 9. Write back to summary record ──
+    // Updated: 2026-09-12 — this was DEAD CODE before (unreachable early return above
+    // meant corrections were computed and thrown away). Now it runs.
+    // Stale-guard: skip the write-back if the user saved the summary while verify was
+    // running, so verify never clobbers manual edits.
+    try {
+      await dynamo.send(new UpdateCommand({
+        TableName: SUMMARIES_TABLE,
+        Key: { aws_summary_id },
+        UpdateExpression: 'SET visits = :v, visit_count = :vc, verification_result = :vr, #st = :st, #usg = :usg, updated_at = :now',
+        ConditionExpression: 'attribute_not_exists(updated_at) OR updated_at = :expected_updated',
+        ExpressionAttributeNames: { '#st': 'status', '#usg': 'usage' },
+        ExpressionAttributeValues: {
+          ':v':  finalVisits,
+          ':vc': finalVisits.length,
+          ':vr': verification_result,
+          ':st': verification_result.status,
+          ':usg': { ...RUN_USAGE, through: 'verify' },
+          ':now': new Date().toISOString(),
+          ':expected_updated': (summary.updated_at || ''),
+        },
+      }));
+      console.log(`verify: summary updated — ${finalVisits.length} visits (${recoveredCount} recovered)`);
+    } catch (condErr) {
+      if (condErr.name === 'ConditionalCheckFailedException') {
+        console.warn('verify: summary was modified during verify (user save?) — skipping write-back to protect manual edits');
+      } else {
+        throw condErr;
+      }
+    }
 
     // 10. Update job status
     await dynamo.send(new UpdateCommand({
@@ -2572,6 +3340,8 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
         ':now': new Date().toISOString(),
       },
     }));
+
+    return { correctedVisits: finalVisits, correctedCount, recoveredCount };
 
   } catch (err) {
     console.error('verifySummaryWorker fatal:', err);
