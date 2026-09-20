@@ -1,3 +1,4 @@
+// Updated: 2026-09-19 -- per-user isolation: summaries now carry org_id (stamped from verified JWT on create); get/update/remove enforce ownership (403 if mismatch, unless admin); listAll/listByPatient filter to the caller's own org (admin sees all, for QC). Previously this table had zero org scoping at all -- any logged-in user could see/edit/delete any summary.
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { validateApiKey } = require('./auth');
@@ -15,11 +16,14 @@ const response = (statusCode, body) => ({
 // ─── Create ───────────────────────────────────────────────────────────────────
 const createHandler = async (event) => {
   try {
+    const orgId = event._orgId;
+    if (!orgId) return response(401, { error: 'Unauthorized' });
     const data = JSON.parse(event.body || '{}');
     const aws_summary_id = crypto.randomUUID();
     const now = new Date().toISOString();
     const item = {
       aws_summary_id: data.aws_summary_id || aws_summary_id, // honour frontend-supplied ID
+      org_id: orgId,
       created_at: now,
       updated_at: now,
       status: data.status || 'draft',
@@ -51,6 +55,7 @@ const getHandler = async (event) => {
     const { aws_summary_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_summary_id } }));
     if (!result.Item) return response(404, { error: 'Summary not found' });
+    if (!event._isAdmin && result.Item.org_id && result.Item.org_id !== event._orgId) return response(403, { error: 'Forbidden' });
     return response(200, result.Item);
   } catch (err) {
     return response(500, { error: err.message });
@@ -62,6 +67,10 @@ const getHandler = async (event) => {
 const updateHandler = async (event) => {
   try {
     const { aws_summary_id } = event.pathParameters;
+    const existing = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_summary_id } }));
+    if (!existing.Item) return response(404, { error: 'Summary not found' });
+    if (!event._isAdmin && existing.Item.org_id && existing.Item.org_id !== event._orgId) return response(403, { error: 'Forbidden' });
+
     const data = JSON.parse(event.body || '{}');
     const now = new Date().toISOString();
 
@@ -111,6 +120,10 @@ const updateHandler = async (event) => {
 const removeHandler = async (event) => {
   try {
     const { aws_summary_id } = event.pathParameters;
+    const existing = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_summary_id } }));
+    if (!existing.Item) return response(404, { error: 'Summary not found' });
+    if (!event._isAdmin && existing.Item.org_id && existing.Item.org_id !== event._orgId) return response(403, { error: 'Forbidden' });
+
     await dynamo.send(new DeleteCommand({ TableName: TABLE, Key: { aws_summary_id } }));
     return response(200, { message: 'Summary deleted' });
   } catch (err) {
@@ -121,6 +134,8 @@ const removeHandler = async (event) => {
 // ─── List by patient ──────────────────────────────────────────────────────────
 const listByPatientHandler = async (event) => {
   try {
+    const orgId = event._orgId;
+    if (!orgId) return response(401, { error: 'Unauthorized' });
     const { aws_patient_id } = event.pathParameters;
 
     // Try GSI first, fall back to scan
@@ -144,7 +159,9 @@ const listByPatientHandler = async (event) => {
       items = result.Items || [];
     }
 
-    return response(200, { summaries: items });
+    // Admin sees across all orgs for QC; everyone else only their own summaries.
+    const scoped = event._isAdmin ? items : items.filter(it => !it.org_id || it.org_id === orgId);
+    return response(200, { summaries: scoped });
   } catch (err) {
     return response(500, { error: err.message });
   }
@@ -153,6 +170,8 @@ const listByPatientHandler = async (event) => {
 // ─── List all (fallback) ──────────────────────────────────────────────────────
 const listAllHandler = async (event) => {
   try {
+    const orgId = event._orgId;
+    if (!orgId) return response(401, { error: 'Unauthorized' });
     console.log('[listAll] TABLE:', TABLE);
     // Paginate through all items -- DynamoDB scan is limited to 1MB per call
     let items = [];
@@ -165,7 +184,9 @@ const listAllHandler = async (event) => {
       lastKey = result.LastEvaluatedKey;
     } while (lastKey);
     console.log('[listAll] got', items.length, 'items (paginated)');
-    return response(200, { summaries: items });
+    // Admin sees across all orgs for QC; everyone else only their own summaries.
+    const scoped = event._isAdmin ? items : items.filter(it => !it.org_id || it.org_id === orgId);
+    return response(200, { summaries: scoped });
   } catch (err) {
     console.error('[listAll] ERROR:', err.message, err.stack);
     return response(500, { error: err.message });

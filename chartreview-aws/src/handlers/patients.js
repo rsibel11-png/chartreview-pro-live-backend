@@ -1,3 +1,4 @@
+// Updated: 2026-09-19 -- per-user isolation: patients now carry org_id (stamped from verified JWT on create); list is org-scoped (admin bypass with optional ?org_id= QC override); get/update/remove enforce ownership (403 if the patient's org doesn't match the caller, unless admin). Previously this table had zero org scoping at all -- any logged-in user could see/edit/delete any patient.
 let initError = null;
 let DynamoDBClient, DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, ScanCommand, validateApiKey;
 
@@ -39,8 +40,25 @@ const debugHandler = async (event) => {
 const listHandler = async (event) => {
   if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
-    const result = await dynamo.send(new ScanCommand({ TableName: TABLE }));
-    const patients = (result.Items || [])
+    const orgId = event._orgId;
+    if (!orgId) return response(401, { error: 'Unauthorized' });
+    // Admin sees across all orgs for QC; optional ?org_id= query param scopes to one specific user's org for review.
+    const scopeOrgId = event._isAdmin ? (event.queryStringParameters && event.queryStringParameters.org_id) || null : orgId;
+
+    let items = [];
+    let lastKey = undefined;
+    do {
+      const scanParams = { TableName: TABLE, ExclusiveStartKey: lastKey };
+      if (scopeOrgId) {
+        scanParams.FilterExpression = 'org_id = :orgId';
+        scanParams.ExpressionAttributeValues = { ':orgId': scopeOrgId };
+      }
+      const result = await dynamo.send(new ScanCommand(scanParams));
+      items = items.concat(result.Items || []);
+      lastKey = result.LastEvaluatedKey;
+    } while (lastKey);
+
+    const patients = items
       .map(sanitize)
       .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     return response(200, { patients });
@@ -53,10 +71,12 @@ const listHandler = async (event) => {
 const createHandler = async (event) => {
   if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
+    const orgId = event._orgId;
+    if (!orgId) return response(401, { error: 'Unauthorized' });
     const data = JSON.parse(event.body || '{}');
     const aws_patient_id = crypto.randomUUID();
     const now = new Date().toISOString();
-    const item = { aws_patient_id, patient_name: data.patient_name, created_at: now, updated_at: now };
+    const item = { aws_patient_id, org_id: orgId, patient_name: data.patient_name, created_at: now, updated_at: now };
     if (data.date_of_birth) item.date_of_birth = data.date_of_birth;
     if (data.case_number) item.case_number = data.case_number;
     if (data.notes) item.notes = data.notes;
@@ -74,6 +94,7 @@ const getHandler = async (event) => {
     const { aws_patient_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_patient_id } }));
     if (!result.Item) return response(404, { error: 'Patient not found' });
+    if (!event._isAdmin && result.Item.org_id && result.Item.org_id !== event._orgId) return response(403, { error: 'Forbidden' });
     return response(200, sanitize(result.Item));
   } catch (err) {
     console.error('getPatient error:', err);
@@ -85,6 +106,10 @@ const updateHandler = async (event) => {
   if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
     const { aws_patient_id } = event.pathParameters;
+    const existing = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_patient_id } }));
+    if (!existing.Item) return response(404, { error: 'Patient not found' });
+    if (!event._isAdmin && existing.Item.org_id && existing.Item.org_id !== event._orgId) return response(403, { error: 'Forbidden' });
+
     const data = JSON.parse(event.body || '{}');
     const now = new Date().toISOString();
 
@@ -112,6 +137,10 @@ const removeHandler = async (event) => {
   if (initError) return response(500, { error: 'Init failed: ' + initError });
   try {
     const { aws_patient_id } = event.pathParameters;
+    const existing = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_patient_id } }));
+    if (!existing.Item) return response(404, { error: 'Patient not found' });
+    if (!event._isAdmin && existing.Item.org_id && existing.Item.org_id !== event._orgId) return response(403, { error: 'Forbidden' });
+
     await dynamo.send(new DeleteCommand({ TableName: TABLE, Key: { aws_patient_id } }));
     return response(200, { message: 'Patient deleted' });
   } catch (err) {

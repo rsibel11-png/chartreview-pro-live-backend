@@ -1,3 +1,4 @@
+// Updated: 2026-09-19 -- per-user data isolation: org_id checks now bypass for admin (event._isAdmin, set in auth.js from verified custom:role claim). listAllHandler/listByPatientHandler skip the org filter for admin (optional ?org_id= query param scopes to one user for QC review). Error messages no longer reference the removed x-org-id header. No other flow touched.
 // Updated: 2026-05-16 — improved CLASSIFY_PROMPT: physician-narrative bar, hospital admin/nursing/order page exclusions
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
@@ -49,7 +50,7 @@ const optionsHandler = async () => ({
 // --- DIRECT UPLOAD ----------------------------------------------------------
 const directUploadHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
 
   try {
     var data;
@@ -108,13 +109,13 @@ const directUploadHandler = async (event) => {
 // --- GET --------------------------------------------------------------------
 const getHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
 
   try {
     const { aws_document_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!result.Item) return response(404, { error: 'Document not found' });
-    if (result.Item.org_id && result.Item.org_id !== orgId) return response(403, { error: 'Access denied' });
+    if (!event._isAdmin && (result.Item.org_id && result.Item.org_id !== orgId)) return response(403, { error: 'Access denied' });
     return response(200, result.Item);
   } catch (err) {
     return response(500, { error: err.message });
@@ -124,12 +125,12 @@ const getHandler = async (event) => {
 // --- GET TEXT ONLY ----------------------------------------------------------
 const getTextHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
   try {
     const { aws_document_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!result.Item) return response(404, { error: 'Document not found' });
-    if (result.Item.org_id && result.Item.org_id !== orgId) return response(403, { error: 'Access denied' });
+    if (!event._isAdmin && (result.Item.org_id && result.Item.org_id !== orgId)) return response(403, { error: 'Access denied' });
     return response(200, { aws_document_id, extracted_text: result.Item.extracted_text || '' });
   } catch (err) {
     return response(500, { error: err.message });
@@ -139,13 +140,13 @@ const getTextHandler = async (event) => {
 // --- DELETE -----------------------------------------------------------------
 const removeHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
 
   try {
     const { aws_document_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!result.Item) return response(404, { error: 'Document not found' });
-    if (result.Item.org_id && result.Item.org_id !== orgId) return response(403, { error: 'Access denied' });
+    if (!event._isAdmin && (result.Item.org_id && result.Item.org_id !== orgId)) return response(403, { error: 'Access denied' });
 
     if (result.Item.file_key) {
       await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: result.Item.file_key })).catch(() => {});
@@ -160,13 +161,13 @@ const removeHandler = async (event) => {
 // --- DOWNLOAD URL -----------------------------------------------------------
 const getDownloadUrlHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
 
   try {
     const { aws_document_id } = event.pathParameters;
     const result = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!result.Item) return response(404, { error: 'Document not found' });
-    if (result.Item.org_id && result.Item.org_id !== orgId) return response(403, { error: 'Access denied' });
+    if (!event._isAdmin && (result.Item.org_id && result.Item.org_id !== orgId)) return response(403, { error: 'Access denied' });
 
     // Allow explicit key override for CSV/log downloads (must belong to same org path)
     const overrideKey = event.queryStringParameters && event.queryStringParameters.key;
@@ -208,14 +209,14 @@ const getDownloadUrlHandler = async (event) => {
 // --- UPDATE -----------------------------------------------------------------
 const updateHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
 
   try {
     const { aws_document_id } = event.pathParameters;
 
     const existing = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!existing.Item) return response(404, { error: 'Document not found' });
-    if (existing.Item.org_id && existing.Item.org_id !== orgId) return response(403, { error: 'Access denied' });
+    if (!event._isAdmin && (existing.Item.org_id && existing.Item.org_id !== orgId)) return response(403, { error: 'Access denied' });
 
     const data = JSON.parse(event.body || '{}');
     const now  = new Date().toISOString();
@@ -250,13 +251,13 @@ const updateHandler = async (event) => {
 // --- PROCESS (kick off async worker) ----------------------------------------
 const processHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
 
   const aws_document_id = event.pathParameters.aws_document_id;
   try {
     const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!docResult.Item) return response(404, { error: 'Document not found' });
-    if (docResult.Item.org_id && docResult.Item.org_id !== orgId) return response(403, { error: 'Access denied' });
+    if (!event._isAdmin && (docResult.Item.org_id && docResult.Item.org_id !== orgId)) return response(403, { error: 'Access denied' });
 
     await dynamo.send(new UpdateCommand({
       TableName: TABLE,
@@ -310,17 +311,23 @@ const processHandler = async (event) => {
 // --- LIST BY PATIENT --------------------------------------------------------
 const listByPatientHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
+  // Admin (custom:role=admin) sees across all orgs for QC; optional ?org_id= query param scopes to one specific user's org for review.
+  const scopeOrgId = event._isAdmin ? (event.queryStringParameters?.org_id || null) : orgId;
 
   try {
     const aws_patient_id = event.pathParameters.aws_patient_id;
-    const result = await dynamo.send(new QueryCommand({
+    const queryParams = {
       TableName: TABLE,
       IndexName: 'patient-index',
       KeyConditionExpression: 'aws_patient_id = :pid',
-      FilterExpression: 'org_id = :orgId',
-      ExpressionAttributeValues: { ':pid': aws_patient_id, ':orgId': orgId },
-    }));
+      ExpressionAttributeValues: { ':pid': aws_patient_id },
+    };
+    if (scopeOrgId) {
+      queryParams.FilterExpression = 'org_id = :orgId';
+      queryParams.ExpressionAttributeValues[':orgId'] = scopeOrgId;
+    }
+    const result = await dynamo.send(new QueryCommand(queryParams));
     return response(200, result.Items || []);
   } catch (err) {
     return response(500, { error: err.message });
@@ -330,18 +337,23 @@ const listByPatientHandler = async (event) => {
 // --- LIST ALL (scoped to org) ------------------------------------------------
 const listAllHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
+  // Admin (custom:role=admin) sees across all orgs for QC; optional ?org_id= query param scopes to one specific user's org for review.
+  const scopeOrgId = event._isAdmin ? (event.queryStringParameters?.org_id || null) : orgId;
 
   try {
     let items = [];
     let lastKey = undefined;
     do {
-      const result = await dynamo.send(new ScanCommand({
+      const scanParams = {
         TableName: TABLE,
-        FilterExpression: 'org_id = :orgId',
-        ExpressionAttributeValues: { ':orgId': orgId },
         ExclusiveStartKey: lastKey,
-      }));
+      };
+      if (scopeOrgId) {
+        scanParams.FilterExpression = 'org_id = :orgId';
+        scanParams.ExpressionAttributeValues = { ':orgId': scopeOrgId };
+      }
+      const result = await dynamo.send(new ScanCommand(scanParams));
       items = items.concat(result.Items || []);
       lastKey = result.LastEvaluatedKey;
     } while (lastKey);
@@ -960,7 +972,7 @@ const dlqHandler = async (event) => {
 // --- ASSESS RELEVANCE (synchronous HTTP endpoint) ---------------------------
 const assessRelevanceHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
 
   const aws_document_id = event.pathParameters?.aws_document_id;
   if (!aws_document_id) return response(400, { error: 'Document ID required' });
@@ -969,7 +981,7 @@ const assessRelevanceHandler = async (event) => {
     const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     const doc = docResult.Item;
     if (!doc) return response(404, { error: 'Document not found' });
-    if (doc.org_id !== orgId) return response(403, { error: 'Forbidden' });
+    if (!event._isAdmin && (doc.org_id !== orgId)) return response(403, { error: 'Forbidden' });
     if (!doc.file_key) return response(400, { error: 'Document has no file_key' });
 
     // Fetch PDF from S3 and encode as base64 for Bedrock
@@ -1140,11 +1152,11 @@ const reassessHandler = async (event) => {
     if (!aws_document_id) return response(400, { error: 'aws_document_id required' });
 
     const orgId = event._orgId;
-    if (!orgId) return response(400, { error: 'x-org-id header is required' });
+    if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
 
     const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!docResult.Item) return response(404, { error: 'Document not found' });
-    if (docResult.Item.org_id && docResult.Item.org_id !== orgId) return response(403, { error: 'Forbidden' });
+    if (!event._isAdmin && (docResult.Item.org_id && docResult.Item.org_id !== orgId)) return response(403, { error: 'Forbidden' });
 
     // v25: read page_offset from request body (sent by Library v24 per-part)
     const requestBody = JSON.parse(event.body || '{}');
@@ -1346,13 +1358,13 @@ const saveClassificationToDoc = async (aws_document_id, result, doc, pageOffset 
 // --- GET JOB ----------------------------------------------------------------
 const getJobHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
   const job_id = event.pathParameters?.job_id;
   if (!job_id) return response(400, { error: 'job_id required' });
   try {
     const result = await dynamo.send(new GetCommand({ TableName: JOBS_TABLE, Key: { job_id } }));
     if (!result.Item) return response(404, { error: 'Job not found' });
-    if (result.Item.org_id !== orgId) return response(403, { error: 'Forbidden' });
+    if (!event._isAdmin && (result.Item.org_id !== orgId)) return response(403, { error: 'Forbidden' });
     return response(200, result.Item);
   } catch (err) {
     console.error('getJobHandler error:', err);
@@ -1365,14 +1377,14 @@ const getJobHandler = async (event) => {
 // Clears old classification state, writes a pending job, fires classifyWorker async.
 const classifyStartHandler = async (event) => {
   const orgId = event._orgId;
-  if (!orgId) return response(400, { error: 'x-org-id header is required' });
+  if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
   const aws_document_id = event.pathParameters?.aws_document_id;
   if (!aws_document_id) return response(400, { error: 'aws_document_id required' });
 
   try {
     const docResult = await dynamo.send(new GetCommand({ TableName: TABLE, Key: { aws_document_id } }));
     if (!docResult.Item) return response(404, { error: 'Document not found' });
-    if (docResult.Item.org_id && docResult.Item.org_id !== orgId) return response(403, { error: 'Forbidden' });
+    if (!event._isAdmin && (docResult.Item.org_id && docResult.Item.org_id !== orgId)) return response(403, { error: 'Forbidden' });
 
     const requestBody = JSON.parse(event.body || '{}');
     const page_offset = typeof requestBody.page_offset === 'number' ? requestBody.page_offset : 0;
@@ -1614,7 +1626,7 @@ module.exports = {
   directUpload:   validateApiKey(directUploadHandler),
   getUploadUrl:   validateApiKey(async (event) => {
     const orgId = event._orgId;
-    if (!orgId) return response(400, { error: 'x-org-id header is required' });
+    if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
     try {
       const data        = JSON.parse(event.body || '{}');
       const filename    = data.filename     || 'document.pdf';

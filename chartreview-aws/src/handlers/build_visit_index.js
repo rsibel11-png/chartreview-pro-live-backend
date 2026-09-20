@@ -1,3 +1,4 @@
+// Updated: 2026-09-19 -- SECURITY FIX: replaced the legacy static x-api-key + client-trusted x-org-id header auth (a leftover pre-Cognito pattern never migrated) with validateApiKey (real Cognito JWT verification, shared with all other handlers). org_id now comes only from the verified token. Added an ownership check so doc_ids must belong to the caller's org (admin bypasses). No other flow touched.
 // Updated: 2026-04-28 — split into true async Start/Worker pattern to avoid API Gateway 29s timeout
 // buildVisitIndexStart: creates job, invokes worker async, returns job_id immediately
 // buildVisitIndexWorker: does all Bedrock/S3 work, writes result back to DynamoDB
@@ -8,6 +9,7 @@ const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-be
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { randomUUID } = require('crypto');
+const { validateApiKey } = require('./auth');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const DOCS_TABLE = process.env.DOCUMENTS_TABLE || 'chartreview-documents-prod';
@@ -37,12 +39,6 @@ const respond = (statusCode, body) => ({
   headers: { ...CORS, 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 });
-
-// ── Auth ──────────────────────────────────────────────────────────────────────
-const authenticate = (event) => {
-  const key = event.headers?.['x-api-key'] || event.headers?.['X-Api-Key'] || '';
-  return key === API_KEY;
-};
 
 // ── callBedrock ───────────────────────────────────────────────────────────────
 const callBedrock = async (fileKeys, prompt, schema) => {
@@ -152,17 +148,27 @@ const viSchema = {
 // ═══════════════════════════════════════════════════════════════════════════════
 // START HANDLER — creates job, fires worker async, returns job_id immediately
 // ═══════════════════════════════════════════════════════════════════════════════
-exports.buildVisitIndexStart = async (event) => {
+const _buildVisitIndexStart = async (event) => {
   if (event.httpMethod === 'OPTIONS') return respond(200, {});
-  if (!authenticate(event)) return respond(401, { error: 'Unauthorized' });
 
-  const orgId = event.headers?.['x-org-id'] || event.headers?.['X-Org-Id'] || '';
+  const orgId = event._orgId || '';
+  if (!orgId) return respond(401, { error: 'Unauthorized' });
   let body;
   try { body = JSON.parse(event.body || '{}'); } catch { return respond(400, { error: 'Invalid JSON' }); }
 
   const { doc_ids } = body;
   if (!Array.isArray(doc_ids) || doc_ids.length === 0) {
     return respond(400, { error: 'doc_ids array required' });
+  }
+
+  // Ownership check: every doc_id must belong to the caller's org (admin bypasses).
+  if (!event._isAdmin) {
+    for (const id of doc_ids) {
+      const r = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: id } }));
+      if (r.Item && r.Item.org_id && r.Item.org_id !== orgId) {
+        return respond(403, { error: 'Forbidden: one or more documents do not belong to your account' });
+      }
+    }
   }
 
   const job_id = randomUUID();
@@ -194,6 +200,8 @@ exports.buildVisitIndexStart = async (event) => {
   console.log(`buildVisitIndexStart: worker invoked async, returning job_id`);
   return respond(200, { job_id });
 };
+
+exports.buildVisitIndexStart = validateApiKey(_buildVisitIndexStart);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WORKER HANDLER — does all heavy Bedrock/S3 work, writes result to DynamoDB

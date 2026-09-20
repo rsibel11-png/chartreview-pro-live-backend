@@ -1,62 +1,50 @@
-// Updated: 2026-05-10 — dual-mode auth: Cognito JWT (native) + API key (v5)
-// Native: decodes JWT payload (base64) to extract sub/email — no crypto lib needed
-// v5:     validates x-api-key header
+// Updated: 2026-09-19 -- SECURITY FIX: replaced unsigned JWT base64-decode with real Cognito signature
+// verification (aws-jwt-verify, checks signature against Cognito's JWKS + issuer + audience + expiry).
+// org_id is now derived from the verified token's own 'sub' claim (one org per signup) -- no longer
+// trusted from the client-supplied x-org-id header, which any caller could set to any value.
+// Admin cross-org access (for QC) is granted via the verified custom:role=admin claim, exposed to
+// handlers as event._isAdmin. The legacy x-api-key bypass path is removed entirely -- Cognito login
+// is now required for every request.
+const { CognitoJwtVerifier } = require('aws-jwt-verify');
+
+const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || 'us-east-1_HGvNxEFP6';
+const CLIENT_ID     = process.env.COGNITO_CLIENT_ID     || '12tdr6tcnuvc7kn40ka1vubo6m';
+
+// Verifier is created once per Lambda cold start and caches Cognito's public keys (JWKS) internally.
+const verifier = CognitoJwtVerifier.create({
+  userPoolId: USER_POOL_ID,
+  tokenUse: 'id',
+  clientId: CLIENT_ID,
+});
+
+const unauthorized = (message) => ({
+  statusCode: 401,
+  headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+  body: JSON.stringify({ error: message }),
+});
 
 const validateApiKey = (handler) => async (event, context) => {
   const authHeader = event.headers?.['authorization'] || event.headers?.['Authorization'];
-  const apiKey = event.headers?.['x-api-key'] || event.headers?.['X-Api-Key'];
 
-  // --- PATH 1: Native app — Cognito JWT Bearer token ---
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
-    try {
-      // Decode JWT payload (middle segment) — base64url decode, no crypto verification
-      const parts = token.split('.');
-      if (parts.length !== 3) throw new Error('Invalid JWT structure');
-      const payloadJson = Buffer.from(parts[1], 'base64').toString('utf8');
-      const payload = JSON.parse(payloadJson);
-
-      if (!payload.sub) throw new Error('No sub in JWT payload');
-
-      // Check token not expired
-      if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-        return {
-          statusCode: 401,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-          body: JSON.stringify({ error: 'Unauthorized - token expired' }),
-        };
-      }
-
-      const orgId = event.headers?.['x-org-id'] || event.headers?.['X-Org-Id'] || null;
-      event._orgId = orgId;
-      event._userEmail = payload.email || null;
-      event._userSub = payload.sub;
-      event._authMode = 'cognito';
-      return handler(event, context);
-    } catch (err) {
-      console.error('JWT decode failed:', err.message);
-      return {
-        statusCode: 401,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-        body: JSON.stringify({ error: 'Unauthorized - invalid token' }),
-      };
-    }
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return unauthorized('Unauthorized - missing bearer token');
   }
 
-  // --- PATH 2: v5 app — API key ---
-  if (apiKey && apiKey === process.env.API_KEY) {
-    const orgId = event.headers?.['x-org-id'] || event.headers?.['X-Org-Id'] || null;
-    event._orgId = orgId;
-    event._authMode = 'apikey';
+  const token = authHeader.slice(7);
+  try {
+    // Throws if the signature, issuer, audience (client id), or expiry don't check out.
+    const payload = await verifier.verify(token);
+
+    event._orgId     = payload.sub;
+    event._userEmail = payload.email || null;
+    event._userSub    = payload.sub;
+    event._isAdmin     = payload['custom:role'] === 'admin';
+    event._authMode     = 'cognito';
     return handler(event, context);
+  } catch (err) {
+    console.error('JWT verification failed:', err.message);
+    return unauthorized('Unauthorized - invalid token');
   }
-
-  // --- PATH 3: Nothing valid ---
-  return {
-    statusCode: 401,
-    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-    body: JSON.stringify({ error: 'Unauthorized' }),
-  };
 };
 
 const validateCognito = validateApiKey;

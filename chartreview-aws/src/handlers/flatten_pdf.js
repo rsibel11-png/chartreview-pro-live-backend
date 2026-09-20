@@ -1,3 +1,4 @@
+// Updated: 2026-09-19 -- SECURITY FIX: flattenStart was previously exported with ZERO authentication (no validateApiKey wrapper) and trusted a client-supplied org_id (body.org_id / x-org-id header) to resolve which document to flatten. Now wrapped in validateApiKey (real Cognito JWT verification) and org_id comes only from the verified token; added an explicit ownership check against the document's actual org_id (admin bypasses). No other flow touched.
 /**
  * flatten_pdf.js - v4 (surgical text scrubbing)
  *
@@ -23,6 +24,7 @@ const { DynamoDBDocumentClient, GetCommand, PutCommand } = require('@aws-sdk/lib
 const { randomUUID } = require('crypto');
 const { PDFDocument, PDFName, PDFArray } = require('pdf-lib');
 const zlib = require('zlib');
+const { validateApiKey } = require('./auth');
 
 const s3 = new S3Client({ region: 'us-east-1' });
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1' }));
@@ -357,7 +359,7 @@ async function scrubPdfTextLayer(pdfBuffer) {
 
 // ─── Lambda Handler ───────────────────────────────────────────────────────────
 
-exports.flattenStart = async (event) => {
+const _flattenStart = async (event) => {
   if (event.httpMethod === 'OPTIONS') return resp(200, {});
 
   let orgId, docId;
@@ -366,19 +368,18 @@ exports.flattenStart = async (event) => {
     docId = event.pathParameters?.aws_document_id || body.aws_document_id;
     if (!docId) return resp(400, { error: 'Missing aws_document_id' });
 
-    // Resolve orgId: prefer auth middleware (_orgId), fall back to DynamoDB record
-    orgId = event._orgId
-      || event.requestContext?.authorizer?.claims?.['custom:org_id']
-      || body.org_id
-      || (event.headers && (event.headers['x-org-id'] || event.headers['X-Org-Id']));
+    // orgId comes ONLY from the verified JWT (event._orgId, set by auth.js) -- never from the
+    // client body/headers, which any caller could set to any value.
+    const callerOrgId = event._orgId;
+    if (!callerOrgId) return resp(401, { error: 'Unauthorized' });
 
-    if (!orgId) {
-      // Last resort: look up org_id from the document record itself
-      const docLookup = await ddb.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: docId } }));
-      orgId = docLookup.Item?.org_id;
+    // Ownership check: the document must belong to the caller's org (admin bypasses).
+    const docLookup = await ddb.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: docId } }));
+    if (!docLookup.Item) return resp(404, { error: 'Document not found' });
+    if (!event._isAdmin && docLookup.Item.org_id && docLookup.Item.org_id !== callerOrgId) {
+      return resp(403, { error: 'Forbidden' });
     }
-
-    if (!orgId) return resp(400, { error: 'Could not resolve org_id for document ' + docId });
+    orgId = docLookup.Item.org_id || callerOrgId;
   } catch (e) {
     return resp(400, { error: 'Bad request: ' + e.message });
   }
@@ -438,3 +439,5 @@ exports.flattenStart = async (event) => {
     stats,
   });
 };
+
+exports.flattenStart = validateApiKey(_flattenStart);

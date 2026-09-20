@@ -1,3 +1,4 @@
+// Updated: 2026-09-19 -- per-user isolation: generateSummaryStart / buildVisitIndexStart now verify every doc_id in the request actually belongs to the caller's org (event._orgId, from verified JWT) before starting a job; admin (event._isAdmin) bypasses. Client-supplied body.org_id is no longer trusted except for admin QC override. No other flow touched.
 // Updated: 2026-08-30 — Restored to 24ea835 baseline + max_tokens 64k (known-good direct-deployed fix)
 // Updated: 2026-05-10 — Ruthless concision pass: tightened persona, HPI 2-3s, exam 3-findings, tx 2-3 items, global no-filler mandate
 // Surgical swaps only:
@@ -1100,9 +1101,17 @@ const CHUNK_FN          = process.env.GENERATE_CHUNK_WORKER_FUNCTION_NAME || 'ch
 const generateSummaryStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
   const { doc_ids, patient_name = '' } = body;
-  const org_id = event._orgId || body.org_id || '';
+  const callerOrgId = event._orgId || '';
+  const org_id = (event._isAdmin && body.org_id) ? body.org_id : callerOrgId;
 
   if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
+
+  // Ownership check: every doc_id must belong to the caller's org (admin bypasses).
+  if (!event._isAdmin) {
+    const ownerCheckDocs = await fetchDocRecords(doc_ids);
+    const foreignDoc = ownerCheckDocs.find(d => d.org_id && d.org_id !== callerOrgId);
+    if (foreignDoc) return httpResponse(403, { error: 'Forbidden: one or more documents do not belong to your account' });
+  }
 
   const job_id = randomUUID();
   await dynamo.send(new UpdateCommand({
@@ -2163,9 +2172,17 @@ const buildVisitIndexWorkerFn = async (event) => {
 const buildVisitIndexStartHandler = async (event) => {
   const body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
   const { doc_ids, patient_name: bodyPatientName = '' } = body;
-  const org_id = event._orgId || body.org_id || '';
+  const callerOrgId = event._orgId || '';
+  const org_id = (event._isAdmin && body.org_id) ? body.org_id : callerOrgId;
 
   if (!doc_ids?.length) return httpResponse(400, { error: 'doc_ids required' });
+
+  // Ownership check: every doc_id must belong to the caller's org (admin bypasses).
+  if (!event._isAdmin) {
+    const ownerCheckDocs = await fetchDocRecords(doc_ids);
+    const foreignDoc = ownerCheckDocs.find(d => d.org_id && d.org_id !== callerOrgId);
+    if (foreignDoc) return httpResponse(403, { error: 'Forbidden: one or more documents do not belong to your account' });
+  }
 
   const job_id = randomUUID();
   await dynamo.send(new UpdateCommand({

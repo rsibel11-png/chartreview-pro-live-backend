@@ -1,3 +1,4 @@
+// Updated: 2026-09-19 -- per-user isolation: redactDocumentStart / redact-case branch / redactCaseStart now verify every source document belongs to the caller's org (event._orgId, from verified JWT) before starting a redaction job; admin (event._isAdmin) bypasses. No other flow touched.
 // redact_document.js — ChartReview Pro redaction Lambda
 // Route: POST /documents/{aws_document_id}/redact
 // Updated: 2026-06-09 — Fix #835: redact fused Patient:LASTNAME footer tokens; #793: comprehensive Epic EHR superscript/marker stripping (Unicode-aware)
@@ -2044,6 +2045,10 @@ const _redactDocumentStart = async function(event) {
         if (!caseDocRes.Item) return respond(404, { error: 'Document not found: ' + caseDocIds[_cdi] });
         caseDocRecords.push(caseDocRes.Item);
       }
+      if (!event._isAdmin) {
+        var caseForeignDoc = caseDocRecords.find(function(d) { return d.org_id && d.org_id !== event._orgId; });
+        if (caseForeignDoc) return respond(403, { error: 'Forbidden: one or more documents do not belong to your account' });
+      }
       caseDocRecords.sort(function(a, b) {
         var aM = (a.original_filename || '').match(/[Pp]art(\d+)/);
         var bM = (b.original_filename || '').match(/[Pp]art(\d+)/);
@@ -2088,6 +2093,7 @@ const _redactDocumentStart = async function(event) {
   const docRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_id } }));
   const doc    = docRes.Item;
   if (!doc) return respond(404, { error: 'Document not found' });
+  if (!event._isAdmin && doc.org_id && doc.org_id !== event._orgId) return respond(403, { error: 'Forbidden' });
 
   const fileKey = doc.file_key || doc.s3_key;
   if (!fileKey) return respond(400, { error: 'Document has no S3 key' });
@@ -2626,6 +2632,10 @@ const _redactCaseStart = async function(event) {
     var docRes = await dynamo.send(new GetCommand({ TableName: DOCS_TABLE, Key: { aws_document_id: doc_ids[_di] } }));
     if (!docRes.Item) return respond(404, { error: 'Document not found: ' + doc_ids[_di] });
     docRecords.push(docRes.Item);
+  }
+  if (!event._isAdmin) {
+    var foreignDoc = docRecords.find(function(d) { return d.org_id && d.org_id !== event._orgId; });
+    if (foreignDoc) return respond(403, { error: 'Forbidden: one or more documents do not belong to your account' });
   }
   var org_id = docRecords[0].org_id || body.org_id || null;
   var folder_name = (docRecords[0].folder || docRecords[0].folder_name || '').trim() || null;
