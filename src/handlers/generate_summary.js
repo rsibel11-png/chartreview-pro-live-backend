@@ -1,4 +1,4 @@
-// Updated: 2026-09-20 (v3) -- Imaging findings vs Physical Exam fix, redone clean from pre-imaging baseline (v1/v2 attempts discarded). Rule 6 excludes radiograph/imaging interpretation from physical_exam_findings. Rule 7 now requires the actual radiographic OBSERVATION (alignment, hardware, healing, displacement) with a concrete good/bad example pair -- explicitly bans substituting the ICD-10 diagnosis description/language (the v2 failure mode Roman caught: model was padding imaging_findings with diagnosis text like "displaced trimalleolar fracture... subsequent encounter" instead of a real finding). If no observation exists in the note, only the study name/view count is written -- no padding from diagnosis or impression text.
+// Updated: 2026-09-20 (v5) -- Reinstated the automatic inline VI pre-pass removed 2026-08-31 (commit f0c5e0ab). Any part still missing encounter_index now gets one lightweight Bedrock checklist call (date/provider/facility/visit_type -- deliberately NO pages field, unlike the pre-removal version). Checklist-only by design: no pages means the batching decision later in the coordinator never treats these as page-scoped, so full-document/windowed batching stays exactly as-is -- this restores disambiguation ("5 same-date radiology reports = 5 checklist entries, extract separately") and missing-visit recovery without reintroducing the fine-grained per-encounter batching that produced thin/boilerplate Hillock notes on ZSolis (2026-09-15). In-memory only for this run, never persisted to DynamoDB (per the 2026-08-30 no-cache-contamination decision). Root cause: JBeck (Beck, Jack M.) got 11 correct radiology-split visits on one live run and only 8 (5 reports collapsed into 1) on another, both using identical code and identical full-document-fallback batching -- confirmed via CloudWatch this was Claude's own run-to-run variance on an ambiguous case with no VI checklist to anchor it, not a code regression.
 // Updated: 2026-09-20 (v4) -- patient_name majority vote (dev): fixes name-spelling instability across runs (e.g. reported "Belk"/"Berk"/"Beck" from the same document set). Root cause: patient_name was decided by whichever batch happened to return first (a race), with no cross-checking -- so a handwritten/ambiguous field (a C-4 claim form) could win over a clear typed spelling elsewhere. Fix: every batch's guess is now collected (not just the first), and the coordinator picks the most common spelling via pickPatientName() once all chunks report in; an explicit user-supplied patient_name at job start still always wins outright. Also added one prompt-level instruction telling the extraction model to prefer a typed/printed spelling over a handwritten one when both appear in the same batch.\n// Updated: 2026-09-20 (v3) -- Cost calculator now covers the WHOLE pipeline: pulls each doc's processing_cost_usd (Assess Relevance) and classify_cost_usd (Classify), persisted by documents_new.js, and adds them to this run's own RUN_USAGE-based summary-generation cost. Persists the breakdown (upload_classify_cost_usd, summary_generation_cost_usd) plus the true total (estimated_cost_usd) and cost_per_page. Verify's write-back recomputes the same way on its superset usage.\n// Updated: 2026-09-20 (v2) -- Per-document cost calculator: threads each generateSummaryChunkWorker's real Bedrock usage back into the coordinator's RUN_USAGE (previously lost -- chunk workers run in separate Lambda invocations), seeds verify's usage from the saved summary so recovery calls add on top instead of replacing, and persists total_pages / estimated_cost_usd / cost_per_page onto the summary record using Sonnet's real per-token Bedrock pricing. Pure observability -- does not change extraction logic, batching, or any LLM prompt.\n// Updated: 2026-09-20 -- Automatic EMR/administrative-printout exclusion: EMR_MARKERS + classifyEmrPage + detectEmrPrintoutPages (ported verbatim from the former frontend EmrDetector) now run INLINE in the coordinator on every summary generation run, unconditionally -- no exclude_emr flag gate, no user-facing toggle, no separate detector step, zero extra LLM cost (pure deterministic regex over part.extracted_text). Library and document display are untouched -- this only affects which pages the summary-generation LLM batches see. Persisted part.emr_flagged_pages (legacy manual detector runs) is used only as a fallback when extracted_text is unavailable.\n// Updated: 2026-09-19 -- per-user isolation: generateSummaryStart / buildVisitIndexStart now verify every doc_id in the request actually belongs to the caller's org (event._orgId, from verified JWT) before starting a job; admin (event._isAdmin) bypasses. Client-supplied body.org_id is no longer trusted except for admin QC override. No other flow touched.
 // Updated: 2026-09-16 — PT/OT consolidation v2.1: (a) normFacilityPt strips parentheticals/commas/slashes FIRST then dash-suffixes (incl. - Las Vegas), so all address + naming variants form ONE group; (b) same-date dedup is per normalized PROVIDER — billing-sheet "Unknown (billed as ...)" entries never outrank named notes; (c) initial evaluations and discharge summaries (pt_index "type") are never consolidated away; (d) runBatch subtracts ptExclude pages AFTER the ±1 encounter-edge buffer so excluded PT pages can never be resurrected. Additive to the v1 consolidation block; no other stage touched.
 // Updated: 2026-09-16 — PT/OT consolidation v2: (a) normFacilityPt strips comma-addresses and collapses ALL whitespace so "ATI Physical Therapy, 7301..." and "Mountain View"/"Mountainview" variants merge into one group; (b) same-date multi-part duplicate copies deduped (richest kept, other copies' pages excluded); (c) initial evaluations and discharge summaries (pt_index "type") are never consolidated away; (d) runBatch subtracts ptExclude pages AFTER the ±1 encounter-edge buffer so excluded PT pages can never be resurrected. Additive to the v1 consolidation block; no other stage touched.
@@ -2037,6 +2037,62 @@ const generateSummaryWorker = async (event) => {
         // Last resort: return empty — never use Date() which applies UTC conversion
         return '';
       };
+
+
+      // ── 3a. Automatic inline VI pre-pass (reinstated 2026-09-20) ────────────
+      // Restores the automatic disambiguation/recovery checklist that was removed
+      // 2026-08-31 (commit f0c5e0ab). Any part still missing encounter_index gets
+      // one extra lightweight Bedrock call here, building knownVisits purely as a
+      // checklist (date/provider/facility/visit_type — NO pages). This is the
+      // safe half of the original design: because these entries carry no `pages`,
+      // the batching decision below (`partVisits.length > 0` check) never treats
+      // them as page-scoped, so full-document/windowed batching is UNCHANGED —
+      // this fixes checklist disambiguation (e.g. "5 same-date radiology reports
+      // = 5 checklist entries") and missing-visit recovery WITHOUT reintroducing
+      // the fine-grained per-encounter batching that degraded Hillock notes on
+      // ZSolis (2026-09-15). In-memory only for this run — never persisted to
+      // DynamoDB (per the 2026-08-30 decision: no cross-run cache contamination).
+      const partsNeedingVI = allParts.filter(p => !Array.isArray(p.encounter_index) || p.encounter_index.length === 0);
+      if (partsNeedingVI.length > 0) {
+        console.log(`coordinator: ${partsNeedingVI.length} parts missing encounter_index — running inline VI pre-pass (checklist only, no pages)`);
+        await setJobStatus(job_id, `Building encounter checklist (${partsNeedingVI.length} document parts)...`);
+        const VI_CONCURRENCY_INLINE = 4;
+        const inlineViSchema = {
+          type: 'object',
+          properties: {
+            patient_name: { type: 'string' },
+            visits: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  date: { type: 'string' },
+                  provider: { type: 'string' },
+                  facility: { type: 'string' },
+                  visit_type: { type: 'string' },
+                },
+              },
+            },
+          },
+        };
+        for (let vi = 0; vi < partsNeedingVI.length; vi += VI_CONCURRENCY_INLINE) {
+          const chunk = partsNeedingVI.slice(vi, vi + VI_CONCURRENCY_INLINE);
+          await Promise.all(chunk.map(async (part) => {
+            try {
+              const viResult = await callBedrock([part.file_key], buildVisitIndexPrompt(), inlineViSchema, regionOrder);
+              const visits = Array.isArray(viResult.visits) ? viResult.visits : [];
+              console.log(`coordinator: inline VI pre-pass ${part.label} -> ${visits.length} checklist entries`);
+              part.encounter_index = visits;
+              if (viResult.patient_name && !patientName) patientName = viResult.patient_name;
+            } catch (viErr) {
+              console.warn(`coordinator: inline VI pre-pass failed for ${part.label}: ${viErr.message}`);
+              part.encounter_index = [];
+            }
+          }));
+        }
+      } else {
+        console.log('coordinator: all parts have encounter_index — skipping inline VI pre-pass');
+      }
 
       for (const part of allParts) {
         const ei = Array.isArray(part.encounter_index) ? part.encounter_index : [];
