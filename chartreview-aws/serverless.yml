@@ -79,6 +79,15 @@ provider:
             - sqs:DeleteMessage
             - sqs:GetQueueAttributes
           Resource: "*"
+        # Added 2026-09-21 -- lets the admin-wide summary/document log resolve each org_id
+        # (= Cognito sub, one org per signup) back to the user's email for display/CSV export.
+        # Read-only, single action, scoped to this exact user pool only -- cannot list every
+        # user, cannot modify/delete/create users, cannot touch any other Cognito pool/resource.
+        - Effect: Allow
+          Action:
+            - cognito-idp:AdminGetUser
+          Resource:
+            - "arn:aws:cognito-idp:${self:provider.region}:${aws:accountId}:userpool/us-east-1_HGvNxEFP6"
 
 functions:
   # ── PATIENTS ──
