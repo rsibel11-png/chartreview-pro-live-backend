@@ -4,6 +4,12 @@
 // ?org_id=<id> still works for spot-checking one specific user. New: ?all=true removes the org
 // filter entirely (for the upcoming admin-wide log) -- previously that was the *default* for
 // admin with no params at all, which is what caused the clutter. Non-admin callers unaffected.
+// Updated: 2026-09-21 -- the ?all=true admin path (used by the new admin-wide document log page)
+// now resolves each unique org_id to the owning user's email via Cognito AdminGetUser, so the
+// page can show a real email instead of an opaque Cognito sub. Requires the CognitoAdminGetUser
+// IAM policy on this Lambda's role (added directly, see chat 2026-09-21) and the new
+// @aws-sdk/client-cognito-identity-provider dependency. Only runs for admin+?all=true -- the
+// default (own-org) and ?org_id= paths are untouched and never call Cognito.
 // Updated: 2026-09-20 -- per-document cost calculator: prices each Assess Relevance call (processWorker inline path + the manual assessRelevanceHandler) and each Classify call (runBedrockClassify/saveClassificationToDoc), persisting processing_usage/processing_cost_usd and classify_usage/classify_cost_usd onto the document record using real Bedrock token counts at Sonnet's per-token rate. Pure observability -- no other flow touched.
 // Updated: 2026-09-16 — PT/OT index v2: pt_visits entries now carry a "type" field (initial evaluation | progress note | treatment note | discharge summary) so the generateSummary coordinator can protect evals and discharge summaries from consolidation. Additive — no other handler or flow touched.
 // Updated: 2026-09-16 — PT/OT index: vision pre-pass (assess + classify) now extracts pt_visits (PT/OT/hand-therapy encounters with local page numbers + dates), persisted as pt_index. Used by generateSummary coordinator for PT/OT pre-consolidation (first+last per facility group). max_tokens 4096→8192 on the 3 vision calls to fit pt_visits arrays. Additive — no other handler or flow touched.
@@ -17,8 +23,30 @@ const { TextractClient, StartDocumentTextDetectionCommand, GetDocumentTextDetect
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
+const { CognitoIdentityProviderClient, AdminGetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const { randomUUID } = require('crypto');
 const { validateApiKey } = require('./auth');
+
+const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || 'us-east-1_HGvNxEFP6';
+const cognito = new CognitoIdentityProviderClient({});
+
+// Resolves a list of Cognito sub values (org_id) to their email attribute, one lookup per
+// unique sub. Failures for an individual sub are swallowed (falls back to the raw org_id in
+// the caller) so one bad/deleted user account can't break the whole admin list.
+async function resolveOrgEmails(orgIds) {
+  const unique = Array.from(new Set(orgIds.filter(Boolean)));
+  const map = {};
+  await Promise.all(unique.map(async (sub) => {
+    try {
+      const res = await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: sub }));
+      const email = (res.UserAttributes || []).find((a) => a.Name === 'email')?.Value;
+      if (email) map[sub] = email;
+    } catch (err) {
+      console.error('[resolveOrgEmails] could not resolve', sub, '-', err.message);
+    }
+  }));
+  return map;
+}
 
 const client   = new DynamoDBClient({});
 const dynamo   = DynamoDBDocumentClient.from(client);
@@ -398,9 +426,13 @@ const listAllHandler = async (event) => {
       lastKey = result.LastEvaluatedKey;
     } while (lastKey);
 
-    const docs = items
+    let docs = items
       .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
       .map(d => { const { extracted_text, ...rest } = d; return rest; });
+    if (event._isAdmin && event.queryStringParameters?.all === 'true') {
+      const emailMap = await resolveOrgEmails(docs.map((d) => d.org_id));
+      docs = docs.map((d) => ({ ...d, user_email: emailMap[d.org_id] || d.org_id || 'unknown' }));
+    }
     return response(200, docs);
   } catch (err) {
     return response(500, { error: err.message });
