@@ -6,13 +6,42 @@
 //   ?org_id=<id>   -- scope to one specific user's org (existing spot-check use case)
 //   ?all=true      -- no org filter at all, every org (for the upcoming admin-wide summary log)
 // Non-admin callers are unaffected -- they only ever see their own org, as before.
+// Updated: 2026-09-21 -- the ?all=true admin path (used by the new admin-wide summary log page)
+// now resolves each unique org_id to the owning user's email via Cognito AdminGetUser, so the
+// page can show a real email instead of an opaque Cognito sub. Requires the CognitoAdminGetUser
+// IAM policy on this Lambda's role (added directly, see chat 2026-09-21) and the new
+// @aws-sdk/client-cognito-identity-provider dependency. Resolution is cached per-invocation and
+// only runs for admin+?all=true -- the default (own-org) and ?org_id= paths are untouched and
+// never call Cognito.
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+const { CognitoIdentityProviderClient, AdminGetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const { validateApiKey } = require('./auth');
 
 const client = new DynamoDBClient({});
 const dynamo = DynamoDBDocumentClient.from(client);
 const TABLE  = process.env.SUMMARIES_TABLE;
+
+const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || 'us-east-1_HGvNxEFP6';
+const cognito = new CognitoIdentityProviderClient({});
+
+// Resolves a list of Cognito sub values (org_id) to their email attribute, one lookup per
+// unique sub. Failures for an individual sub are swallowed (falls back to the raw org_id in
+// the caller) so one bad/deleted user account can't break the whole admin list.
+async function resolveOrgEmails(orgIds) {
+  const unique = Array.from(new Set(orgIds.filter(Boolean)));
+  const map = {};
+  await Promise.all(unique.map(async (sub) => {
+    try {
+      const res = await cognito.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: sub }));
+      const email = (res.UserAttributes || []).find((a) => a.Name === 'email')?.Value;
+      if (email) map[sub] = email;
+    } catch (err) {
+      console.error('[resolveOrgEmails] could not resolve', sub, '-', err.message);
+    }
+  }));
+  return map;
+}
 
 const response = (statusCode, body) => ({
   statusCode,
@@ -201,11 +230,14 @@ const listAllHandler = async (event) => {
     } while (lastKey);
     console.log('[listAll] got', items.length, 'items (paginated)');
     // Admin default is scoped to their own org (like everyone else). ?org_id=<id> lets an
-    // admin spot-check one other user's org; ?all=true removes the filter entirely.
+    // admin spot-check one other user's org; ?all=true removes the filter entirely (and, for
+    // this handler only, resolves each org_id to the owning user's email).
     const qp = event.queryStringParameters || {};
     let scoped;
     if (event._isAdmin && qp.all === 'true') {
       scoped = items;
+      const emailMap = await resolveOrgEmails(scoped.map((it) => it.org_id));
+      scoped = scoped.map((it) => ({ ...it, user_email: emailMap[it.org_id] || it.org_id || 'unknown' }));
     } else if (event._isAdmin && qp.org_id) {
       scoped = items.filter(it => it.org_id === qp.org_id);
     } else {
