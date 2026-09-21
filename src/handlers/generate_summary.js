@@ -1,4 +1,4 @@
-// Updated: 2026-09-20 (v5) -- Reinstated the automatic inline VI pre-pass removed 2026-08-31 (commit f0c5e0ab). Any part still missing encounter_index now gets one lightweight Bedrock checklist call (date/provider/facility/visit_type -- deliberately NO pages field, unlike the pre-removal version). Checklist-only by design: no pages means the batching decision later in the coordinator never treats these as page-scoped, so full-document/windowed batching stays exactly as-is -- this restores disambiguation ("5 same-date radiology reports = 5 checklist entries, extract separately") and missing-visit recovery without reintroducing the fine-grained per-encounter batching that produced thin/boilerplate Hillock notes on ZSolis (2026-09-15). In-memory only for this run, never persisted to DynamoDB (per the 2026-08-30 no-cache-contamination decision). Root cause: JBeck (Beck, Jack M.) got 11 correct radiology-split visits on one live run and only 8 (5 reports collapsed into 1) on another, both using identical code and identical full-document-fallback batching -- confirmed via CloudWatch this was Claude's own run-to-run variance on an ambiguous case with no VI checklist to anchor it, not a code regression.
+// Updated: 2026-09-21 -- Synced from dev (Roman-approved): three fixes for JBeck-style radiology-report handling. (1) Radiology/imaging VI-checklist entries exempted from the date+provider dedup (same radiologist reading multiple same-day body-part X-rays are separate encounters, not one). (2) C-4 FORMS section now states a C-4 is exactly ONE encounter and forbids fabricating a radiology visit from a "tests ordered" field with no report present; main extraction + VI-prepass prompts now both warn that "REFERRING PHYSICIAN" (who ordered a study) is not the rendering_provider -- always use the signing radiologist in the "Electronically Signed by" block. (3) Deterministic isVagueRadiologyStub veto in sanitizeVisits drops any radiology-labeled entry that admits its findings are not available/visible in this document (or reads as a numbered placeholder like "study N of M") AND contains no real radiographic finding language anywhere in the entry -- never fires on real reports. This sync does not touch the live-only already_summarized re-run-payment stamping below, which remains live-only by design.
 // Updated: 2026-09-20 (v4) -- patient_name majority vote (dev): fixes name-spelling instability across runs (e.g. reported "Belk"/"Berk"/"Beck" from the same document set). Root cause: patient_name was decided by whichever batch happened to return first (a race), with no cross-checking -- so a handwritten/ambiguous field (a C-4 claim form) could win over a clear typed spelling elsewhere. Fix: every batch's guess is now collected (not just the first), and the coordinator picks the most common spelling via pickPatientName() once all chunks report in; an explicit user-supplied patient_name at job start still always wins outright. Also added one prompt-level instruction telling the extraction model to prefer a typed/printed spelling over a handwritten one when both appear in the same batch.\n// Updated: 2026-09-20 (v3) -- Cost calculator now covers the WHOLE pipeline: pulls each doc's processing_cost_usd (Assess Relevance) and classify_cost_usd (Classify), persisted by documents_new.js, and adds them to this run's own RUN_USAGE-based summary-generation cost. Persists the breakdown (upload_classify_cost_usd, summary_generation_cost_usd) plus the true total (estimated_cost_usd) and cost_per_page. Verify's write-back recomputes the same way on its superset usage.\n// Updated: 2026-09-20 (v2) -- Per-document cost calculator: threads each generateSummaryChunkWorker's real Bedrock usage back into the coordinator's RUN_USAGE (previously lost -- chunk workers run in separate Lambda invocations), seeds verify's usage from the saved summary so recovery calls add on top instead of replacing, and persists total_pages / estimated_cost_usd / cost_per_page onto the summary record using Sonnet's real per-token Bedrock pricing. Pure observability -- does not change extraction logic, batching, or any LLM prompt.\n// Updated: 2026-09-20 -- Automatic EMR/administrative-printout exclusion: EMR_MARKERS + classifyEmrPage + detectEmrPrintoutPages (ported verbatim from the former frontend EmrDetector) now run INLINE in the coordinator on every summary generation run, unconditionally -- no exclude_emr flag gate, no user-facing toggle, no separate detector step, zero extra LLM cost (pure deterministic regex over part.extracted_text). Library and document display are untouched -- this only affects which pages the summary-generation LLM batches see. Persisted part.emr_flagged_pages (legacy manual detector runs) is used only as a fallback when extracted_text is unavailable.\n// Updated: 2026-09-19 -- per-user isolation: generateSummaryStart / buildVisitIndexStart now verify every doc_id in the request actually belongs to the caller's org (event._orgId, from verified JWT) before starting a job; admin (event._isAdmin) bypasses. Client-supplied body.org_id is no longer trusted except for admin QC override. No other flow touched.
 // Updated: 2026-09-16 — PT/OT consolidation v2.1: (a) normFacilityPt strips parentheticals/commas/slashes FIRST then dash-suffixes (incl. - Las Vegas), so all address + naming variants form ONE group; (b) same-date dedup is per normalized PROVIDER — billing-sheet "Unknown (billed as ...)" entries never outrank named notes; (c) initial evaluations and discharge summaries (pt_index "type") are never consolidated away; (d) runBatch subtracts ptExclude pages AFTER the ±1 encounter-edge buffer so excluded PT pages can never be resurrected. Additive to the v1 consolidation block; no other stage touched.
 // Updated: 2026-09-16 — PT/OT consolidation v2: (a) normFacilityPt strips comma-addresses and collapses ALL whitespace so "ATI Physical Therapy, 7301..." and "Mountain View"/"Mountainview" variants merge into one group; (b) same-date multi-part duplicate copies deduped (richest kept, other copies' pages excluded); (c) initial evaluations and discharge summaries (pt_index "type") are never consolidated away; (d) runBatch subtracts ptExclude pages AFTER the ±1 encounter-edge buffer so excluded PT pages can never be resurrected. Additive to the v1 consolidation block; no other stage touched.
@@ -1250,6 +1250,28 @@ const sanitizeVisits = (visits, patientName) => {
       return false;
     }
 
+    // Updated: 2026-09-21 — vague radiology placeholder veto (JBeck ghost-report case).
+    // A prompt-level fix (C-4 SINGLE ENCOUNTER RULE) reduced but did not eliminate the
+    // model fabricating a filler "radiology" visit when it senses an X-ray/imaging
+    // reference on an illegible C-4/claim-form field but has no actual report to read.
+    // The tell is language admitting the findings aren't actually present ("not available
+    // in this document", "not visible in this document", "on file" with no real findings,
+    // "study N of M") combined with the total ABSENCE of any real radiographic finding
+    // language elsewhere in the entry. Real radiology reports — even terse ones — always
+    // contain concrete finding language (no fracture, joint spaces, views of, impression:,
+    // AP/lateral, anatomical relationships, etc.); this veto never fires on those.
+    const settingOrCcMentionsRadiology = /radiology report/i.test(setting) ||
+      /radiology report/i.test((visit.chief_complaint || '').toLowerCase());
+    const imagingText = (visit.imaging_findings || '') + ' ' + (visit.chief_complaint || '');
+    const hasVaguePlaceholderLanguage = /not (available|visible) in this document|findings not (available|visible)|specific study (type )?and findings|study (type )?and findings not|imaging study \d+ of \d+|on file[;,.]?\s*specific/i.test(imagingText);
+    const hasRealRadiologyFindingLanguage = /no (acute )?fracture|dislocation|joint spaces?|views? of the|impression:|anatomical relationship|ap (and|,) (frog|lateral)|minimum of \d+ views?|\d+ views? (of|show)/i.test(imagingText) ||
+      /no (acute )?fracture|dislocation|joint spaces?|impression:|anatomical relationship/i.test((visit.impression_diagnosis || '').toLowerCase());
+    const isVagueRadiologyStub = !isC4 && settingOrCcMentionsRadiology && hasVaguePlaceholderLanguage && !hasRealRadiologyFindingLanguage;
+    if (isVagueRadiologyStub) {
+      console.log('sanitizeVisits: dropping vague radiology placeholder stub [' + (visit.practice_setting || '') + '] (' + (visit.visit_date || '') + ' ' + (visit.rendering_provider || '') + ') — no real finding language present');
+      return false;
+    }
+
     if (isAdmin) {
       const reason = isPPR ? 'PPR' : isCodingSummary ? 'coding summary' :
                      isAdminOnly ? 'admin pattern' : isMislabeledWorkStatus ? 'mislabeled C-4 (actually work status form)' :
@@ -1458,6 +1480,8 @@ E) C-4 FORMS (Workers' Compensation Board Doctor's Report / WCB Form C-4):
     - treatment_plan: leave empty
     - CROSS-REFERENCE: This is OPTIONAL and applies ONLY if a genuinely separate, already-documented office visit ALSO exists in the same document set on the C-4's exact date. If such a document exists, you may use its rendering provider and/or diagnosis to fill in illegible C-4 fields, and explicitly note when extrapolated (e.g., "Extrapolated from same-date office visit"). Do NOT invent, synthesize, or backfill a same-date office visit entry that does not exist in the source documents — if the C-4 form is the ONLY document for that date, extract ONLY the C-4 entry and leave any illegible fields as-is (or "illegible").
     - ORDERING: IF a genuinely separate, distinctly-documented office visit ALSO exists for the same date as the C-4 (i.e., the source contains a separate office note, not just the C-4 form itself), place the C-4 entry BEFORE that office visit entry in the visits array. If NO separate office visit document exists for that date, the C-4 is a standalone entry — do NOT create a companion "Office Visit" entry just to pair with it.
+    - SINGLE ENCOUNTER RULE (2026-09-21): A C-4 form is exactly ONE clinical encounter. Extract it as ONE visit entry. Do NOT create additional, separate visit entries just because the C-4 page has multiple distinct fields (injury narrative, diagnosis, treatment/tests ordered, etc.) — those are all part of the SAME single C-4 encounter, not separate visits.
+    - DO NOT FABRICATE A RADIOLOGY/TEST VISIT FROM AN ORDER FIELD: if the C-4 form mentions that an X-ray, MRI, or other test was ordered/requested/performed, but the actual test report with real findings is NOT present in this document, do NOT create a separate "Radiology" or "imaging" visit entry for it. A test being mentioned as ordered on a claim form is not itself a clinical encounter — leave it out entirely rather than inventing a placeholder entry with no real findings.
 
 SAME-DATE DOCUMENT ISOLATION — ABSOLUTE RULE (C-4 EXCEPTION: see above — C-4 forms may cross-reference same-date office visits for illegible fields):
 A single calendar date can contain MULTIPLE DISTINCT DOCUMENTS that are each their own separate clinical encounter:
@@ -1568,7 +1592,8 @@ DATE SELECTION RULES:
 
 CRITICAL EXTRACTION RULES:
 (1) Extract EVERY clinical encounter — office visits, ER visits, surgical reports, radiology reports, IMEs, C-4 forms, ambulance reports, police reports. Do NOT skip any.
-(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports with their own header block (facility, exam type, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry. The radiologist who signed it is the rendering_provider. Do NOT collapse into the ED note. If the knownVisitsChecklist includes a radiologist entry, you MUST produce a separate entry for that radiologist.
+(1a) HOSPITAL-EMBEDDED RADIOLOGY REPORTS: Large hospital records contain individual radiology reports with their own header block (facility, exam type, date, findings, impression, radiologist signature). Each is a SEPARATE clinical encounter — extract it as its own entry. The radiologist who signed it is the rendering_provider — NOT the ordering or referring physician. Do NOT collapse into the ED note. If the knownVisitsChecklist includes a radiologist entry, you MUST produce a separate entry for that radiologist.
+     REFERRING PHYSICIAN vs SIGNING RADIOLOGIST (2026-09-21): radiology report headers commonly list a "REFERRING PHYSICIAN" name — this is the physician who ORDERED the study, not who read it. The rendering_provider is always whoever is in the signature block at the bottom (e.g. "Electronically Signed by: [Name], MD"), even when the referring physician's name appears more prominently near the top of the report. Never use the REFERRING PHYSICIAN field as rendering_provider.
 (2) For EVERY non-PT visit, you MUST populate hpi_summary, impression_diagnosis, and treatment_plan if that information exists in THIS document.
 (3) NEVER return a visit with all content fields empty unless it is truly just a C-4 form with no clinical notes.
 (4) NEVER hallucinate — only use information explicitly written in THIS document.
@@ -1644,7 +1669,7 @@ Large hospital records often contain embedded radiology reports formatted with a
   "[FACILITY] ER RADIOLOGY" / "PROCEDURE:" / "DATE:" / "FINDINGS:" / "IMPRESSION:" / "Electronically signed by: [Name] MD"
 Each such report is a SEPARATE clinical encounter, even if its findings are also mentioned inside the ED note or H&P.
 - Identify each radiology report by its own header (facility name, exam type, date, radiologist signature).
-- The signing radiologist is the rendering_provider — NOT the ordering physician.
+- The signing radiologist is the rendering_provider — NOT the ordering physician. Reports commonly list a separate "REFERRING PHYSICIAN" name near the top (who ordered the study) — that is NOT the rendering_provider. Always use the name in the signature block (e.g. "Electronically Signed by: [Name], MD") at the bottom of the report.
 - The exam DATE field (e.g. "DATE: 10/1/2025 10:00 PM CDT") is the visit date for that report.
 - Create one entry per report, per radiologist. If one radiologist reads the elbow XR and another reads the wrist XR on the same day, that is TWO separate entries.
 - Do NOT collapse multiple radiology reports into the ED visit entry. They are independent encounters.
@@ -2178,9 +2203,19 @@ const generateSummaryWorker = async (event) => {
         return v;
       });
 
-      // Deduplicate by date+provider across all parts
+      // Deduplicate by date+provider across all parts.
+      // Exception (2026-09-21): radiology/imaging checklist entries are exempt --
+      // per buildVisitIndexPrompt's HOSPITAL RADIOLOGY REPORTS rule, the SAME
+      // radiologist commonly signs multiple separate reports on the same date
+      // (e.g. wrist/hand/ankle/foot/hip X-rays all read by one radiologist).
+      // Collapsing those to one checklist entry told the extraction model there
+      // was only 1 visit that day, causing it to merge all 5 reports into one
+      // entry (confirmed on JBeck via CloudWatch: 10 checklist entries -> 7
+      // unique after this dedup, dropping 4 of the 5 same-day/same-radiologist
+      // radiology reports).
       const viSeen = new Set();
       knownVisits = knownVisits.filter(v => {
+        if (/radiology|imaging|x-?ray|mri|ct scan|bone scan/i.test(v.visit_type || '')) return true;
         const k = `${v.date}|${(v.provider || '').toLowerCase()}`;
         if (viSeen.has(k)) return false;
         viSeen.add(k); return true;
@@ -3113,9 +3148,12 @@ const buildVisitIndexWorkerFn = async (event) => {
     let knownVisits = [];
     for (const tagged of viResults) { if (tagged) knownVisits = knownVisits.concat(tagged); }
 
-    // Deduplicate
+    // Deduplicate by date+provider -- radiology/imaging entries exempt (2026-09-21,
+    // see generateSummaryWorker comment): same radiologist commonly signs multiple
+    // separate same-day reports (different body parts), each a distinct encounter.
     const viSeen = new Set();
     knownVisits = knownVisits.filter(v => {
+      if (/radiology|imaging|x-?ray|mri|ct scan|bone scan/i.test(v.visit_type || '')) return true;
       const k = `${v.date}|${(v.provider || '').toLowerCase()}`;
       if (viSeen.has(k)) return false;
       viSeen.add(k); return true;
@@ -3410,9 +3448,12 @@ const runVerifyInline = async ({ job_id, aws_summary_id, doc_ids, org_id, precom
       }
     }
 
-    // Dedup VI visits
+    // Dedup VI visits by date+provider -- radiology/imaging entries exempt (2026-09-21,
+    // see generateSummaryWorker comment): same radiologist commonly signs multiple
+    // separate same-day reports (different body parts), each a distinct encounter.
     const viSeen = new Set();
     const uniqueViVisits = viVisits.filter(v => {
+      if (/radiology|imaging|x-?ray|mri|ct scan|bone scan/i.test(v.visit_type || '')) return true;
       const k = `${v.date}|${normalizeProvider(v.provider)}`;
       if (viSeen.has(k)) return false;
       viSeen.add(k); return true;
