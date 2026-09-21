@@ -1,4 +1,11 @@
 // Updated: 2026-09-19 -- per-user isolation: summaries now carry org_id (stamped from verified JWT on create); get/update/remove enforce ownership (403 if mismatch, unless admin); listAll/listByPatient filter to the caller's own org (admin sees all, for QC). Previously this table had zero org scoping at all -- any logged-in user could see/edit/delete any summary.
+// Updated: 2026-09-21 -- Roman's own admin login was seeing every user's summaries mixed into
+// his personal list by default (any test upload from any account showed up in his library).
+// Admin default is now scoped to their OWN org, same as everyone else. Cross-org QC access is
+// still available but must be requested explicitly via query params on listAll/listByPatient:
+//   ?org_id=<id>   -- scope to one specific user's org (existing spot-check use case)
+//   ?all=true      -- no org filter at all, every org (for the upcoming admin-wide summary log)
+// Non-admin callers are unaffected -- they only ever see their own org, as before.
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { validateApiKey } = require('./auth');
@@ -159,8 +166,17 @@ const listByPatientHandler = async (event) => {
       items = result.Items || [];
     }
 
-    // Admin sees across all orgs for QC; everyone else only their own summaries.
-    const scoped = event._isAdmin ? items : items.filter(it => !it.org_id || it.org_id === orgId);
+    // Admin default is scoped to their own org (like everyone else). ?org_id=<id> lets an
+    // admin spot-check one other user's org; ?all=true removes the filter entirely.
+    const qp = event.queryStringParameters || {};
+    let scoped;
+    if (event._isAdmin && qp.all === 'true') {
+      scoped = items;
+    } else if (event._isAdmin && qp.org_id) {
+      scoped = items.filter(it => it.org_id === qp.org_id);
+    } else {
+      scoped = items.filter(it => !it.org_id || it.org_id === orgId);
+    }
     return response(200, { summaries: scoped });
   } catch (err) {
     return response(500, { error: err.message });
@@ -184,8 +200,17 @@ const listAllHandler = async (event) => {
       lastKey = result.LastEvaluatedKey;
     } while (lastKey);
     console.log('[listAll] got', items.length, 'items (paginated)');
-    // Admin sees across all orgs for QC; everyone else only their own summaries.
-    const scoped = event._isAdmin ? items : items.filter(it => !it.org_id || it.org_id === orgId);
+    // Admin default is scoped to their own org (like everyone else). ?org_id=<id> lets an
+    // admin spot-check one other user's org; ?all=true removes the filter entirely.
+    const qp = event.queryStringParameters || {};
+    let scoped;
+    if (event._isAdmin && qp.all === 'true') {
+      scoped = items;
+    } else if (event._isAdmin && qp.org_id) {
+      scoped = items.filter(it => it.org_id === qp.org_id);
+    } else {
+      scoped = items.filter(it => !it.org_id || it.org_id === orgId);
+    }
     return response(200, { summaries: scoped });
   } catch (err) {
     console.error('[listAll] ERROR:', err.message, err.stack);
