@@ -1,4 +1,9 @@
 // Updated: 2026-09-19 -- per-user data isolation: org_id checks now bypass for admin (event._isAdmin, set in auth.js from verified custom:role claim). listAllHandler/listByPatientHandler skip the org filter for admin (optional ?org_id= query param scopes to one user for QC review). Error messages no longer reference the removed x-org-id header. No other flow touched.
+// Updated: 2026-09-21 -- Roman's admin login was seeing every user's test uploads mixed into his
+// own Library by default. Admin default is now scoped to their OWN org, same as everyone else.
+// ?org_id=<id> still works for spot-checking one specific user. New: ?all=true removes the org
+// filter entirely (for the upcoming admin-wide log) -- previously that was the *default* for
+// admin with no params at all, which is what caused the clutter. Non-admin callers unaffected.
 // Updated: 2026-09-20 -- per-document cost calculator: prices each Assess Relevance call (processWorker inline path + the manual assessRelevanceHandler) and each Classify call (runBedrockClassify/saveClassificationToDoc), persisting processing_usage/processing_cost_usd and classify_usage/classify_cost_usd onto the document record using real Bedrock token counts at Sonnet's per-token rate. Pure observability -- no other flow touched.
 // Updated: 2026-09-16 — PT/OT index v2: pt_visits entries now carry a "type" field (initial evaluation | progress note | treatment note | discharge summary) so the generateSummary coordinator can protect evals and discharge summaries from consolidation. Additive — no other handler or flow touched.
 // Updated: 2026-09-16 — PT/OT index: vision pre-pass (assess + classify) now extracts pt_visits (PT/OT/hand-therapy encounters with local page numbers + dates), persisted as pt_index. Used by generateSummary coordinator for PT/OT pre-consolidation (first+last per facility group). max_tokens 4096→8192 on the 3 vision calls to fit pt_visits arrays. Additive — no other handler or flow touched.
@@ -348,7 +353,7 @@ const listByPatientHandler = async (event) => {
   const orgId = event._orgId;
   if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
   // Admin (custom:role=admin) sees across all orgs for QC; optional ?org_id= query param scopes to one specific user's org for review.
-  const scopeOrgId = event._isAdmin ? (event.queryStringParameters?.org_id || null) : orgId;
+  const scopeOrgId = event._isAdmin ? (event.queryStringParameters?.org_id || (event.queryStringParameters?.all === 'true' ? null : orgId)) : orgId;
 
   try {
     const aws_patient_id = event.pathParameters.aws_patient_id;
@@ -374,7 +379,7 @@ const listAllHandler = async (event) => {
   const orgId = event._orgId;
   if (!orgId) return response(400, { error: 'Could not resolve organization from token' });
   // Admin (custom:role=admin) sees across all orgs for QC; optional ?org_id= query param scopes to one specific user's org for review.
-  const scopeOrgId = event._isAdmin ? (event.queryStringParameters?.org_id || null) : orgId;
+  const scopeOrgId = event._isAdmin ? (event.queryStringParameters?.org_id || (event.queryStringParameters?.all === 'true' ? null : orgId)) : orgId;
 
   try {
     let items = [];
