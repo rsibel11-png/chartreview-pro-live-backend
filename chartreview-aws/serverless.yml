@@ -86,6 +86,12 @@ provider:
         - Effect: Allow
           Action:
             - cognito-idp:AdminGetUser
+            # Added 2026-09-21 -- for the admin "Users & Usage" report (getUsersReport):
+            # needs the full signup roster (email + account-create date) to join against
+            # page-usage data. Same statement, same single user pool resource as above --
+            # still read-only, still cannot modify/delete/create users or touch any other
+            # Cognito pool/resource.
+            - cognito-idp:ListUsers
           Resource:
             - "arn:aws:cognito-idp:${self:provider.region}:${aws:accountId}:userpool/us-east-1_HGvNxEFP6"
 
@@ -164,6 +170,17 @@ functions:
     events:
       - http:
           path: /documents
+          method: get
+          cors: true
+
+  # Added 2026-09-21 -- admin-only "Users & Usage" export (AdminSummaryLog.tsx). Combines
+  # Cognito signup roster with documents-table usage, no new DynamoDB table.
+  getUsersReport:
+    handler: src/handlers/documents_new.getUsersReport
+    timeout: 30
+    events:
+      - http:
+          path: /admin/users-report
           method: get
           cors: true
 
