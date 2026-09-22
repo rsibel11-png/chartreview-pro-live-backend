@@ -1,3 +1,11 @@
+// Updated: 2026-09-21 -- admin "Users & Usage" report (getUsersReport, GET
+// /admin/users-report): joins the Cognito signup roster (email + account-create date,
+// via the new cognito-idp:ListUsers permission -- see serverless.yml) against this table's
+// document/page-usage data (grouped by org_id, which equals the Cognito sub for every
+// self-service signup) and against chartreview-user-credits-prod (page_credits > 0 = has
+// ever purchased). No new table, no new logging -- pure read-only combination of data that
+// already exists. est_revenue_at_avg_rate_usd is pages * an assumed $/page rate, an indirect
+// ROI-on-ad-spend proxy Roman asked for -- not actual Stripe revenue.
 // Updated: 2026-09-19 -- per-user data isolation: org_id checks now bypass for admin (event._isAdmin, set in auth.js from verified custom:role claim). listAllHandler/listByPatientHandler skip the org filter for admin (optional ?org_id= query param scopes to one user for QC review). Error messages no longer reference the removed x-org-id header. No other flow touched.
 // Updated: 2026-09-21 -- Roman's admin login was seeing every user's test uploads mixed into his
 // own Library by default. Admin default is now scoped to their OWN org, same as everyone else.
@@ -23,7 +31,7 @@ const { TextractClient, StartDocumentTextDetectionCommand, GetDocumentTextDetect
 const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
-const { CognitoIdentityProviderClient, AdminGetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
+const { CognitoIdentityProviderClient, AdminGetUserCommand, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const { randomUUID } = require('crypto');
 const { validateApiKey } = require('./auth');
 
@@ -58,6 +66,7 @@ const sqs      = new SQSClient({ region: process.env.AWS_REGION || 'us-east-1' }
 const PROCESSING_QUEUE_URL = process.env.PROCESSING_QUEUE_URL || null;
 
 const TABLE                = process.env.DOCUMENTS_TABLE;
+const USER_CREDITS_TABLE   = process.env.USER_CREDITS_TABLE || 'chartreview-user-credits-prod';
 const SUMMARIES_TABLE      = process.env.SUMMARIES_TABLE;
 const FOLDER_PII_TABLE     = process.env.FOLDER_PII_TABLE || 'chartreview-folder-pii-prod';
 const BUCKET               = process.env.S3_BUCKET;
@@ -434,6 +443,94 @@ const listAllHandler = async (event) => {
       docs = docs.map((d) => ({ ...d, user_email: emailMap[d.org_id] || d.org_id || 'unknown' }));
     }
     return response(200, docs);
+  } catch (err) {
+    return response(500, { error: err.message });
+  }
+};
+
+// --- ADMIN USERS REPORT -------------------------------------------------------
+// Added 2026-09-21 -- feeds the admin "Users & Usage" export (AdminSummaryLog.tsx). Three
+// read-only sources, no new table/logging:
+//   1. Cognito ListUsers -- authoritative signup date + email per account (sub == org_id
+//      for every self-service signup, since orgs are auto-provisioned from the sub claim).
+//   2. This table, scanned + grouped by org_id -- total pages run + first/last activity date
+//      + distinct active days, used as an indirect usage/retention signal.
+//   3. chartreview-user-credits-prod, scanned by email -- page_credits > 0 means at least one
+//      real purchase (that field is only ever incremented by the Stripe webhook on
+//      checkout.session.completed, see stripe.js).
+// est_revenue_at_avg_rate_usd = total_pages_run * AVG_PRICE_PER_PAGE -- a rough indirect
+// ROI-on-ad-spend proxy, NOT actual billed revenue from Stripe. Deliberately does not surface
+// any real dollar amount -- Roman asked to avoid that level of financial specificity.
+const AVG_PRICE_PER_PAGE = 0.10; // base bundle tier; adjust here if the assumption changes
+
+async function scanAllPages(tableName, projectionExpression) {
+  let items = [];
+  let lastKey;
+  do {
+    const params = { TableName: tableName, ExclusiveStartKey: lastKey };
+    if (projectionExpression) params.ProjectionExpression = projectionExpression;
+    const result = await dynamo.send(new ScanCommand(params));
+    items = items.concat(result.Items || []);
+    lastKey = result.LastEvaluatedKey;
+  } while (lastKey);
+  return items;
+}
+
+const getUsersReportHandler = async (event) => {
+  if (!event._isAdmin) return response(403, { error: 'Admin access only' });
+
+  try {
+    // 1. Cognito signups (paginated)
+    let cogUsers = [];
+    let paginationToken;
+    do {
+      const res = await cognito.send(new ListUsersCommand({
+        UserPoolId: USER_POOL_ID,
+        PaginationToken: paginationToken,
+      }));
+      cogUsers = cogUsers.concat(res.Users || []);
+      paginationToken = res.PaginationToken;
+    } while (paginationToken);
+
+    const users = cogUsers.map((u) => ({
+      sub: u.Username,
+      email: (u.Attributes || []).find((a) => a.Name === 'email')?.Value || '',
+      signup_date: u.UserCreateDate ? new Date(u.UserCreateDate).toISOString() : '',
+    }));
+
+    // 2. Document usage grouped by org_id (== sub)
+    const docItems = await scanAllPages(TABLE, 'org_id, page_count, created_at');
+    const usageByOrg = {};
+    for (const d of docItems) {
+      if (!d.org_id) continue;
+      if (!usageByOrg[d.org_id]) usageByOrg[d.org_id] = { totalPages: 0, dates: [] };
+      usageByOrg[d.org_id].totalPages += Number(d.page_count) || 0;
+      if (d.created_at) usageByOrg[d.org_id].dates.push(d.created_at);
+    }
+
+    // 3. Purchase status, keyed by email
+    const creditItems = await scanAllPages(USER_CREDITS_TABLE);
+    const creditsByEmail = {};
+    for (const c of creditItems) creditsByEmail[c.user_email] = c;
+
+    const rows = users.map((u) => {
+      const usage = usageByOrg[u.sub] || { totalPages: 0, dates: [] };
+      const dates = usage.dates.slice().sort();
+      const credit = creditsByEmail[u.email] || {};
+      return {
+        email: u.email,
+        signup_date: u.signup_date,
+        total_pages_run: usage.totalPages,
+        first_activity: dates[0] || '',
+        last_activity: dates[dates.length - 1] || '',
+        distinct_active_days: new Set(dates.map((d) => d.slice(0, 10))).size,
+        page_credits_purchased: credit.page_credits || 0,
+        became_paying_customer: (credit.page_credits || 0) > 0,
+        est_revenue_at_avg_rate_usd: Number((usage.totalPages * AVG_PRICE_PER_PAGE).toFixed(2)),
+      };
+    });
+
+    return response(200, { users: rows, avg_price_per_page_assumption: AVG_PRICE_PER_PAGE });
   } catch (err) {
     return response(500, { error: err.message });
   }
@@ -1795,6 +1892,7 @@ module.exports = {
   dlqWorker:        dlqHandler,
   listByPatient:    validateApiKey(listByPatientHandler),
   listAll:          validateApiKey(listAllHandler),
+  getUsersReport:   validateApiKey(getUsersReportHandler),
   assessRelevance:  validateApiKey(assessRelevanceHandler),
   reassessDocument: validateApiKey(reassessHandler),
   classifyStart:    validateApiKey(classifyStartHandler),
