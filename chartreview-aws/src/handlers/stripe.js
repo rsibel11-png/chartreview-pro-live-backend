@@ -1,4 +1,11 @@
 // stripe.js — Stripe checkout + user credit management
+// Updated: 2026-09-21 — New-user free-page grant raised 100 -> 1000. Also dropped
+//   free_pages_reset_date: it was set to "one month from now" at signup but nothing
+//   in the codebase ever reads it to actually re-grant pages -- it was a one-time
+//   signup allowance masquerading as a recurring monthly one (the frontend even
+//   labeled it "Free Monthly" -- fixed in PagePaymentDialog.tsx too). Existing
+//   users who already have this field in DynamoDB are unaffected; GET /credits
+//   still returns whatever's on their record, it's just never written again.
 // Updated: 2026-08-30 — Pricing updated to match InPractice AI ($0.10–$0.05/page)
 // Updated: 2026-08-22 — Initial Stripe per-page payment integration
 // Uses Node 20 built-in fetch (no stripe SDK dependency needed)
@@ -78,8 +85,7 @@ async function ensureUserRecord(userEmail) {
       Item: {
         user_email: userEmail,
         page_credits: 0,
-        free_pages_remaining: isNewFreeUser ? 100000 : 100,
-        free_pages_reset_date: new Date(new Date().setMonth(new Date().getMonth() + 1)).toISOString(),
+        free_pages_remaining: isNewFreeUser ? 100000 : 1000,
         stripe_customer_id: null,
         created_date: new Date().toISOString(),
       },
