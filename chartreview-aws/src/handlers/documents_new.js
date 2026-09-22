@@ -1770,11 +1770,14 @@ module.exports = {
         }
       }));
 
+      // Updated: 2026-09-21 — Bumped from 300s to 1800s. The frontend now lets large PDFs
+      // (up to MAX_SPLITTABLE_PDF_MB) through to upload instead of blocking them outright,
+      // and a multi-hundred-MB PUT on a slow connection can outlast a 5-minute signature window.
       const uploadUrl = await getSignedUrl(s3, new PutObjectCommand({
         Bucket:      BUCKET,
         Key:         key,
         ContentType: contentType,
-      }), { expiresIn: 300 });
+      }), { expiresIn: 1800 });
 
       return response(200, { upload_url: uploadUrl, aws_document_id, file_key: key });
     } catch (err) {
