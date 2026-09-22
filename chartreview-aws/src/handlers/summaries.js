@@ -99,6 +99,7 @@ const getHandler = async (event) => {
 };
 
 // ─── Update ───────────────────────────────────────────────────────────────────
+// Updated: 2026-09-21 — added visit_sort_mode to the field whitelist (Edit Summary visit sort toggle).
 // Updated: 2026-05-01 — alias DynamoDB reserved words in UpdateExpression; add document_id + summary_content fields
 const updateHandler = async (event) => {
   try {
@@ -122,6 +123,9 @@ const updateHandler = async (event) => {
       'header_note','footer_note','ime_note','chart_review_note',
       'discussion_note','physical_examination_note',
       'document_ids','document_id','summary_content','include_document_list',
+      // Added 2026-09-21 -- persists the Edit Summary visit-list sort choice
+      // (Chronological/Provider/Facility) so the Word export can mirror it.
+      'visit_sort_mode',
     ];
 
     fields.forEach(f => {
