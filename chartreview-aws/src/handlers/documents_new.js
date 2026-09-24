@@ -23,6 +23,13 @@
 // Updated: 2026-09-16 — PT/OT index: vision pre-pass (assess + classify) now extracts pt_visits (PT/OT/hand-therapy encounters with local page numbers + dates), persisted as pt_index. Used by generateSummary coordinator for PT/OT pre-consolidation (first+last per facility group). max_tokens 4096→8192 on the 3 vision calls to fit pt_visits arrays. Additive — no other handler or flow touched.
 // Updated: 2026-09-15 — PATCH whitelist: added emr_flagged_pages / emr_platform / emr_assessed_at (EMR Detector result persistence). Additive only — no other handler or flow touched.
 // Updated: 2026-05-16 — improved CLASSIFY_PROMPT: physician-narrative bar, hospital admin/nursing/order page exclusions
+// Updated: 2026-09-23 -- ToS acceptance gate: new acceptTerms handler (POST /users/accept-terms)
+// records each new user's Terms of Service acceptance (email verified via Cognito JWT, timestamp,
+// ToS version string) onto their existing USER_CREDITS_TABLE record, keyed by user_email. Frontend
+// (Login.tsx) calls GET /stripe/credits first on every post-verify signup so that record already
+// exists with its default free-page grant before this UpdateCommand adds the tos_accepted_at /
+// tos_version fields -- this ordering is required so we never race stripe.js's ensureUserRecord's
+// "create with defaults only if item doesn't exist yet" check. No other flow touched.
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
@@ -1833,6 +1840,43 @@ const getFolderPiiHandler = async (event) => {
   }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// acceptTerms — POST /users/accept-terms
+// Records that the currently-authenticated (Cognito JWT-verified) user has accepted the
+// Terms of Service. Writes tos_accepted_at / tos_version onto their USER_CREDITS_TABLE record
+// (same table stripe.js already keys by user_email) via UpdateCommand, which only touches these
+// two attributes -- it never resets page_credits/free_pages_remaining on an existing record.
+// ═══════════════════════════════════════════════════════════════════════════════
+const acceptTermsHandler = async (event) => {
+  const userEmail = event._userEmail;
+  if (!userEmail) return response(400, { error: 'Could not resolve user email from token' });
+
+  let version = null;
+  try {
+    const data = JSON.parse(event.body || '{}');
+    version = (data.version || '').trim() || null;
+  } catch (err) {
+    return response(400, { error: 'Invalid request body' });
+  }
+  if (!version) return response(400, { error: 'version is required' });
+
+  try {
+    await dynamo.send(new UpdateCommand({
+      TableName: USER_CREDITS_TABLE,
+      Key: { user_email: userEmail },
+      UpdateExpression: 'SET tos_accepted_at = :at, tos_version = :v',
+      ExpressionAttributeValues: {
+        ':at': new Date().toISOString(),
+        ':v':  version,
+      },
+    }));
+    return response(200, { success: true });
+  } catch (err) {
+    console.error('acceptTerms error:', err);
+    return response(500, { error: err.message });
+  }
+};
+
 module.exports = {
   directUpload:   validateApiKey(directUploadHandler),
   getUploadUrl:   validateApiKey(async (event) => {
@@ -1901,5 +1945,6 @@ module.exports = {
   getJob:           validateApiKey(getJobHandler),
   getFullText:      validateApiKey(getTextHandler),
   getFolderPii:     validateApiKey(getFolderPiiHandler),
+  acceptTerms:      validateApiKey(acceptTermsHandler),
   options:          optionsHandler,
 };

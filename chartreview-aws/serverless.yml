@@ -571,6 +571,21 @@ resources:
           method: options
           cors: true
 
+  acceptTerms:
+    handler: src/handlers/documents_new.acceptTerms
+    timeout: 10
+    environment:
+      USER_CREDITS_TABLE: chartreview-user-credits-prod
+    events:
+      - http:
+          path: /users/accept-terms
+          method: post
+          cors: true
+      - http:
+          path: /users/accept-terms
+          method: options
+          cors: true
+
   # ── REDACTION ──
   redactDocumentStart:
     handler: src/handlers/redact_document.redactDocumentStart

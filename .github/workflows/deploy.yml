@@ -70,6 +70,7 @@ jobs:
             "chartreview-pro-prod-classifyStart"
             "chartreview-pro-prod-getJob"
             "chartreview-pro-prod-getFolderPii"
+            "chartreview-pro-prod-acceptTerms"  # Added 2026-09-24 -- ToS acceptance gate (POST /users/accept-terms)
             "chartreview-pro-prod-getUsersReport"  # Added 2026-09-22 -- Lambda function + API Gateway route (GET /admin/users-report) were created manually to match already-committed serverless.yml (see chat 2026-09-22); adding here so future code pushes to documents_new.js keep reaching it through the normal pipeline.
             "chartreview-pro-prod-getUploadUrl"
             "chartreview-pro-prod-directUpload"
