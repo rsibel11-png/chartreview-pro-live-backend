@@ -1151,6 +1151,30 @@ const sanitizeVisits = (visits, patientName) => {
                  setting.includes("workers' compensation report") ||
                  (visit.visit_type || '').toLowerCase().includes('c-4'));
 
+    // Updated: 2026-09-26 -- DETERMINISTIC BACKSTOP for C-4 radiology spillover.
+    // Two prompt-level instructions (SINGLE ENCOUNTER RULE, DO NOT FABRICATE A
+    // RADIOLOGY/TEST VISIT) already tell the model to leave chief_complaint and
+    // imaging_findings empty on C-4 entries -- the model still doesn't reliably
+    // comply (KBatiste 2026-09-26: the C-4 entry still came back with
+    // chief_complaint="Radiology report -- imaging study 1..." and
+    // imaging_findings="X-Ray Findings: No fractures", both borrowed from the
+    // C-4's own inline notation). Per Roman's decision (2026-09-26): do not try
+    // to consolidate/fold that radiology content into the C-4 encounter either --
+    // just wipe it. The C-4's own inline imaging notation is never the source of
+    // truth; real radiology findings belong solely to a genuinely separate
+    // radiology report document elsewhere in the set, which is still fully
+    // captured as its own visit untouched by this rule.
+    if (isC4 && (visit.chief_complaint || visit.imaging_findings)) {
+      if (visit.chief_complaint) {
+        console.log('sanitizeVisits: C-4 radiology spillover -- clearing chief_complaint ["' + visit.chief_complaint + '"] on C-4 entry (' + (visit.visit_date || '') + ')');
+      }
+      if (visit.imaging_findings) {
+        console.log('sanitizeVisits: C-4 radiology spillover -- clearing imaging_findings ["' + visit.imaging_findings + '"] on C-4 entry (' + (visit.visit_date || '') + ')');
+      }
+      visit.chief_complaint = '';
+      visit.imaging_findings = '';
+    }
+
     // ── Admin document detection (runs BEFORE SOAP rescue) ───────────────
     // Admin forms often contain narrative text (HPI about what's being authorized,
     // treatment plans listing what's requested) but are NOT clinical encounters.
